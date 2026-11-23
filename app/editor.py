@@ -1122,6 +1122,28 @@ def _validate_changes(changes) -> None:
             raise HTTPException(400, f"each change needs an op, one of {', '.join(sorted(OPS))}")
 
 
+_FRAMING_WORDS = {"extreme wide": "EWS", "wide": "WS", "medium close": "MCU", "medium": "MS",
+                  "extreme close": "ECU", "close": "CU", "over the shoulder": "OTS",
+                  "over-the-shoulder": "OTS", "point of view": "POV", "two-shot": "2S",
+                  "two shot": "2S", "insert": "INSERT"}
+
+
+def _normalise(c: dict) -> dict:
+    """Accept the near-misses a model writes: `type`/`mode` for make, words for framing."""
+    c = dict(c)
+    if c.get("op") in ("add_shot", "edit_shot"):
+        for alias in ("type", "mode", "kind"):
+            if c.get(alias) in MAKES and not c.get("make"):
+                c["make"] = c.pop(alias)
+        f = c.get("framing")
+        if isinstance(f, str) and f.upper() not in FRAMINGS:
+            low = f.lower()
+            c["framing"] = next((v for k, v in _FRAMING_WORDS.items() if k in low), "")
+        elif isinstance(f, str):
+            c["framing"] = f.upper()
+    return c
+
+
 def apply_changes(project, user: auth.User, changes: list) -> dict:
     """Run a list of edits. New scenes/shots can be named with `key` and referred
     to by that key later in the same list (e.g. add_scene key=s1, add_shot scene=s1)."""
@@ -1134,6 +1156,7 @@ def apply_changes(project, user: auth.User, changes: list) -> dict:
     done = []
     for c in changes:
         project = db.one("SELECT * FROM projects WHERE id=?", (pid,))
+        c = _normalise(c)
         op = c.get("op")
         if op == "set_story":
             set_story(project, title=c.get("title"), story=c.get("story"), aspect=c.get("aspect"))

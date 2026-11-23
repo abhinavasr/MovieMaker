@@ -532,6 +532,9 @@ audio, mix) is given to you in every turn; the person sees the same thing on scr
   shot uses the audio under it that is marked use_in_video, and its reference pictures.
 - To decide whether a track's audio is used for video generation, set use_in_video on its
   clips (edit_clip). Mixing: set_mix / edit_clip (gains in dB, fades, ducking).
+- For every new or changed shot, fill `framing` (EWS|WS|MS|MCU|CU|ECU|OTS|POV|2S|INSERT) and
+  `make` (animate|perform|lipsync) explicitly; a close-up is framing "CU", not just a word in
+  the prompt. Lines of dialogue a character speaks on camera suit `lipsync`.
 - Only use project_id from the state. Keep replies short; the editor shows the details.
 """
 
