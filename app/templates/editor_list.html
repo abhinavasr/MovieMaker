@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% block title %}Editor · Story Studio{% endblock %}
+{% block body %}
+<link rel="stylesheet" href="/static/editor.css">
+<div class="el">
+  <div class="el-head">
+    <div>
+      <h1>Productions</h1>
+      <p class="muted">Write the story with the assistant, build it scene by scene and shot by shot, voice it, score it, mix it, export the film.</p>
+    </div>
+  </div>
+
+  <form class="el-new" id="new">
+    <h2>New production</h2>
+    <input name="title" required maxlength="120" placeholder="Title — e.g. Ramayana" aria-label="Title">
+    <textarea name="story" rows="4" placeholder="The story, in a few lines or a few pages. You can also leave it empty and develop it with the assistant." aria-label="Story"></textarea>
+    <div class="el-row">
+      <label class="el-seg"><input type="radio" name="orientation" value="portrait" checked><span>Portrait 9:16</span></label>
+      <label class="el-seg"><input type="radio" name="orientation" value="landscape"><span>Landscape 16:9</span></label>
+      <button class="ed-btn gold" type="submit">Create and open →</button>
+    </div>
+  </form>
+
+  {% if productions %}
+  <h2 class="el-h2">Your productions</h2>
+  <div class="el-grid">
+    {% for p in productions %}
+    <a class="el-card" href="/edit/{{ p.id }}">
+      <div class="el-thumb">{% if p.thumb %}<img src="{{ p.thumb }}" alt="" loading="lazy">{% else %}<span>🎬</span>{% endif %}</div>
+      <div class="el-meta"><b>{{ p.title }}</b><span>{{ p.shots }} shot{{ "" if p.shots == 1 else "s" }} · {{ p.updated }}</span></div>
+    </a>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  {% if others %}
+  <h2 class="el-h2">Open a storyboard project in the editor</h2>
+  <div class="el-list">
+    {% for p in others %}<a class="ed-btn" href="/edit/{{ p.id }}">{{ p.title }}</a>{% endfor %}
+  </div>
+  {% endif %}
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+document.getElementById("new").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const f = new FormData(e.target);
+  const r = await fetch("/api/editor", {method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({title: f.get("title"), story: f.get("story"), orientation: f.get("orientation")})});
+  const d = await r.json();
+  if (!r.ok) { alert(d.error || "could not create"); return; }
+  location.href = "/edit/" + d.id;
+});
+</script>
+{% endblock %}

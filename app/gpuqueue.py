@@ -282,7 +282,11 @@ async def worker() -> None:
                          message="the GPU filled up; waiting to retry")
                     if unlimited:
                         await _drop_lease()   # hand the card back, then queue again
-                    await asyncio.sleep(2 if unlimited else 20)
+                    # Back off: an engine that keeps answering busy (or is unreachable)
+                    # must not make WIS unload and reload its models every 2 s. On
+                    # 2026-11-23 a test container with no route to the speech engine
+                    # took 269 leases in 25 minutes this way.
+                    await asyncio.sleep(min(120, 2 * 2 ** min(attempts, 6)) if unlimited else 20)
             except Exception as exc:                           # noqa: BLE001
                 log.exception("%s %s failed", kind, row_id)
                 _set(kind, row_id, status="failed", error=(str(exc) or type(exc).__name__)[:500])

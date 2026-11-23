@@ -7,11 +7,16 @@ one ends. REFERENCES (`prod_refs`) are the people, places and voices the film
 keeps returning to; a shot lists the ones in it, and they are sent along when
 its picture or clip is made, which is what keeps a character the same person.
 
-Each shot is made one of two ways:
+Each shot is made one of three ways:
 - animate  -- minimax-h3-i2v: the shot's picture is the first frame. Silent.
 - perform  -- minimax-h3-ref2v: the shot's picture and its references' pictures
               go in as <Picture n>, and the audio clips under the shot that are
-              marked "use in video" go in as <Audio n>. It makes sound too.
+              marked "use in video" go in as <Audio n>. It makes its own sound
+              (the audio is a reference, not lip-synced exactly).
+- lipsync  -- Wan2.2-S2V: the shot's picture and the first use-in-video
+              DIALOGUE clip under it; the mouth follows that exact audio. The
+              line stays on the dialogue track, so the shot's own copy of it is
+              not mixed in again.
 
 The TIMELINE has three audio tracks over the joined shots -- dialogue, ambience,
 music -- plus the performance shots' own sound. A clip has a start, a trim, a
@@ -46,7 +51,7 @@ router = APIRouter()
 TRACKS = ("dialogue", "ambience", "music")
 REF_KINDS = ("character", "location", "prop", "style", "voice")
 FRAMINGS = ("", "EWS", "WS", "MS", "MCU", "CU", "ECU", "OTS", "POV", "2S", "INSERT")
-MAKES = ("animate", "perform")
+MAKES = ("animate", "perform", "lipsync")
 DEFAULT_MIX = {"dialogue": {"gain_db": 0.0, "mute": False},
                "ambience": {"gain_db": -6.0, "mute": False},
                "music": {"gain_db": -8.0, "mute": False},
@@ -268,9 +273,9 @@ def add_shot(project, scene_id: str, title: str = "", prompt: str = "", seconds=
         (in_scene[-1]["idx"] + 0.5 if in_scene else 10 ** 5)
     shot_id = db.new_id("sht")
     params = db.params_of(project)
-    secs = service.clamp_seconds("single" if make == "perform" else "storyboard",
-                                 seconds if seconds is not None else
-                                 params.get("seconds", cfg.DEFAULT_SHOT_SECONDS))
+    make = make if make in MAKES else "animate"
+    secs = _clamp(make, seconds if seconds is not None else
+                  params.get("seconds", cfg.DEFAULT_SHOT_SECONDS))
     db.run("INSERT INTO shots (id, project_id, idx, title, prompt, seconds, scene_id, framing, "
            "refs, make) VALUES (?,?,?,?,?,?,?,?,?,?)",
            (shot_id, pid, base, (title or "")[:80], prompt or "", secs, scene_id,
@@ -281,6 +286,19 @@ def add_shot(project, scene_id: str, title: str = "", prompt: str = "", seconds=
         set_picture(project, user, shot_id, image_id)
     _touch(pid)
     return shot_id
+
+
+def cap_seconds(make: str) -> int:
+    return {"perform": cfg.SINGLE_MAX_SECONDS, "lipsync": cfg.LIPSYNC_MAX_SECONDS}.get(
+        make, cfg.STORYBOARD_MAX_SECONDS)
+
+
+def _clamp(make: str, seconds) -> int:
+    try:
+        v = int(round(float(seconds)))
+    except (TypeError, ValueError):
+        v = cfg.DEFAULT_SHOT_SECONDS
+    return max(1, min(cap_seconds(make), v))
 
 
 def _valid_refs(pid: str, refs: list) -> list:
@@ -300,8 +318,7 @@ def edit_shot(project, shot_id: str, **fields) -> None:
     if fields.get("make") in MAKES:
         sets["make"] = make
     if fields.get("seconds") is not None or "make" in sets:
-        sets["seconds"] = service.clamp_seconds("single" if make == "perform" else "storyboard",
-                                                fields.get("seconds") or shot["seconds"])
+        sets["seconds"] = _clamp(make, fields.get("seconds") or shot["seconds"])
     if fields.get("framing") is not None and fields["framing"] in FRAMINGS:
         sets["framing"] = fields["framing"]
     if fields.get("refs") is not None:
@@ -727,9 +744,12 @@ def render_shots(project, user: auth.User, shot_ids: list[str] | None = None):
             problems.append(f"{label} has no picture")
         if not (s["prompt"] or "").strip():
             problems.append(f"{label} has no prompt (what moves, how the camera moves)")
-        cap = cfg.SINGLE_MAX_SECONDS if s["make"] == "perform" else cfg.STORYBOARD_MAX_SECONDS
+        cap = cap_seconds(s["make"])
         if int(s["seconds"] or 0) > cap:
             problems.append(f"{label} is longer than {cap} s")
+        if s["make"] == "lipsync" and not _dialogue_under(pid, s["id"]):
+            problems.append(f"{label} is a lip-sync shot with no dialogue under it marked "
+                            "\"use in video\" — add a line on the dialogue track first")
     if problems:
         raise HTTPException(400, "; ".join(problems))
     marks = ",".join("?" * len(want))
@@ -740,9 +760,34 @@ def render_shots(project, user: auth.User, shot_ids: list[str] | None = None):
     return render.enqueue(pid, set(want), partial=True)
 
 
+def _dialogue_under(pid: str, shot_id: str) -> list:
+    start, length = timings(pid).get(shot_id, (0.0, 0.0))
+    return [c for c in db.query("SELECT * FROM prod_clips WHERE project_id=? AND track='dialogue' "
+                                "AND status='ready' AND use_in_video=1 ORDER BY start_s", (pid,))
+            if c["path"] and c["start_s"] < start + length and
+            c["start_s"] + (c["duration_s"] or 0) > start]
+
+
 def perform_payload(project_id: str, shot, image_path: str | None, params: dict) -> dict:
-    """The ref2v request for a performance shot (called by app/render.py)."""
+    """The WIS request for a performance or lip-sync shot (called by app/render.py)."""
     pid = project_id
+    if shot.get("make") == "lipsync":
+        lines = _dialogue_under(pid, shot["id"])
+        if not image_path or not lines:
+            raise RuntimeError(f"{shot.get('title') or 'a lip-sync shot'} needs a picture and a "
+                               "use-in-video dialogue line under it")
+        start, length = timings(pid).get(shot["id"], (0.0, float(shot.get("seconds") or 5)))
+        ctx = _shot_context(pid, shot)
+        return {"model": cfg.LIPSYNC_MODEL,
+                "prompt": " ".join(x for x in (shot.get("prompt") or "", ctx) if x)[:3900],
+                "seconds": min(cfg.LIPSYNC_MAX_SECONDS, int(shot.get("seconds") or 5)),
+                "width": int(params.get("width", 480)), "height": int(params.get("height", 864)),
+                "client_request_id": shot["id"],
+                "image": {"b64": wis.b64(Path(image_path).read_bytes()), "mime": "image/png"},
+                # The whole shot window, silence included, so the mouth is still
+                # where the line has not started yet.
+                "reference_audio": [{"b64": wis.b64(_window(lines, start, length)),
+                                     "mime": "audio/wav"}]}
     refs = [db.one("SELECT * FROM prod_refs WHERE id=?", (r,)) for r in _jl(shot.get("refs"), [])]
     refs = [r for r in refs if r is not None]
     pics: list[tuple[str, str]] = []           # (label, path)
@@ -794,6 +839,32 @@ def perform_payload(project_id: str, shot, image_path: str | None, params: dict)
     if params.get("upscale") in ("latent", "refine"):
         payload["upscale"] = params["upscale"]
     return payload
+
+
+def _window(lines: list, start: float, length: float) -> bytes:
+    """The dialogue under a shot as one WAV exactly as long as the shot."""
+    inputs, parts = [], []
+    for i, c in enumerate(lines):
+        a = max(start, c["start_s"])
+        b = min(start + length, c["start_s"] + (c["duration_s"] or 0))
+        if b <= a:
+            continue
+        offset = c["trim_s"] + (a - c["start_s"])
+        inputs += ["-i", c["path"]]
+        parts.append(f"[{len(parts)}:a]atrim=start={offset:.3f}:duration={b - a:.3f},"
+                     f"asetpts=PTS-STARTPTS,aresample=44100,aformat=channel_layouts=mono,"
+                     f"adelay={int((a - start) * 1000)}:all=1[p{len(parts)}]")
+    n = len(parts)
+    graph = ";".join(parts) + ";" + "".join(f"[p{i}]" for i in range(n)) + \
+        (f"amix=inputs={n}:normalize=0," if n > 1 else "anull,") + \
+        f"apad=whole_dur={length:.3f},atrim=duration={length:.3f}[out]"
+    proc = subprocess.run(["ffmpeg", "-v", "error", *inputs, "-filter_complex", graph,
+                           "-map", "[out]", "-ac", "1", "-ar", "44100", "-f", "wav", "pipe:1"],
+                          capture_output=True, timeout=120)
+    if proc.returncode != 0 or not proc.stdout:
+        raise RuntimeError("could not cut the dialogue for the lip-sync shot: " +
+                           proc.stderr.decode(errors="replace")[-300:])
+    return proc.stdout
 
 
 def _cut(clip, shot_start: float, shot_len: float) -> bytes:
@@ -853,6 +924,7 @@ def _mix_film(project) -> Path:
     labels: dict[str, list[str]] = {"dialogue": [], "ambience": [], "music": [], "shot": []}
     t = 0.0
     for i, s in enumerate(shots):
+        # Lip-sync shots carry the dialogue line, which is already on its track.
         if s["make"] == "perform" and not mix["shot"]["mute"] and _has_audio(s["clip_path"]):
             lab = f"sa{i}"
             filters.append(f"[{i}:a]atrim=duration={s['seconds']},asetpts=PTS-STARTPTS,"
@@ -1178,7 +1250,7 @@ def state(project, base: str) -> dict:
         "agent_applies": bool(params.get("agent_applies")),
         "thread_id": thread["id"] if thread else None,
         "speakers": sorted(speech.SPEAKERS), "framings": list(FRAMINGS),
-        "limits": {"animate": cfg.STORYBOARD_MAX_SECONDS, "perform": cfg.SINGLE_MAX_SECONDS},
+        "limits": {m: cap_seconds(m) for m in MAKES},
         **service.retention(project["updated_at"]), "now": db.now(),
     }
 
@@ -1235,8 +1307,9 @@ def describe_for_agent(project_id: str, focus_shot: str | None = None) -> str:
     if props:
         lines.append("Open proposals (waiting for the person): " +
                      "; ".join(f"{p['id']} {p['title']}" for p in props))
-    lines.append(f"Total {sum(tm[s['id']][1] for s in shots):g}s. Animate shots max "
-                 f"{cfg.STORYBOARD_MAX_SECONDS}s, perform shots max {cfg.SINGLE_MAX_SECONDS}s. "
+    lines.append(f"Total {sum(tm[s['id']][1] for s in shots):g}s. Shot length caps: animate "
+                 f"{cap_seconds('animate')}s, perform {cap_seconds('perform')}s, lipsync "
+                 f"{cap_seconds('lipsync')}s. "
                  + ("The person lets you apply changes directly."
                     if params.get("agent_applies") else
                     "Edits you make with propose_changes wait for the person to apply them."))
@@ -1360,7 +1433,9 @@ AGENT_TOOLS = {
                         "used as its id later in the same list. framing: " +
                         "|".join(f for f in FRAMINGS if f) + ". make: animate (silent, picture "
                         "is the first frame) | perform (ref2v: picture + reference pictures + "
-                        "use-in-video audio under the shot; makes sound)."}}},
+                        "use-in-video audio under the shot; makes its own sound) | lipsync "
+                        "(Wan S2V: the picture speaks/sings the use-in-video dialogue line "
+                        "under the shot, mouth in sync)."}}},
         "description": "Edit the production (story, scenes, shots, references, audio clips, "
                        "mix). The person reviews and applies the proposal unless they let you "
                        "apply directly. Use it for any change to the story structure or mix."},

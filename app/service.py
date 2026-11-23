@@ -68,6 +68,8 @@ def limits(mode: str) -> tuple[int, int]:
 
 
 def delete_project_files(project_id: str) -> None:
+    from app import editor            # a production's scenes, references, audio, proposals
+    editor.delete_production_rows(project_id)
     for base in (cfg.uploads_dir, cfg.outputs_dir):
         shutil.rmtree(base / project_id, ignore_errors=True)
 

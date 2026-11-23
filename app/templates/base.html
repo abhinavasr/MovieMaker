@@ -13,6 +13,7 @@
   <nav>
     {% if user %}
       {% if user.is_admin %}<a href="/admin">Users</a>{% endif %}
+      <a href="/edit">Editor</a>
       <a href="/assistant">Assistant</a>
       <a href="/studio">Projects</a>
       <a href="/speech">Speech</a>

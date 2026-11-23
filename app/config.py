@@ -104,6 +104,9 @@ class Config:
     # capped at 15 and a 13 s shot failed the whole render ("EP01 3D group A").
     STORYBOARD_MAX_SECONDS = _i("STUDIO_STORYBOARD_MAX_SECONDS", 11)
     SINGLE_MAX_SECONDS = _i("STUDIO_SINGLE_MAX_SECONDS", 15)
+    # Lip-sync shots: Wan2.2-S2V through WIS (picture + the dialogue under the shot).
+    LIPSYNC_MODEL = _s("STUDIO_LIPSYNC_MODEL", "wan2.2-s2v")
+    LIPSYNC_MAX_SECONDS = _i("STUDIO_LIPSYNC_MAX_SECONDS", 10)
     # Per user, per rolling hour. The box has one GPU and a clip is ~2m15s of
     # it, so this is a real resource, not a formality.
     USER_RENDERS_PER_HOUR = _i("STUDIO_USER_RENDERS_PER_HOUR", 10)

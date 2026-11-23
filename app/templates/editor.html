@@ -1,0 +1,107 @@
+{% extends "base.html" %}
+{% block title %}{{ project.title }} · Editor · Story Studio{% endblock %}
+{% block body %}
+<link rel="stylesheet" href="/static/agent.css">
+<link rel="stylesheet" href="/static/editor.css">
+<div class="ed" id="ed" data-pid="{{ project.id }}">
+  <div class="ed-top">
+    <button class="ed-btn ghost icon ed-only-narrow" id="open-left" type="button" aria-label="Scenes and references">☰</button>
+    <input class="ed-title" id="ptitle" value="{{ project.title }}" aria-label="Production title" maxlength="120">
+    <nav class="ed-views" aria-label="Views">
+      <button type="button" data-view="storyboard" class="on">▦ <span class="t">Storyboard</span></button>
+      <button type="button" data-view="assets">🖼 <span class="t">Assets</span></button>
+      <button type="button" data-view="timeline">☰ <span class="t">Timeline</span></button>
+    </nav>
+    <div class="ed-topr">
+      <div class="ed-render" id="render-state"></div>
+      <button class="ed-btn sm" id="render-missing" type="button" title="Generate every shot that has no up-to-date clip">▶ Render missing</button>
+      <button class="ed-btn outline" id="export" type="button">⤓ Export</button>
+    </div>
+  </div>
+
+  <div class="ed-body" id="body">
+    <!-- left: scenes + references -->
+    <aside class="ed-left" id="left">
+      <section>
+        <div class="ed-sec-h"><h2>Scenes</h2><button class="ed-btn ghost icon" id="add-scene" type="button" title="Add a scene" aria-label="Add a scene">＋</button></div>
+        <div class="ed-scenes" id="scenes"></div>
+      </section>
+      <section>
+        <div class="ed-sec-h"><h2>Project references</h2><button class="ed-btn ghost icon" id="add-ref" type="button" title="Add a character, place or voice" aria-label="Add reference">＋</button></div>
+        <div class="ed-refs" id="refs"></div>
+      </section>
+    </aside>
+
+    <!-- center -->
+    <section class="ed-center" id="center">
+      <div id="v-storyboard" style="display:contents">
+        <div class="ed-crumbs"><span class="sc" id="crumb-scene"></span><span class="sc">›</span><span class="sh" id="crumb-shot"></span>
+          <div class="nav"><button class="ed-btn icon" id="prev" type="button" aria-label="Previous shot">‹</button><button class="ed-btn icon" id="next" type="button" aria-label="Next shot">›</button></div></div>
+        <div class="ed-stage-wrap">
+          <div class="ed-stage" id="stage"></div>
+          <div class="ed-player">
+            <button class="ed-btn icon" id="play" type="button" aria-label="Play">▶</button>
+            <span id="ptime">0:00.0 / 0:00.0</span>
+            <input type="range" id="scrub" min="0" max="1000" value="0" aria-label="Position">
+            <select id="prange" class="ed-btn sm" aria-label="Play range"><option value="shot">This shot</option><option value="scene" selected>This scene</option><option value="film">Whole film</option></select>
+          </div>
+        </div>
+        <div class="ed-strip" id="strip"></div>
+      </div>
+      <div id="v-assets" class="ed-assets" hidden></div>
+      <div class="ed-tl" id="tl">
+        <div class="ed-tl-bar"><b id="tl-title">Scene timeline</b><span id="tl-time"></span><span class="sp"></span>
+          <label>Duck music under dialogue <select id="duck"><option value="0">off</option><option value="-6">-6 dB</option><option value="-10">-10 dB</option><option value="-14">-14 dB</option><option value="-20">-20 dB</option></select></label></div>
+        <div class="ed-lanes" id="lanes"></div>
+        <div class="ed-hint">Click an empty spot on a lane to add a line of dialogue, music or ambience there · drag clips to move, drag their right edge to trim · click a clip to mix it</div>
+      </div>
+    </section>
+
+    <!-- right: inspector + agent -->
+    <aside class="ed-right" id="right">
+      <div class="ed-insp-h"><h2 id="insp-title">Shot</h2><button class="ed-btn ghost icon" id="insp-more" type="button" title="Delete" aria-label="Delete">🗑</button></div>
+      <div class="ed-tabs" role="tablist">
+        <button type="button" data-tab="shot" class="on" role="tab">Shot</button>
+        <button type="button" data-tab="agent" role="tab">Agent <span class="n" id="prop-n" hidden></span></button>
+      </div>
+      <div class="ed-pane" id="pane-shot"></div>
+      <div class="ed-pane chat" id="pane-agent" hidden>
+        <div class="ws-center" id="chatroot" style="flex:1;min-height:0">
+          <div class="ws-feed" id="feed"><div class="ws-col" id="col">
+            <div class="ws-empty" id="empty" style="padding:16px 6px">
+              <h2 style="font-size:1.1rem">Work on the story together</h2>
+              <p style="font-size:.84rem;margin-bottom:12px">Talk about the whole story or the shot you're on. I propose changes you apply, make pictures, voice lines, score scenes, render clips ahead, and help you mix.</p>
+              <div class="ed-quick" id="quick-empty"></div>
+            </div>
+          </div></div>
+          <button class="ws-btn ws-jump" id="jump" type="button" hidden>↓ New activity</button>
+          <div class="ws-dock"><div class="ws-col">
+            <div class="ed-scopebar">Talking about <button type="button" data-scope="shot" class="on" id="scope-shot">this shot</button><button type="button" data-scope="story" id="scope-story">the whole story</button>
+              <label class="ed-switch" style="margin-left:auto" title="Let the assistant apply edits without asking"><input type="checkbox" id="applies"> apply directly</label></div>
+            <div class="ed-quick" id="quick"></div>
+            <div class="ws-status" id="status" aria-live="polite"><span class="ws-dot" id="st-dot"></span><span class="txt" id="st-txt">Ready.</span><button class="ws-btn sm danger" id="stop" type="button" hidden>■ Stop</button></div>
+            <div class="ws-pending" id="pending"></div>
+            <form class="ws-box" id="say">
+              <div class="ws-slash" id="slash" hidden></div>
+              <button class="ws-btn ghost ws-icon" id="attach" type="button" title="Attach files" aria-label="Attach files">📎</button>
+              <textarea id="text" rows="1" placeholder="Ask about this shot or the story…" aria-label="Message"></textarea>
+              <button class="ws-btn primary ws-icon" type="submit" id="send" aria-label="Send">➤</button>
+              <input type="file" id="file" multiple hidden accept="{{ accept }}">
+            </form>
+          </div></div>
+          <div class="ws-drop">Drop files for the assistant</div>
+        </div>
+      </div>
+    </aside>
+  </div>
+</div>
+
+<div class="ed-pop" id="pop" hidden></div>
+<div class="ed-modal" id="modal" hidden><div class="ed-sheet" id="sheet"></div></div>
+<div class="ws-lb" id="lb" hidden><div class="in"></div></div>
+<div class="ed-toast" id="toast" hidden></div>
+{% endblock %}
+{% block scripts %}
+<script src="/static/agent-chat.js"></script>
+<script src="/static/editor.js"></script>
+{% endblock %}

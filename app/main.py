@@ -23,7 +23,7 @@ from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
                                PlainTextResponse, RedirectResponse)
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from app import (agent, agentfiles, auth, db, gpuqueue, images, mcp, music, oauth, render, service, speech, styles,
+from app import (agent, agentfiles, auth, editor, db, gpuqueue, images, mcp, music, oauth, render, service, speech, styles,
                  voices, wis)
 from app.config import cfg
 
@@ -109,6 +109,7 @@ app.include_router(mcp.router)
 app.include_router(voices.router)
 app.include_router(styles.router)
 app.include_router(agent.router)
+app.include_router(editor.router)
 
 
 async def _reap_loop() -> None:
@@ -197,6 +198,30 @@ async def root(request: Request):
     if user is None:
         return RedirectResponse("/login", status_code=303)
     return RedirectResponse("/admin" if user.is_admin else "/assistant", status_code=303)
+
+
+@app.get("/edit", response_class=HTMLResponse)
+async def editor_list(request: Request):
+    user = _user(request)
+    prods = [{"id": p["id"], "title": p["title"], "status": p["status"],
+              "updated": _iso(p["updated_at"]), "thumb": editor.first_picture(p["id"]),
+              "shots": db.one("SELECT COUNT(*) AS n FROM shots WHERE project_id=?", (p["id"],))["n"]}
+             for p in editor.productions_of(user)]
+    others = [p for p in db.query("SELECT id, title, updated_at FROM projects WHERE user_id=? AND "
+                                  "mode='storyboard' ORDER BY updated_at DESC LIMIT 30", (user.id,))
+              if p["id"] not in {x["id"] for x in prods}]
+    return templates.TemplateResponse("editor_list.html", {
+        "request": request, "user": user, "productions": prods, "others": others})
+
+
+@app.get("/edit/{project_id}", response_class=HTMLResponse)
+async def editor_page(project_id: str, request: Request):
+    user = _user(request)
+    project = editor.production(user, project_id)
+    return templates.TemplateResponse("editor.html", {
+        "request": request, "user": user, "project": project, "planner": cfg.PLANNER_MODEL,
+        "executor": cfg.EXECUTOR_MODEL,
+        "accept": ",".join(agentfiles.ACCEPT) + ",image/*,audio/*,video/*"})
 
 
 @app.get("/assistant", response_class=HTMLResponse)
