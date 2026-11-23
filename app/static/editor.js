@@ -57,6 +57,7 @@
 
   function paint() {
     if (document.activeElement !== $("ptitle")) $("ptitle").value = S.title;
+    if (document.activeElement !== $("aspect")) $("aspect").value = S.aspect;
     paintScenes(); paintRefs(); paintRender();
     if (view === "assets") paintAssets();
     else { paintCrumbs(); if (!Player.playing) paintStage(); paintStrip(); }
@@ -193,9 +194,11 @@
     const mk = `<span class="ed-badge">${{animate: "🎞", perform: "🎭", lipsync: "👄"}[sh.make]} ${MAKE[sh.make][0]}${sh.framing ? " · " + sh.framing : ""} · ${sh.seconds}s</span>`;
     const state = sh.status === "done" ? "clip ready" : sh.status === "stale" ? "changed since rendered" : sh.status === "failed" ? "failed" : sh.clip ? "" : "not rendered";
     if (sh.clip && Player.mode !== "stage-img") {
-      st.innerHTML = `<video id="stage-v" src="${esc(sh.clip)}" playsinline preload="auto" ${Player.playing ? "" : "controls"}></video>${mk}<span class="ed-badge r">${esc(state)}</span>`;
+      st.innerHTML = `<div class="ed-frame" id="frame"><video id="stage-v" src="${esc(sh.clip)}" playsinline preload="auto" ${Player.playing ? "" : "controls"}></video></div>${mk}<span class="ed-badge r">${esc(state)}</span>`;
+      fitFrame();
     } else if (sh.picture) {
-      st.innerHTML = `<img id="stage-i" src="${esc(sh.picture)}" alt="" class="${Player.playing ? "kb" : ""}">${mk}<span class="ed-badge r">${esc(state)}</span>`;
+      st.innerHTML = `<div class="ed-frame" id="frame"><img id="stage-i" src="${esc(sh.picture)}" alt="" class="${Player.playing ? "kb" : ""}"></div>${mk}<span class="ed-badge r">${esc(state)}</span>`;
+      fitFrame();
     } else {
       st.innerHTML = `<div class="empty"><b>No picture for this shot yet</b>Generate options with its references, upload one, or ask the agent.<br><br><button class="ed-btn gold" id="stage-gen">🖼 Generate picture options</button> <button class="ed-btn" id="stage-up">⤒ Upload</button></div>${mk}`;
       $("stage-gen").onclick = () => { setTab("shot"); genOpen = "image"; paintInspector(); };
@@ -204,6 +207,20 @@
     if (busy) st.insertAdjacentHTML("beforeend", `<div class="busy">⏳ ${esc(S.message || "rendering")}</div>`);
     if (sh.status === "failed" && sh.error) st.insertAdjacentHTML("beforeend", `<span class="ed-badge" style="top:auto;bottom:10px;color:var(--bad);max-width:90%">${esc(sh.error)}</span>`);
   }
+  const RATIO = {"9:16": 9 / 16, "16:9": 16 / 9, "1:1": 1, "2.39:1": 2.39};
+  function fitFrame() {
+    const st = $("stage"), f = $("frame"); if (!f) return;
+    const r = RATIO[S.aspect] || 9 / 16, W = st.clientWidth, H = st.clientHeight;
+    const w = Math.min(W, H * r), h = w / r;
+    f.style.width = w + "px"; f.style.height = h + "px";
+  }
+  addEventListener("resize", () => S && fitFrame());
+  $("aspect").onchange = async () => {
+    const v = $("aspect").value;
+    try { const r = await api(`/api/editor/${PID}/settings`, {aspect: v});
+      toast(r.rerender ? `Now ${v}. Rendered clips were made for the old shape and are marked to render again.` : `Now ${v}` + (v === "2.39:1" ? " — rendered 16:9, cropped to scope on export" : ""));
+      load(true); } catch (e) { toast(e.message); }
+  };
   function uploadPicture(shotId) {
     const inp = document.createElement("input"); inp.type = "file"; inp.accept = "image/*";
     inp.onchange = async () => { const fd = new FormData(); fd.append("file", inp.files[0]);

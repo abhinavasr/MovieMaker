@@ -58,6 +58,18 @@ DEFAULT_MIX = {"dialogue": {"gain_db": 0.0, "mute": False},
                "shot": {"gain_db": -4.0, "mute": False},
                "duck_db": -10.0}
 MAX_SHOTS = 80
+# The film's shape. The video models render three native 0.4 MP sizes on this
+# card; "2.39:1" (scope) is rendered 16:9 and cropped to scope when exported, so
+# compose with the middle of the frame. Value: (render orientation, crop ratio).
+ASPECTS = {"9:16": ("portrait", None), "16:9": ("landscape", None),
+           "1:1": ("square", None), "2.39:1": ("landscape", 2.39)}
+
+
+def aspect_of(params: dict) -> str:
+    a = params.get("aspect")
+    if a in ASPECTS:
+        return a
+    return {"landscape": "16:9", "square": "1:1"}.get(params.get("orientation"), "9:16")
 MAX_AUDIO_REFS = 3
 MAX_IMAGE_REFS = 9
 _exporting: set[str] = set()
@@ -187,23 +199,44 @@ def _jl(text, default):
 # Every edit goes through these, whether the person made it on the page, an
 # applied proposal made it, or the assistant made it directly.
 
-def create(user: auth.User, title: str, story: str = "", orientation: str = "portrait") -> str:
+def create(user: auth.User, title: str, story: str = "", aspect: str = "9:16") -> str:
     pid = service.create_project(user, (title or "Untitled production")[:120], "storyboard",
                                  story or "")
     project = db.one("SELECT * FROM projects WHERE id=?", (pid,))
     params = db.params_of(project)
     params["editor"] = True
-    if orientation == "landscape":
-        params.update(orientation="landscape", width=864, height=480)
     db.set_params(pid, params)
+    set_aspect(db.one("SELECT * FROM projects WHERE id=?", (pid,)), aspect)
     _new_scene(pid, "Scene 1", "", 0)
     return pid
 
 
+def set_aspect(project, aspect: str) -> bool:
+    """Change the film's shape. Returns True when existing clips no longer fit
+    (they are marked changed so they render again at the new size)."""
+    aspect = {"portrait": "9:16", "landscape": "16:9", "square": "1:1"}.get(aspect, aspect)
+    if aspect not in ASPECTS:
+        raise HTTPException(400, f"aspect must be one of {', '.join(ASPECTS)}")
+    params = db.params_of(project)
+    before = service.SIZES.get(params.get("orientation") or "portrait")
+    orientation = ASPECTS[aspect][0]
+    service.save_settings(project, orientation=orientation)
+    params = db.params_of(db.one("SELECT * FROM projects WHERE id=?", (project["id"],)))
+    params["aspect"] = aspect
+    db.set_params(project["id"], params)
+    resized = before != service.SIZES[orientation]
+    if resized:
+        db.run("UPDATE shots SET status='stale' WHERE project_id=? AND status='done'",
+               (project["id"],))
+    _touch(project["id"])
+    return resized
+
+
 def set_story(project, title: str | None = None, story: str | None = None,
-              orientation: str | None = None) -> None:
-    service.save_settings(project, title=title, story=story,
-                          **({"orientation": orientation} if orientation else {}))
+              aspect: str | None = None) -> None:
+    service.save_settings(project, title=title, story=story)
+    if aspect:
+        set_aspect(db.one("SELECT * FROM projects WHERE id=?", (project["id"],)), aspect)
 
 
 def add_scene(project, title: str = "", summary: str = "", position: int | None = None) -> str:
@@ -916,8 +949,10 @@ def _mix_film(project) -> Path:
         filters.append(f"[{i}:v]scale={w * k}:{h * k}:flags=lanczos,setsar=1,fps=24,"
                        f"tpad=stop_mode=clone:stop_duration=30,trim=duration={s['seconds']},"
                        f"setpts=PTS-STARTPTS[v{i}]")
+    crop = ASPECTS[aspect_of(params)][1]
+    tail = f",crop=iw:trunc(iw/{crop}/2)*2" if crop else ""
     filters.append("".join(f"[v{i}]" for i in range(len(shots))) +
-                   f"concat=n={len(shots)}:v=1:a=0[vout]")
+                   f"concat=n={len(shots)}:v=1:a=0{tail}[vout]")
 
     # 2) sound: the performance shots' own audio, then every timeline clip.
     n = len(shots)
@@ -1101,7 +1136,7 @@ def apply_changes(project, user: auth.User, changes: list) -> dict:
         project = db.one("SELECT * FROM projects WHERE id=?", (pid,))
         op = c.get("op")
         if op == "set_story":
-            set_story(project, title=c.get("title"), story=c.get("story"))
+            set_story(project, title=c.get("title"), story=c.get("story"), aspect=c.get("aspect"))
         elif op == "add_scene":
             keys[c.get("key") or f"scene{len(keys)}"] = add_scene(
                 project, c.get("title", ""), c.get("summary", ""), c.get("position"))
@@ -1241,6 +1276,7 @@ def state(project, base: str) -> dict:
     return {
         "id": pid, "title": project["title"], "story": project["story"],
         "orientation": params.get("orientation", "portrait"),
+        "aspect": aspect_of(params), "aspects": list(ASPECTS),
         "size": [int(params.get("width", 480)), int(params.get("height", 864))],
         "status": project["status"], "progress": project["progress"],
         "message": project["message"], "error": project["error"],
@@ -1264,7 +1300,9 @@ def describe_for_agent(project_id: str, focus_shot: str | None = None) -> str:
     params = db.params_of(project)
     tm = timings(project_id)
     lines = [f"PRODUCTION project_id={project_id} \"{project['title']}\" "
-             f"({params.get('orientation', 'portrait')}, render: {project['status']} "
+             f"(aspect {aspect_of(params)}"
+             f"{', rendered 16:9 and cropped to scope: keep action in the middle band' if aspect_of(params) == '2.39:1' else ''}"
+             f", render: {project['status']} "
              f"{project['progress']}% {project['message'] or ''})",
              f"Story: {(project['story'] or '(none yet)')[:2500]}"]
     refs = db.query("SELECT * FROM prod_refs WHERE project_id=? ORDER BY idx", (project_id,))
@@ -1420,7 +1458,8 @@ AGENT_TOOLS = {
             **_PID, "title": {"type": "string"}, "summary": {"type": "string"},
             "shot_id": {"type": "string", "description": "the shot this is about, if one"},
             "changes": {"type": "array", "items": {"type": "object"}, "description":
-                        "ordered edits, each {op, ...}. ops: set_story{title,story}; "
+                        "ordered edits, each {op, ...}. ops: set_story{title,story,aspect "
+                        "(9:16|16:9|1:1|2.39:1)}; "
                         "add_scene{key,title,summary,position}; edit_scene{scene_id,title,"
                         "summary,position}; delete_scene{scene_id}; add_shot{key,scene_id,title,"
                         "prompt,seconds,framing,refs,make,position,image_id}; edit_shot{shot_id,"
@@ -1505,7 +1544,7 @@ async def api_create(request: Request):
     user = _user(request)
     b = await _body(request)
     pid = create(user, str(b.get("title") or "Untitled production"), str(b.get("story") or ""),
-                 str(b.get("orientation") or "portrait"))
+                 str(b.get("aspect") or b.get("orientation") or "9:16"))
     return {"id": pid}
 
 
@@ -1520,15 +1559,18 @@ async def api_settings(pid: str, request: Request):
     user = _user(request)
     project = production(user, pid)
     b = await _body(request)
-    if any(k in b for k in ("title", "story", "orientation")):
-        set_story(project, b.get("title"), b.get("story"), b.get("orientation"))
+    out = {"ok": True}
+    if any(k in b for k in ("title", "story")):
+        set_story(project, b.get("title"), b.get("story"))
+    if b.get("aspect"):
+        out["rerender"] = set_aspect(db.one("SELECT * FROM projects WHERE id=?", (pid,)), b["aspect"])
     if "agent_applies" in b:
         params = db.params_of(db.one("SELECT * FROM projects WHERE id=?", (pid,)))
         params["agent_applies"] = bool(b["agent_applies"])
         db.set_params(pid, params)
     if "mix" in b and isinstance(b["mix"], dict):
         set_mix(db.one("SELECT * FROM projects WHERE id=?", (pid,)), **b["mix"])
-    return {"ok": True}
+    return out
 
 
 @router.post("/api/editor/{pid}/changes")

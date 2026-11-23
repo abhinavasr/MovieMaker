@@ -15,8 +15,10 @@
     <input name="title" required maxlength="120" placeholder="Title — e.g. Ramayana" aria-label="Title">
     <textarea name="story" rows="4" placeholder="The story, in a few lines or a few pages. You can also leave it empty and develop it with the assistant." aria-label="Story"></textarea>
     <div class="el-row">
-      <label class="el-seg"><input type="radio" name="orientation" value="portrait" checked><span>Portrait 9:16</span></label>
-      <label class="el-seg"><input type="radio" name="orientation" value="landscape"><span>Landscape 16:9</span></label>
+      <label class="el-seg"><input type="radio" name="aspect" value="9:16" checked><span>▯ 9:16 vertical</span></label>
+      <label class="el-seg"><input type="radio" name="aspect" value="16:9"><span>▭ 16:9 widescreen</span></label>
+      <label class="el-seg"><input type="radio" name="aspect" value="1:1"><span>□ 1:1 square</span></label>
+      <label class="el-seg"><input type="radio" name="aspect" value="2.39:1" title="Rendered 16:9, cropped to scope on export"><span>▬ 2.39:1 cinema</span></label>
       <button class="ed-btn gold" type="submit">Create and open →</button>
     </div>
   </form>
@@ -47,7 +49,7 @@ document.getElementById("new").addEventListener("submit", async (e) => {
   e.preventDefault();
   const f = new FormData(e.target);
   const r = await fetch("/api/editor", {method: "POST", headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({title: f.get("title"), story: f.get("story"), orientation: f.get("orientation")})});
+    body: JSON.stringify({title: f.get("title"), story: f.get("story"), aspect: f.get("aspect")})});
   const d = await r.json();
   if (!r.ok) { alert(d.error || "could not create"); return; }
   location.href = "/edit/" + d.id;
