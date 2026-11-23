@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Story Studio API Spec</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&family=Fraunces:opsz,wght@9..144,600&display=swap">
+<style>
+/* Layout: a reference manual — fixed contents rail on wide screens, one readable column, file actions in a slim top bar. */
+:root{
+  --paper:#f6f7f9; --sheet:#ffffff; --ink:#18202b; --muted:#5b6575; --rule:#dde2ea;
+  --accent:#1f5fbf; --accent-soft:#e6eefb; --code:#eef1f5; --ok:#1f7a4d;
+  --display:"Fraunces",Georgia,"Times New Roman",serif;
+  --body:"IBM Plex Sans",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
+  --paper:#0f141b; --sheet:#151b24; --ink:#e3e8ef; --muted:#9aa5b5; --rule:#273141;
+  --accent:#7aa8ff; --accent-soft:#1b2a44; --code:#1c2430; --ok:#5fd19a; color-scheme:dark}}
+:root[data-theme="dark"]{
+  --paper:#0f141b; --sheet:#151b24; --ink:#e3e8ef; --muted:#9aa5b5; --rule:#273141;
+  --accent:#7aa8ff; --accent-soft:#1b2a44; --code:#1c2430; --ok:#5fd19a; color-scheme:dark}
+body{background:var(--paper);color:var(--ink);font:15px/1.6 var(--body)}
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:10;background:var(--sheet)}
+.bar{position:sticky;top:env(safe-area-inset-top,0px);z-index:5;background:var(--sheet);border-bottom:1px solid var(--rule);
+  padding-block:10px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));
+  display:flex;flex-wrap:wrap;gap:8px 16px;align-items:center;justify-content:space-between}
+.bar h1{font:600 1.15rem/1.2 var(--display);margin:0;text-wrap:balance}
+.bar .sub{color:var(--muted);font-size:.8rem;letter-spacing:.02em}
+.actions{display:flex;flex-wrap:wrap;gap:8px}
+button,.btn{font:500 .85rem var(--body);text-decoration:none;display:inline-block;border:1px solid var(--rule);background:var(--sheet);color:var(--ink);border-radius:6px;padding:7px 12px;cursor:pointer}
+.btn.primary,button.primary{background:var(--accent);border-color:var(--accent);color:var(--sheet)}
+button:focus-visible,a:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.status{font-size:.8rem;color:var(--ok);min-height:1.2em;flex-basis:100%;text-align:right}
+.wrap{display:grid;grid-template-columns:260px minmax(0,1fr);gap:32px;max-width:1240px;margin:0 auto;
+  padding-block:24px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
+nav.toc{position:sticky;top:calc(env(safe-area-inset-top,0px) + 76px);align-self:start;max-height:calc(100vh - 100px);overflow:auto;font-size:.85rem}
+nav.toc .label{font:500 .72rem var(--mono);text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin:0 0 8px}
+nav.toc a{display:block;color:var(--muted);text-decoration:none;padding:3px 0 3px 10px;border-left:2px solid transparent}
+nav.toc a.l3{padding-left:22px;font-size:.8rem}
+nav.toc a:hover{color:var(--accent);border-left-color:var(--accent)}
+article{background:var(--sheet);border:1px solid var(--rule);border-radius:10px;padding:8px 32px 40px;min-width:0}
+article h1{font:600 1.9rem/1.2 var(--display);margin:24px 0 8px;text-wrap:balance}
+article h2{font:600 1.4rem/1.25 var(--display);margin:40px 0 8px;padding-top:16px;border-top:1px solid var(--rule);text-wrap:balance}
+article h3{font-size:1.08rem;margin:28px 0 6px}
+article h4{font:500 .95rem var(--mono);margin:24px 0 6px;color:var(--accent)}
+article p,article li{max-width:75ch}
+article code{font:.86em var(--mono);background:var(--code);padding:1px 5px;border-radius:4px}
+article pre{background:var(--code);padding:12px 14px;border-radius:8px;overflow-x:auto;font:.82rem/1.5 var(--mono)}
+article pre code{background:none;padding:0}
+article .tbl{overflow-x:auto;margin:12px 0}
+article table{border-collapse:collapse;font-size:.85rem;min-width:100%}
+article th,article td{border:1px solid var(--rule);padding:6px 9px;text-align:left;vertical-align:top}
+article th{background:var(--accent-soft);font-weight:600}
+article hr{border:0;border-top:1px solid var(--rule);margin:32px 0}
+article a{color:var(--accent)}
+.raw{white-space:pre-wrap;font:.82rem/1.5 var(--mono)}
+@media (max-width:860px){.wrap{grid-template-columns:minmax(0,1fr)} nav.toc{position:static;max-height:none;border-bottom:1px solid var(--rule);padding-bottom:12px} nav.toc a.l3{display:none} article{padding:4px 16px 32px}}
+@media (prefers-reduced-motion:reduce){*{scroll-behavior:auto!important}}
+html{scroll-behavior:smooth}
+</style>
+</head>
+<body>
+<div class="bar">
+  <div><h1>Story Studio API Spec</h1><div class="sub">Generated {{ built }} · video, pictures, speech, songs, personal voices · MCP at <code>{{ base }}/mcp</code></div></div>
+  <div class="actions">
+    <a class="btn primary" href="/dev/STUDIO_API_SPEC.md?download=1">Download complete spec (.md)</a>
+    <a class="btn" href="/dev/VOICE_API_SPEC.md?download=1">Download voice spec (.md)</a>
+    <button id="copy" type="button">Copy as Markdown</button>
+  </div>
+  <div class="status" id="status" role="status"></div>
+</div>
+<div class="wrap">
+  <nav class="toc" id="toc" aria-label="Contents"><p class="label">Contents</p></nav>
+  <article id="doc"><div class="raw" id="fallback"></div></article>
+</div>
+<script id="spec-data" type="application/json">{{ data | safe }}</script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
+<script>
+const SPEC = JSON.parse(document.getElementById('spec-data').textContent);
+const doc = document.getElementById('doc'), toc = document.getElementById('toc'), status = document.getElementById('status');
+function slug(t, used){let s=t.toLowerCase().replace(/<[^>]+>/g,'').replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'')||'s';let k=s,i=2;while(used.has(k))k=s+'-'+(i++);used.add(k);return k}
+if (window.marked) {
+  doc.innerHTML = marked.parse(SPEC.full, {gfm: true});
+  doc.querySelectorAll('table').forEach(t => { const w = document.createElement('div'); w.className = 'tbl'; t.parentNode.insertBefore(w, t); w.appendChild(t); });
+  const used = new Set();
+  doc.querySelectorAll('h2, h3').forEach(h => {
+    h.id = slug(h.textContent, used);
+    const a = document.createElement('a'); a.href = '#' + h.id; a.textContent = h.textContent;
+    if (h.tagName === 'H3') a.className = 'l3';
+    toc.appendChild(a);
+  });
+} else {
+  document.getElementById('fallback').textContent = SPEC.full;
+  toc.hidden = true;
+}
+document.getElementById('copy').addEventListener('click', async () => {
+  try { await navigator.clipboard.writeText(SPEC.full); status.textContent = 'Copied the complete spec as Markdown.'; }
+  catch (e) { const r = document.createRange(); const pre = document.getElementById('fallback'); pre.textContent = SPEC.full;
+    r.selectNodeContents(pre); const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r);
+    status.textContent = 'Copy is blocked here; the Markdown is selected below — copy it manually.'; }
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% block title %}Voices · Story Studio{% endblock %}
+{% block body %}
+<h1>Your voices</h1>
+<p class="muted">Train a voice from your own recordings, then use it to re-sing songs, sing new
+  ones, or speak text — in your voice. Up to {{ max_voices }} voices. A trained voice and its
+  profile are kept until you delete them.</p>
+
+<section class="card">
+  <h2>New voice</h2>
+  <form id="new-voice" class="stack">
+    <label>Name <input name="name" maxlength="60" placeholder="My singing voice"></label>
+    <label class="switch consent"><input type="checkbox" name="attest" required>
+      <span>{{ consent_text }}</span></label>
+    <div class="formbar">
+      <button class="btn primary" type="submit">Create voice</button>
+      <span class="error" role="alert"></span>
+    </div>
+  </form>
+</section>
+
+<section class="card">
+  <h2>Voices</h2>
+  <ul class="tracklist" id="voice-list" aria-live="polite"><li class="muted">Loading…</li></ul>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const label = {collecting: 'collecting recordings', ready_to_train: 'ready to train',
+               training: 'training', ready: 'ready', failed: 'failed'};
+async function load() {
+  const r = await fetch('/v1/voices', {headers: {Accept: 'application/json'}});
+  const body = await r.json();
+  const list = document.getElementById('voice-list');
+  if (!body.items.length) { list.innerHTML = '<li class="muted">No voices yet.</li>'; return; }
+  list.innerHTML = body.items.map(v => `
+    <li class="track">
+      <div class="track-head"><span class="pill ${v.status === 'ready' ? 'succeeded' : v.status === 'failed' ? 'failed' : 'queued'}">${label[v.status] || v.status}</span>
+        <strong><a href="/voices/${v.id}">${esc(v.name)}</a></strong></div>
+      <div class="meta">${v.dataset.clips} recording(s) · ${Math.round(v.dataset.singing_s / 60)} min singing · ${Math.round(v.dataset.speech_s / 60)} min speech
+        ${v.profile ? ' · ' + esc(v.profile.voice_type) + ', ' + esc(v.profile.range.low_note) + '–' + esc(v.profile.range.high_note) : ''}</div>
+      <div class="actions"><a class="btn tiny" href="/voices/${v.id}">Open</a></div>
+    </li>`).join('');
+}
+document.getElementById('new-voice').addEventListener('submit', async ev => {
+  ev.preventDefault();
+  const f = ev.target, err = f.querySelector('.error');
+  err.textContent = '';
+  const r = await fetch('/v1/voices', {method: 'POST', headers: {'Content-Type': 'application/json', Accept: 'application/json'},
+    body: JSON.stringify({name: f.name.value, consent: {attest: f.attest.checked, statement_version: '{{ consent_version }}'}})});
+  const body = await r.json();
+  if (!r.ok) { err.textContent = body.error || 'Could not create the voice'; return; }
+  location.href = '/voices/' + body.id;
+});
+load();
+</script>
+{% endblock %}

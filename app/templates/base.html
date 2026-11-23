@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}Story Studio{% endblock %}</title>
+<link rel="stylesheet" href="/static/app.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎬</text></svg>">
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="/">🎬 Story Studio</a>
+  <nav>
+    {% if user %}
+      {% if user.is_admin %}<a href="/admin">Users</a>{% endif %}
+      <a href="/assistant">Assistant</a>
+      <a href="/studio">Projects</a>
+      <a href="/speech">Speech</a>
+      <a href="/music">Music</a>
+      <a href="/voices">Voices</a>
+      <span class="who">{{ user.username }}</span>
+      <form method="post" action="/logout"><button class="link">Sign out</button></form>
+    {% endif %}
+  </nav>
+</header>
+{% if user %}<div class="retention-note" role="note">⏳ {{ keep_a_copy() }}</div>{% endif %}
+<main>{% block body %}{% endblock %}</main>
+<footer>Generated on a local GPU · pictures and video via WIS, speech with Qwen3-TTS, music with ACE-Step 1.5</footer>
+{% block scripts %}{% endblock %}
+</body>
+</html>

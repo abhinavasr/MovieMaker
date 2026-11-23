@@ -1,0 +1,344 @@
+{% extends "base.html" %}
+{% block title %}Music · Story Studio{% endblock %}
+{% block body %}
+<h1>Music</h1>
+<p class="muted">Songs with real vocals and lyrics, made with ACE-Step 1.5 on this studio’s GPU.
+  Describe a song, write your own lyrics, or start from a track you already have. Up to
+  {{ per_hour }} songs an hour.</p>
+
+<section class="card">
+  <div class="tabs" role="tablist">
+    <button type="button" role="tab" data-tab="describe" class="on">Describe it</button>
+    <button type="button" role="tab" data-tab="custom">Write lyrics</button>
+    <button type="button" role="tab" data-tab="audio">From a track</button>
+  </div>
+
+  <form id="music-form" class="stack" enctype="multipart/form-data">
+    <input type="hidden" name="task" value="describe">
+
+    <!-- Describe: one sentence, the composer model writes everything -->
+    <div class="panel stack" data-panel="describe">
+      <label>
+        <span class="field-head"><span>What kind of song?</span><span class="count" id="desc-count"></span></span>
+        <textarea name="description" rows="3" maxlength="{{ max_prompt }}" data-count="desc-count"
+          placeholder="An upbeat Hindi wedding song about the first monsoon rain, dhol and shehnai, joyful female and male duet"></textarea>
+      </label>
+      <p class="hint">The model writes the lyrics, picks the style and structure, and sings it. Name the language, mood, instruments and voices you want.</p>
+      <div class="chips">
+        {% for c in ["a gentle lullaby in Hindi with soft piano and a warm female voice",
+                     "90s Bollywood romantic duet, strings and tabla",
+                     "energetic K-pop dance track about summer",
+                     "lo-fi hip hop beat for studying, no vocals",
+                     "epic orchestral trailer music, choir, huge drums",
+                     "acoustic folk song about a long train journey, male vocal",
+                     "Carnatic-inspired fusion with violin and mridangam"] %}
+          <button type="button" class="chip" data-describe="{{ c }}">{{ c }}</button>
+        {% endfor %}
+      </div>
+    </div>
+
+    <!-- Custom: lyrics + style -->
+    <div class="panel stack" data-panel="custom" hidden>
+      <label>
+        <span class="field-head"><span>Lyrics</span><span class="count" id="lyrics-count"></span></span>
+        <textarea name="lyrics" id="lyrics" rows="12" maxlength="{{ max_lyrics }}" data-count="lyrics-count"
+          placeholder="[Verse]&#10;Paper boats on the window sill&#10;Waiting for the rain to fall&#10;&#10;[Chorus]&#10;Oh the monsoon's coming home…"></textarea>
+      </label>
+      <div class="chips" aria-label="Insert a section tag">
+        {% for t in ["[Intro]", "[Verse]", "[Pre-Chorus]", "[Chorus]", "[Bridge]", "[Instrumental]", "[Outro]"] %}
+          <button type="button" class="chip" data-tag="{{ t }}">{{ t }}</button>
+        {% endfor %}
+      </div>
+      <p class="hint">Put each section tag on its own line. Short lines sing better than long ones.</p>
+      <label class="switch"><input type="checkbox" name="instrumental" id="instrumental"> Instrumental — no vocals (lyrics are ignored)</label>
+      <label>
+        <span class="field-head"><span>Style</span><span class="count" id="style-count"></span></span>
+        <input name="style" id="style" maxlength="{{ max_prompt }}" data-count="style-count"
+          placeholder="female vocal, acoustic pop, fingerpicked guitar, warm, intimate, 90 bpm">
+      </label>
+      <div class="chips" aria-label="Add to the style">
+        {% for c in ["pop", "rock", "hip hop", "EDM", "lo-fi", "jazz", "classical", "Bollywood",
+                     "Indian classical", "folk", "R&B", "cinematic", "female vocal", "male vocal",
+                     "duet", "choir", "piano", "acoustic guitar", "strings", "tabla", "808 bass",
+                     "upbeat", "melancholic", "dreamy", "energetic"] %}
+          <button type="button" class="chip" data-style="{{ c }}">{{ c }}</button>
+        {% endfor %}
+      </div>
+      <p class="hint">Describe the sound: genre, instruments, voice, mood, tempo. Mood words work best next to concrete instruments.</p>
+    </div>
+
+    <!-- From a track: cover / repaint / extract / add layer / extend / accompany -->
+    <div class="panel stack" data-panel="audio" hidden>
+      <fieldset class="modes">
+        <legend>What should happen to the track?</legend>
+        {% for key in ["cover", "repaint", "extract", "add_layer", "extend", "accompany"] %}
+        <label class="mode">
+          <input type="radio" name="audio_task" value="{{ key }}" {% if key == 'cover' %}checked{% endif %}>
+          <div><strong>{{ tasks[key] }}</strong>
+            <p class="muted">{{ {
+              "cover": "Same song, new sound. Optionally new lyrics over the same melody.",
+              "repaint": "Regenerate just a stretch — fix a bad line or change a chorus.",
+              "extract": "Isolate the vocals, the drums, the bass…",
+              "add_layer": "Generate a new part that fits — strings, a guitar line, backing vocals.",
+              "extend": "Keep going past the end — the new part continues the song.",
+              "accompany": "Build a band around a single part, e.g. an a-cappella vocal or a lone guitar."}[key] }}</p></div>
+        </label>
+        {% endfor %}
+      </fieldset>
+
+      <div class="grid3">
+        <label>Track to start from
+          <select name="source_music_id" id="source-pick"><option value="">Upload a file…</option></select>
+        </label>
+        <label id="source-upload">Upload
+          <input type="file" name="source_file" accept="audio/*,video/*">
+        </label>
+      </div>
+
+      <div class="stack" data-for="cover">
+        <label>New sound <span class="hint">Required. Genre, instruments, voice, mood.</span>
+          <input name="style" maxlength="{{ max_prompt }}" placeholder="jazz cover, smoky female vocal, upright bass, brushed drums">
+        </label>
+      </div>
+      <div class="stack" data-for="repaint extend">
+        <label>Style <span class="hint">Optional for a song made here (its own style is used); describe the music for an upload.</span>
+          <input name="style" maxlength="{{ max_prompt }}" placeholder="acoustic pop, warm female vocal, fingerpicked guitar">
+        </label>
+      </div>
+      <div class="stack" data-for="add_layer">
+        <label>The new part <span class="hint">Required. Describe only what to add.</span>
+          <input name="style" maxlength="{{ max_prompt }}" placeholder="warm legato strings following the chords, swelling in the chorus">
+        </label>
+      </div>
+      <div class="stack" data-for="accompany">
+        <label>The arrangement <span class="hint">Required.</span>
+          <input name="style" maxlength="{{ max_prompt }}" placeholder="laid-back acoustic folk band, brushed drums, upright bass">
+        </label>
+      </div>
+      <div class="stack" data-for="cover repaint extend">
+        <label>
+          <span class="field-head"><span id="track-lyrics-label">Lyrics</span>
+            <span><span class="hint" id="track-lyrics-state"></span>
+            <button type="button" class="btn tiny" id="track-lyrics-btn">Get lyrics from the track</button></span></span>
+          <textarea name="lyrics" id="track-lyrics" rows="6" maxlength="{{ max_lyrics }}"
+            placeholder="Leave empty to keep the original words — they are read from the track. Or write new ones, with [Verse]/[Chorus] tags."></textarea>
+        </label>
+        <p class="hint" data-for="extend">For extend: only the words for the new part. Leave empty to let it carry on instrumentally or repeat.</p>
+      </div>
+      <div data-for="cover">
+        <label style="display:flex;flex-direction:column;gap:5px;font-size:.88rem">How closely to follow the original
+          <span class="range-row"><span class="hint">loose</span>
+            <input type="range" name="strength" min="0" max="1" step="0.05" value="0.5">
+            <span class="hint">close</span></span>
+          <span class="hint">0.3 for a big genre change, 0.5 to start, 0.8 for a subtle restyle.</span>
+        </label>
+      </div>
+      <div class="grid3" data-for="repaint">
+        <label>From (seconds)<input type="number" name="start" min="0" step="0.5" placeholder="30"></label>
+        <label>To (seconds)<input type="number" name="end" min="0" step="0.5" placeholder="45"></label>
+      </div>
+      <p class="hint" data-for="repaint">Between 3 and 90 seconds. Everything outside the stretch is kept as it is.</p>
+      <div class="grid3" data-for="extend">
+        <label>Add (seconds)<input type="number" name="add_seconds" min="10" max="120" step="1" value="30"></label>
+      </div>
+      <div class="grid3" data-for="extract add_layer">
+        <label>Which part
+          <select name="track">
+            {% for t in tracks %}<option value="{{ t }}">{{ t.replace('_', ' ') }}</option>{% endfor %}
+          </select>
+        </label>
+      </div>
+      <div data-for="accompany">
+        <span style="font-size:.88rem">Instruments to add</span>
+        <div class="chips" style="margin-top:6px">
+          {% for t in tracks %}
+            <label class="chip"><input type="checkbox" name="instruments" value="{{ t }}" style="width:auto;margin-right:4px">{{ t.replace('_', ' ') }}</label>
+          {% endfor %}
+        </div>
+      </div>
+      <p class="hint" data-for="extract add_layer accompany">This uses the slower XL base model (about a minute or two).</p>
+    </div>
+
+    <details class="more" id="reference-box">
+      <summary>Match the sound of a reference track</summary>
+      <div class="grid3">
+        <label>Reference
+          <select name="reference_music_id" id="reference-pick"><option value="">Upload a file…</option></select>
+        </label>
+        <label>Upload <input type="file" name="reference_file" accept="audio/*,video/*"></label>
+      </div>
+      <p class="hint">The first minute is used to steer the timbre and production — it is not copied. Use music you have the rights to.</p>
+    </details>
+
+    <details class="more">
+      <summary>Advanced</summary>
+      <div class="grid3">
+        <label>Language of the vocals
+          <select name="language">
+            {% for code, name in languages.items() %}
+              <option value="{{ code }}" {% if code == 'unknown' %}selected{% endif %}>{{ 'Detect from the lyrics' if code == 'unknown' else name }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>Length (seconds) <input type="number" name="duration" min="{{ min_s }}" max="{{ max_s }}" placeholder="let the model decide"></label>
+        <label>Tempo (BPM) <input type="number" name="bpm" min="30" max="300" placeholder="auto"></label>
+        <label>Key <input name="key" placeholder="auto, e.g. A minor"></label>
+        <label>Time signature
+          <select name="time_signature"><option value="">auto</option><option value="4">4/4</option><option value="3">3/4</option><option value="6">6/8</option><option value="2">2/4</option></select>
+        </label>
+        <label>Seed <input type="number" name="seed" min="0" placeholder="random"></label>
+        <label>Title <input name="title" maxlength="120" placeholder="optional"></label>
+      </div>
+    </details>
+
+    <div class="formbar">
+      <button class="btn primary" type="submit">Create song</button>
+      <span class="error" role="alert"></span>
+    </div>
+  </form>
+</section>
+
+<section class="card">
+  <h2>Your songs</h2>
+  <ul class="tracklist" id="music-list" aria-live="polite"></ul>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/media.js"></script>
+<script>
+const projects = {{ projects | tojson }};
+const form = document.getElementById('music-form');
+const songs = new Map();
+let tab = 'describe';
+
+// Only the visible panel's fields are submitted: hidden ones are disabled, so
+// a style typed on one tab never leaks into another tab's request.
+function syncPanels() {
+  const audioTask = form.querySelector('[name=audio_task]:checked').value;
+  form.task.value = tab === 'audio' ? audioTask : tab;
+  document.querySelectorAll('.tabs [data-tab]').forEach(b => b.classList.toggle('on', b.dataset.tab === tab));
+  document.querySelectorAll('[data-panel]').forEach(p => {
+    const on = p.dataset.panel === tab;
+    p.hidden = !on;
+    p.querySelectorAll('input, textarea, select').forEach(el => el.disabled = !on);
+  });
+  document.querySelectorAll('[data-for]').forEach(box => {
+    const on = tab === 'audio' && box.dataset.for.split(' ').includes(audioTask);
+    box.hidden = !on;
+    box.querySelectorAll('input, textarea, select').forEach(el => el.disabled = !on);
+  });
+  form.querySelectorAll('[name=audio_task]').forEach(el => el.disabled = tab !== 'audio');
+  document.getElementById('source-upload').hidden = !!document.getElementById('source-pick').value;
+  const ref = document.getElementById('reference-box');
+  ref.hidden = tab === 'audio';
+  ref.querySelectorAll('input, select').forEach(el => el.disabled = tab === 'audio');
+  const lyr = document.getElementById('lyrics');
+  if (tab === 'custom') lyr.disabled = document.getElementById('instrumental').checked;
+}
+document.querySelectorAll('.tabs [data-tab]').forEach(b => b.addEventListener('click', () => {
+  tab = b.dataset.tab; syncPanels(); }));
+form.addEventListener('change', syncPanels);
+
+document.querySelectorAll('[data-describe]').forEach(b => b.addEventListener('click', () => {
+  form.description.value = b.dataset.describe; form.description.dispatchEvent(new Event('input')); }));
+document.querySelectorAll('[data-tag]').forEach(b => b.addEventListener('click', () =>
+  insertAtCursor(document.getElementById('lyrics'), b.dataset.tag + '\n')));
+document.querySelectorAll('[data-style]').forEach(b => b.addEventListener('click', () => {
+  const st = document.getElementById('style');
+  const parts = st.value.split(',').map(s => s.trim()).filter(Boolean);
+  if (!parts.includes(b.dataset.style)) parts.push(b.dataset.style);
+  st.value = parts.join(', '); st.dispatchEvent(new Event('input')); }));
+
+const trackLyrics = document.getElementById('track-lyrics');
+document.getElementById('track-lyrics-btn').addEventListener('click', async () => {
+  const state = document.getElementById('track-lyrics-state');
+  const fd = new FormData();
+  const pick = document.getElementById('source-pick').value;
+  const file = form.source_file.files[0];
+  if (file && !pick) fd.append('source_file', file); else if (pick) fd.append('source_music_id', pick);
+  else { state.textContent = 'Choose a track first.'; return; }
+  state.textContent = file && !pick ? 'Listening to the track… (about a minute)' : 'Fetching…';
+  try {
+    const r = await fetch('/api/music/lyrics', { method: 'POST', body: fd, headers: { Accept: 'application/json' } });
+    const body = await r.json();
+    if (!r.ok) { state.textContent = body.error || 'Could not read the lyrics.'; return; }
+    trackLyrics.value = body.lyrics && body.lyrics !== '[Instrumental]' ? body.lyrics : '';
+    state.textContent = !trackLyrics.value ? 'No words found — instrumental?'
+      : body.transcribed ? 'Transcribed — check and fix it' : 'The song’s own lyrics';
+  } catch (e) { state.textContent = 'Could not read the lyrics — type them in.'; }
+});
+
+function fillPickers() {
+  const done = [...songs.values()].filter(s => s.status === 'succeeded');
+  for (const id of ['source-pick', 'reference-pick']) {
+    const sel = document.getElementById(id), keep = sel.value;
+    sel.innerHTML = '<option value="">Upload a file…</option>' + done.map(s =>
+      `<option value="${s.id}">${esc(s.title)}${s.duration_s ? ' (' + Math.round(s.duration_s) + ' s)' : ''}</option>`).join('');
+    sel.value = keep;
+  }
+  syncPanels();
+}
+
+function meta(it) {
+  const r = it.result || {}, p = it.params || {};
+  return [it.task_label, p.instrumental ? 'instrumental' : '',
+          it.duration_s ? Math.round(it.duration_s) + ' s' : '',
+          r.bpm ? r.bpm + ' bpm' : '', r.key || '', it.created].filter(Boolean).map(esc).join(' · ') +
+    (it.deletes ? ` · <span class="${it.deletes.days_left < 14 ? 'expiring' : ''}">deleted on ${esc(it.deletes.deleted_on)}</span>` : '');
+}
+
+const list = document.getElementById('music-list');
+mediaPage({
+  kind: 'music', form, list, projects,
+  render: it => {
+    songs.set(it.id, it);
+    clearTimeout(window._fill); window._fill = setTimeout(fillPickers, 0);
+    const r = it.result || {};
+    return `
+    <li class="track">
+      <div class="track-head">
+        <span class="pill ${it.status}">${it.status}</span>
+        <strong>${esc(it.title)}</strong>
+      </div>
+      <div class="meta">${meta(it)}</div>
+      ${statusLine(it)}
+      ${it.audio ? `<audio controls preload="none" src="${it.audio}"></audio>` : ''}
+      ${r.lyrics && r.lyrics !== '[Instrumental]' ? `<details><summary>Lyrics</summary><pre>${esc(r.lyrics)}</pre></details>` : ''}
+      ${r.style ? `<details><summary>Style it was made in</summary><pre>${esc(r.style)}</pre></details>` : ''}
+      <div class="actions">
+        ${it.audio ? `<a class="btn tiny" href="${it.audio}?download=1">Download</a>
+          <button class="btn tiny" data-edit="${it.id}" title="Open the lyrics and style in the editor">Edit &amp; regenerate</button>
+          <button class="btn tiny" data-remix="${it.id}" title="Cover, repaint, extract stems…">Remix</button>
+          <button class="btn tiny" data-ref="${it.id}" title="Use as a sound reference for a new song">Use its sound</button>` : ''}
+        ${projectPicker('music', it, projects)}
+        ${it.status !== 'generating' ? `<button class="btn tiny danger" data-delete="${it.id}">Delete</button>` : ''}
+      </div>
+    </li>`;
+  },
+});
+
+list.addEventListener('click', ev => {
+  const b = ev.target.closest('[data-edit],[data-remix],[data-ref]');
+  if (!b) return;
+  const it = songs.get(b.dataset.edit || b.dataset.remix || b.dataset.ref);
+  if (b.dataset.edit) {
+    tab = 'custom'; syncPanels();
+    const r = it.result || {};
+    document.getElementById('lyrics').value = r.lyrics && r.lyrics !== '[Instrumental]' ? r.lyrics : (it.params.lyrics || '');
+    document.getElementById('style').value = r.style || it.params.style || '';
+    document.getElementById('instrumental').checked = !!it.params.instrumental;
+    ['lyrics', 'style'].forEach(id => document.getElementById(id).dispatchEvent(new Event('input')));
+  } else if (b.dataset.remix) {
+    tab = 'audio'; document.getElementById('source-pick').value = it.id;
+  } else {
+    if (tab === 'audio') tab = 'custom';
+    document.getElementById('reference-pick').value = it.id;
+    document.getElementById('reference-box').open = true;
+  }
+  syncPanels();
+  form.scrollIntoView({ behavior: 'smooth', block: 'start' });
+});
+syncPanels();
+</script>
+{% endblock %}

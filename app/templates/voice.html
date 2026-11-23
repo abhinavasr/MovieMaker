@@ -1,0 +1,392 @@
+{% extends "base.html" %}
+{% block title %}{{ v.name }} · Voices · Story Studio{% endblock %}
+{% block body %}
+<p><a href="/voices">← Voices</a></p>
+<h1 id="voice-name">{{ v.name }}</h1>
+<p class="muted" id="voice-status"></p>
+
+<section class="card" id="rec-card">
+  <h2><span class="step">1</span> Recordings of your voice</h2>
+  <p class="hint">At least <strong>{{ min_minutes }} minutes of singing</strong> to train — 10–30 minutes sounds fuller.
+    Sing songs you know across your range: low and high, soft and loud. Background music is
+    removed automatically, but a quiet room with no echo works best. Only <em>your</em> voice,
+    one person per recording. Add speaking too if you'll use the voice to talk.</p>
+  <div class="grid3">
+    <label>Upload recordings <input type="file" id="clip-files" accept="audio/*,video/*" multiple></label>
+    <label>What's in them
+      <select id="clip-kind"><option value="auto">Detect automatically</option>
+        <option value="singing">Singing</option><option value="speech">Speaking</option></select>
+    </label>
+    <div><span class="field-head"><span>Or record now</span></span>
+      <button type="button" class="btn" id="rec-btn">● Record</button> <span class="hint" id="rec-state"></span></div>
+  </div>
+  <p class="hint" id="upload-state"></p>
+  <div id="dataset-bar" class="meta"></div>
+  <ul class="tracklist" id="clip-list"></ul>
+</section>
+
+<section class="card">
+  <h2><span class="step">2</span> Train</h2>
+  <p class="hint">Training shares the GPU with everyone else, so it runs in short slices — usually
+    20–40 minutes in all, longer on a busy day. You can leave this page.</p>
+  <div class="formbar">
+    <select id="quality"><option value="standard">Standard (faster)</option><option value="high">High quality (longer)</option></select>
+    <button class="btn primary" id="train-btn" type="button">Train this voice</button>
+    <span class="error" id="train-error" role="alert"></span>
+  </div>
+  <div id="train-progress" class="meta"></div>
+</section>
+
+<section class="card" id="profile-card" hidden>
+  <h2>Your voice profile</h2>
+  <div id="profile"></div>
+  <p class="hint">Measured from your singing. It is how new songs are pitched into your range and
+    steered toward your manner (tone, vibrato). The voice model and this profile are kept until you
+    delete the voice.</p>
+</section>
+
+<section class="card" id="style-card">
+  <h2>Your singing style <span class="hint">(optional, advanced)</span></h2>
+  <p class="hint">Your voice model makes songs <em>sound</em> like you. A singing style also teaches the
+    song model <em>how</em> you sing — your phrasing and delivery. It needs at least
+    <strong>3 full songs (8+ minutes)</strong> of you singing, 10–20 is better, each with its lyrics.
+    Training needs most of the GPU for up to about 90 minutes, so it starts as soon as the card is free.</p>
+  <div id="style-empty"><button class="btn" type="button" id="style-start">Start collecting songs for my style</button></div>
+  <div id="style-body" hidden>
+    <div class="meta" id="style-status"></div>
+    <div class="grid3">
+      <label>Add full songs you sang <input type="file" id="style-files" accept="audio/*,video/*" multiple></label>
+    </div>
+    <p class="hint" id="style-upload-state">Lyrics are drafted automatically — check each one and press Confirm. Wrong lyrics teach wrong pronunciation.</p>
+    <ul class="tracklist" id="style-songs"></ul>
+    <div class="formbar">
+      <button class="btn primary" id="style-train" type="button">Train my singing style</button>
+      <span class="error" id="style-error" role="alert"></span>
+    </div>
+  </div>
+</section>
+
+<section class="card" id="use-card" hidden>
+  <h2><span class="step">3</span> Use your voice</h2>
+  <div class="tabs" role="tablist">
+    <button type="button" data-utab="resing" class="on">Change the singer</button>
+    <button type="button" data-utab="song">Sing a new song</button>
+    <button type="button" data-utab="speech">Speak text</button>
+  </div>
+
+  <form class="stack" data-upanel="resing">
+    <p class="hint">The song's lead vocal is re-sung in your voice and mixed back onto the original
+      music. It keeps the original singer's melody and phrasing — your voice, their performance.</p>
+    <div class="grid3">
+      <label>A song made here <select name="music_id"><option value="">Upload a file…</option>
+        {% for s in songs %}<option value="{{ s.id }}">{{ s.title }}{% if s.duration_s %} ({{ s.duration_s|round|int }} s){% endif %}</option>{% endfor %}
+      </select></label>
+      <label>Upload <input type="file" name="file" accept="audio/*,video/*"></label>
+      <label>Key <select name="key">
+        <option value="auto" selected>Auto — move into my range</option>
+        <option value="0">Keep the original key</option>
+        <option value="12">One octave up</option><option value="-12">One octave down</option>
+      </select></label>
+    </div>
+    <label class="switch"><input type="checkbox" name="keep_backing_vocals" checked> Keep the original backing vocals</label>
+    <div class="formbar"><button class="btn primary">Re-sing in my voice</button><span class="error" role="alert"></span></div>
+  </form>
+
+  <form class="stack" data-upanel="song" hidden>
+    <p class="hint">The song is written and performed in your range and manner, then sung in your
+      exact voice.</p>
+    <label>Describe it <textarea name="description" rows="2" maxlength="1000"
+      placeholder="a gentle monsoon love song in Hindi with soft guitar"></textarea></label>
+    <details class="more"><summary>Or write the lyrics yourself</summary>
+      <label>Lyrics <textarea name="lyrics" rows="8" maxlength="4000" placeholder="[Verse]&#10;…&#10;&#10;[Chorus]&#10;…"></textarea></label>
+      <label>Style <input name="style" maxlength="1000" placeholder="acoustic pop, fingerpicked guitar, warm"></label>
+    </details>
+    <div class="grid3">
+      <label>Length (seconds) <input type="number" name="duration_s" min="10" max="360" placeholder="auto"></label>
+      <label>Language <input name="language" placeholder="auto, e.g. hi"></label>
+    </div>
+    <div id="style-use" hidden>
+      <label class="switch"><input type="checkbox" name="use_style_model" checked> Perform it in my singing style</label>
+      <label style="display:flex;flex-direction:column;gap:5px;font-size:.88rem">How strongly
+        <span class="range-row"><span class="hint">subtle</span><input type="range" name="style_strength" min="0.2" max="1" step="0.05" value="0.8"><span class="hint">strong</span></span></label>
+    </div>
+    <div class="formbar"><button class="btn primary">Make the song</button><span class="error" role="alert"></span></div>
+  </form>
+
+  <form class="stack" data-upanel="speech" hidden>
+    <label>Text <textarea name="text" rows="5" maxlength="2000" required></textarea></label>
+    <label>How to say it <input name="delivery" placeholder="optional, e.g. calm and slow"></label>
+    <p class="hint">If you uploaded speaking recordings, they set the accent and pace; otherwise it
+      starts from a preset speaker in your range.</p>
+    <div class="formbar"><button class="btn primary">Speak it</button><span class="error" role="alert"></span></div>
+  </form>
+</section>
+
+<section class="card" id="results-card" hidden>
+  <h2>Results</h2>
+  <ul class="tracklist" id="job-list"></ul>
+</section>
+
+<section class="card">
+  <h2>Delete this voice</h2>
+  <p class="hint">Deletes the recordings, the trained model and the profile. Songs and speech already
+    made are kept (until their own 90 days are up).</p>
+  <button class="btn danger" id="delete-btn" type="button">Delete voice</button>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const VID = {{ v.id | tojson }};
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const J = {Accept: 'application/json'};
+async function api(path, opts = {}) {
+  const r = await fetch(path, {...opts, headers: {...J, ...(opts.headers || {})}});
+  const body = r.status === 204 ? {} : await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(body.error || ('HTTP ' + r.status));
+  return body;
+}
+const mins = s => (s / 60).toFixed(1);
+const kindLabel = {clean: 'Cleaning a recording', train: 'Training', resing: 'Changed the singer',
+                   song: 'New song', speech: 'Speech'};
+
+function renderVoice(v) {
+  const words = {collecting: 'Collecting recordings', ready_to_train: 'Ready to train',
+                 training: 'Training…', ready: 'Ready to use', failed: 'Training failed'};
+  document.getElementById('voice-status').textContent = (words[v.status] || v.status) +
+    (v.last_error && v.status === 'failed' ? ' — ' + v.last_error : '') + ' · ' + 'kept ' + v.kept;
+  const d = v.dataset;
+  document.getElementById('dataset-bar').innerHTML =
+    `${d.clips_ok} usable recording(s) · <strong>${mins(d.singing_s)} min singing</strong> · ${mins(d.speech_s)} min speech` +
+    (d.minutes_needed ? ` · <span class="expiring">about ${d.minutes_needed} more minute(s) needed</span>` : ' · enough to train') +
+    (d.warnings.length ? ' · ' + d.warnings.map(esc).join('; ') : '');
+  const t = v.training;
+  document.getElementById('train-btn').disabled = !(v.status === 'ready_to_train' || v.status === 'ready' || v.status === 'failed') || !d.usable;
+  document.getElementById('train-btn').textContent = v.status === 'ready' ? 'Retrain with the current recordings' : 'Train this voice';
+  document.getElementById('train-progress').innerHTML = v.status === 'training'
+    ? `${esc(t.message || 'waiting for the GPU')} ${t.queue_position ? '· place ' + t.queue_position + ' in the queue' : ''}
+       <progress max="${t.epochs_target || 1}" value="${t.epochs_done || 0}"></progress>`
+    : (t.trained_at ? `Trained ${new Date(t.trained_at * 1000).toLocaleString()} · ${t.epochs_done} epochs in ${t.slices_done} slice(s)` : '');
+  const p = v.profile;
+  document.getElementById('profile-card').hidden = !p;
+  document.getElementById('use-card').hidden = v.status !== 'ready';
+  if (p) document.getElementById('profile').innerHTML = `
+    <div class="grid3">
+      <div><span class="hint">Voice type</span><br><strong>${esc(p.voice_type)}</strong></div>
+      <div><span class="hint">Range (most of your singing)</span><br><strong>${esc(p.range.low_note)} – ${esc(p.range.high_note)}</strong>, centred on ${esc(p.range.mid_note)}</div>
+      <div><span class="hint">Comfortable</span><br><strong>${esc(p.range.comfortable[0])} – ${esc(p.range.comfortable[1])}</strong></div>
+      <div><span class="hint">Vibrato</span><br>${p.vibrato.rate_hz ? `<strong>${p.vibrato.rate_hz} Hz</strong>, ±${p.vibrato.extent_cents} cents, on ${Math.round(p.vibrato.share_of_long_notes * 100)}% of held notes` : 'little or none'}</div>
+      <div><span class="hint">In words</span><br>“${esc(p.style_caption)}”</div>
+    </div>`;
+}
+
+let STYLE = null;
+async function renderStyle(st) {
+  STYLE = st;
+  document.getElementById('style-empty').hidden = !!st;
+  document.getElementById('style-body').hidden = !st;
+  document.getElementById('style-use').hidden = !(st && st.status === 'ready');
+  if (!st) return;
+  const words = {collecting: 'Collecting songs', ready_to_train: 'Ready to train', training: 'Training…',
+                 ready: 'Trained — new songs can use it', failed: 'Training failed'};
+  document.getElementById('style-status').innerHTML =
+    `<strong>${words[st.status] || st.status}</strong> · ${st.songs_confirmed} confirmed song(s), ${(st.total_s / 60).toFixed(1)} min
+     (minimum ${st.minimum.songs} songs / ${st.minimum.minutes} min)` +
+    (st.songs_needing_review ? ` · <span class="expiring">${st.songs_needing_review} song(s) need their lyrics confirmed</span>` : '') +
+    (st.status === 'training' ? ` · ${esc(st.training.message || '')}` : '') +
+    (st.last_error && st.status === 'failed' ? ` · <span class="expiring">${esc(st.last_error)}</span>` : '') +
+    ` · ${esc(st.kept)}`;
+  document.getElementById('style-train').disabled = !['ready_to_train', 'ready', 'failed'].includes(st.status);
+  document.getElementById('style-train').textContent = st.status === 'ready' ? 'Retrain my singing style' : 'Train my singing style';
+  const songs = (await api(`/v1/style-models/${st.id}/songs`)).items;
+  const list = document.getElementById('style-songs');
+  const open = document.activeElement && document.activeElement.closest && document.activeElement.closest('#style-songs');
+  if (open) return;   // don't wipe lyrics someone is editing
+  list.innerHTML = songs.map(x => `
+    <li class="track" data-song="${x.id}">
+      <div class="track-head"><span class="pill ${x.status === 'ok' ? 'succeeded' : x.status === 'transcribing' ? 'generating' : 'queued'}">${x.status === 'ok' ? 'confirmed' : x.status === 'transcribing' ? 'drafting lyrics' : 'check lyrics'}</span>
+        <strong>${esc(x.title)}</strong></div>
+      <div class="meta">${Math.round(x.duration_s || 0)} s ${x.error ? '· <span class="expiring">' + esc(x.error) + '</span>' : ''}
+        · <span class="${x.days_left < 14 ? 'expiring' : ''}">song deleted on ${esc(x.deleted_on)}</span></div>
+      ${x.status !== 'transcribing' ? `<textarea rows="5" data-lyrics>${esc(x.lyrics)}</textarea>
+        <div class="actions"><button class="btn tiny" data-confirm>${x.status === 'ok' ? 'Save lyrics' : 'Confirm lyrics'}</button>
+        <button class="btn tiny danger" data-del-song>Remove</button></div>` : ''}
+    </li>`).join('');
+}
+
+function renderClips(items) {
+  document.getElementById('clip-list').innerHTML = items.map(c => `
+    <li class="track">
+      <div class="track-head"><span class="pill ${c.status === 'ok' ? 'succeeded' : c.status === 'cleaning' ? 'generating' : 'failed'}">${c.status === 'ok' ? c.kind : c.status}</span>
+        <strong>${esc(c.name)}</strong></div>
+      <div class="meta">${c.usable_s != null ? Math.round(c.usable_s) + ' s usable of ' + Math.round(c.duration_s || 0) + ' s' : 'cleaning…'}
+        ${c.checks && c.checks.music_removed ? ' · background music removed' : ''}
+        ${c.pitch ? ' · pitch ' + Math.round(c.pitch.p5) + '–' + Math.round(c.pitch.p95) + ' Hz' : ''}
+        ${c.rejected_reason ? ' · <span class="expiring">' + esc(c.rejected_reason) + '</span>' : ''}
+        ${c.error ? ' · <span class="expiring">' + esc(c.error) + '</span>' : ''}
+        · <span class="${c.days_left < 14 ? 'expiring' : ''}">recording deleted on ${esc(c.deleted_on)}</span></div>
+      <div class="actions">
+        ${c.status === 'ok' ? `<audio controls preload="none" src="/v1/voices/${VID}/clips/${c.id}/audio"></audio>` : ''}
+        ${c.status === 'ok' ? `<select class="tiny" data-kind-clip="${c.id}" title="What this recording is">
+          <option value="singing" ${c.kind === 'singing' ? 'selected' : ''}>singing</option>
+          <option value="speech" ${c.kind === 'speech' ? 'selected' : ''}>speaking</option></select>` : ''}
+        <button class="btn tiny danger" data-del-clip="${c.id}">Remove</button></div>
+    </li>`).join('');
+}
+
+function renderJobs(items) {
+  const use = items.filter(j => j.kind !== 'clean' && j.kind !== 'train');
+  document.getElementById('results-card').hidden = !use.length;
+  document.getElementById('job-list').innerHTML = use.map(j => {
+    const r = j.result || {};
+    const stems = r.stems || {};
+    return `<li class="track">
+      <div class="track-head"><span class="pill ${j.status}">${j.status}</span><strong>${kindLabel[j.kind] || j.kind}</strong></div>
+      <div class="meta">${esc(j.message || '')} ${j.queue_position ? '· place ' + j.queue_position + ' in the queue' : ''}
+        ${j.error ? '<span class="expiring">' + esc(j.error) + '</span>' : ''}
+        ${r.key_shift_semitones ? ' · moved ' + (r.key_shift_semitones > 0 ? 'up ' : 'down ') + Math.abs(r.key_shift_semitones) + ' semitones' : ''}
+        · <span class="${j.days_left < 14 ? 'expiring' : ''}">deleted on ${esc(j.deleted_on)}</span></div>
+      ${r.audio_url ? `<audio controls preload="none" src="${r.audio_url}"></audio>
+        <div class="actions"><a class="btn tiny" href="${r.audio_url}?download=1">Download</a>
+        ${Object.entries(stems).map(([k, u]) => `<a class="btn tiny" href="${u}?download=1">${esc(k)} only</a>`).join('')}</div>` : ''}
+      ${r.lyrics ? `<details><summary>Lyrics</summary><pre>${esc(r.lyrics)}</pre></details>` : ''}
+    </li>`; }).join('');
+}
+
+let busy = false;
+async function refresh() {
+  try {
+    const [v, clips, jobs] = await Promise.all([api(`/v1/voices/${VID}`), api(`/v1/voices/${VID}/clips`),
+                                                api(`/v1/jobs?voice_id=${VID}`)]);
+    renderVoice(v); renderClips(clips.items); renderJobs(jobs.items); await renderStyle(v.style_model);
+    busy = v.status === 'training' || clips.items.some(c => c.status === 'cleaning') ||
+           (v.style_model && (v.style_model.status === 'training' || v.style_model.songs_transcribing > 0)) ||
+           jobs.items.some(j => j.status === 'queued' || j.status === 'generating');
+  } catch (e) { document.getElementById('voice-status').textContent = e.message; }
+  setTimeout(refresh, busy ? 5000 : 30000);
+}
+
+async function upload(files) {
+  const state = document.getElementById('upload-state');
+  for (const [i, f] of [...files].entries()) {
+    state.textContent = `Uploading ${i + 1} of ${files.length}: ${f.name}…`;
+    const fd = new FormData(); fd.append('file', f, f.name); fd.append('kind', document.getElementById('clip-kind').value);
+    try { await api(`/v1/voices/${VID}/clips`, {method: 'POST', body: fd}); }
+    catch (e) { state.textContent = `${f.name}: ${e.message}`; await new Promise(r => setTimeout(r, 2500)); }
+  }
+  state.textContent = 'Uploaded — each recording is now being cleaned (music and echo removed).';
+  refresh();
+}
+document.getElementById('clip-files').addEventListener('change', ev => { upload(ev.target.files); ev.target.value = ''; });
+
+let rec = null, chunks = [];
+document.getElementById('rec-btn').addEventListener('click', async ev => {
+  const btn = ev.target, st = document.getElementById('rec-state');
+  if (rec) { rec.stop(); return; }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({audio: {echoCancellation: false, noiseSuppression: false, autoGainControl: false}});
+    rec = new MediaRecorder(stream); chunks = [];
+    rec.ondataavailable = e => chunks.push(e.data);
+    rec.onstop = () => { stream.getTracks().forEach(t => t.stop()); btn.textContent = '● Record'; st.textContent = '';
+      const blob = new Blob(chunks, {type: rec.mimeType}); rec = null;
+      upload([new File([blob], `recording-${new Date().toISOString().slice(0, 19)}.webm`, {type: blob.type})]); };
+    rec.start(); btn.textContent = '■ Stop'; st.textContent = 'Recording… sing or speak, then press Stop';
+  } catch (e) { st.textContent = 'The microphone is not available: ' + e.message; }
+});
+
+document.getElementById('clip-list').addEventListener('change', async ev => {
+  const s = ev.target.closest('[data-kind-clip]'); if (!s) return;
+  try { await api(`/v1/voices/${VID}/clips/${s.dataset.kindClip}`, {method: 'PATCH',
+        headers: {'Content-Type': 'application/json'}, body: JSON.stringify({kind: s.value})}); }
+  catch (e) { alert(e.message); }
+  refresh();
+});
+document.getElementById('clip-list').addEventListener('click', async ev => {
+  const b = ev.target.closest('[data-del-clip]'); if (!b) return;
+  if (!confirm('Remove this recording?')) return;
+  try { await api(`/v1/voices/${VID}/clips/${b.dataset.delClip}`, {method: 'DELETE'}); } catch (e) { alert(e.message); }
+  refresh();
+});
+
+document.getElementById('train-btn').addEventListener('click', async () => {
+  const err = document.getElementById('train-error'); err.textContent = '';
+  try { await api(`/v1/voices/${VID}/train`, {method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({quality: document.getElementById('quality').value})}); }
+  catch (e) { err.textContent = e.message; }
+  refresh();
+});
+
+document.querySelectorAll('[data-utab]').forEach(b => b.addEventListener('click', () => {
+  document.querySelectorAll('[data-utab]').forEach(x => x.classList.toggle('on', x === b));
+  document.querySelectorAll('[data-upanel]').forEach(p => p.hidden = p.dataset.upanel !== b.dataset.utab);
+}));
+document.querySelectorAll('[data-upanel]').forEach(f => f.addEventListener('submit', async ev => {
+  ev.preventDefault();
+  const err = f.querySelector('.error'); err.textContent = '';
+  const kind = f.dataset.upanel;
+  try {
+    if (kind === 'resing') {
+      const fd = new FormData(f);
+      if (!f.file.files[0]) fd.delete('file');
+      fd.set('keep_backing_vocals', f.keep_backing_vocals.checked ? 'true' : 'false');
+      if (!fd.get('music_id') && !f.file.files[0]) throw new Error('choose a song or upload one');
+      await api(`/v1/voices/${VID}/resing`, {method: 'POST', body: fd});
+    } else {
+      const body = Object.fromEntries([...new FormData(f)].filter(([, v]) => v !== ''));
+      if (body.duration_s) body.duration_s = Number(body.duration_s);
+      if (kind === 'song') {
+        const styleOn = !document.getElementById('style-use').hidden;
+        body.use_style_model = styleOn && f.use_style_model.checked;
+        if (styleOn) body.style_strength = Number(f.style_strength.value); else delete body.style_strength;
+      }
+      await api(`/v1/voices/${VID}/${kind === 'song' ? 'songs' : 'speech'}`, {method: 'POST',
+        headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+    }
+    document.getElementById('results-card').hidden = false;
+  } catch (e) { err.textContent = e.message; }
+  refresh();
+}));
+
+document.getElementById('style-start').addEventListener('click', async () => {
+  try { await api(`/v1/voices/${VID}/style-model`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'}); }
+  catch (e) { alert(e.message); }
+  refresh();
+});
+document.getElementById('style-files').addEventListener('change', async ev => {
+  const state = document.getElementById('style-upload-state'), files = [...ev.target.files];
+  for (const [i, f] of files.entries()) {
+    state.textContent = `Uploading ${i + 1} of ${files.length}: ${f.name}…`;
+    const fd = new FormData(); fd.append('file', f, f.name); fd.append('title', f.name.replace(/\.[^.]+$/, ''));
+    try { await api(`/v1/style-models/${STYLE.id}/songs`, {method: 'POST', body: fd}); }
+    catch (e) { state.textContent = `${f.name}: ${e.message}`; await new Promise(r => setTimeout(r, 2500)); }
+  }
+  state.textContent = 'Uploaded — the lyrics are being drafted (about a minute per song). Check and confirm each.';
+  ev.target.value = ''; refresh();
+});
+document.getElementById('style-songs').addEventListener('click', async ev => {
+  const li = ev.target.closest('[data-song]'); if (!li) return;
+  try {
+    if (ev.target.closest('[data-confirm]')) {
+      await api(`/v1/style-models/${STYLE.id}/songs/${li.dataset.song}`, {method: 'PATCH', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({lyrics: li.querySelector('[data-lyrics]').value, confirmed: true})});
+    } else if (ev.target.closest('[data-del-song]')) {
+      if (!confirm('Remove this song?')) return;
+      await api(`/v1/style-models/${STYLE.id}/songs/${li.dataset.song}`, {method: 'DELETE'});
+    } else return;
+  } catch (e) { alert(e.message); }
+  document.activeElement.blur(); refresh();
+});
+document.getElementById('style-train').addEventListener('click', async () => {
+  const err = document.getElementById('style-error'); err.textContent = '';
+  try { await api(`/v1/style-models/${STYLE.id}/train`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'}); }
+  catch (e) { err.textContent = e.message; }
+  refresh();
+});
+
+document.getElementById('delete-btn').addEventListener('click', async () => {
+  if (!confirm('Delete this voice, its recordings, model and profile? This cannot be undone.')) return;
+  try { await api(`/v1/voices/${VID}`, {method: 'DELETE'}); location.href = '/voices'; } catch (e) { alert(e.message); }
+});
+refresh();
+</script>
+{% endblock %}

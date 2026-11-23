@@ -1,0 +1,338 @@
+{% extends "base.html" %}
+{% block title %}Speech · Story Studio{% endblock %}
+{% block body %}
+<h1>Speech</h1>
+<p class="muted">Type something and pick a voice — or clone one from a clip — and Qwen3-TTS
+  reads it aloud (Burmese / မြန်မာ is read by VoxCPM2). Use a clip as a storyboard soundtrack with “Add to project”. Up to
+  {{ per_hour }} clips an hour.</p>
+
+<section class="card">
+  <form id="speech-form" class="stack" enctype="multipart/form-data">
+    <label>
+      <span class="field-head"><span>What should be said?</span><span class="count" id="text-count"></span></span>
+      <textarea name="text" rows="5" maxlength="{{ max_text }}" data-count="text-count" required
+        placeholder="Once upon a time, in a lighthouse at the edge of the world…"></textarea>
+    </label>
+
+    <div class="tabs" role="tablist" style="margin:4px 0 0">
+      <button type="button" role="tab" data-vtab="preset" class="on">Preset voice</button>
+      <button type="button" role="tab" data-vtab="clone">Clone a voice from a clip</button>
+    </div>
+
+    <!-- Preset voices -->
+    <div class="stack" data-vpanel="preset">
+      <div class="voices" role="radiogroup" aria-label="Voice">
+        {% for name, desc in speakers.items() %}
+        <label class="voice">
+          <input type="radio" name="speaker" value="{{ name }}" {% if name == default_speaker %}checked{% endif %}>
+          <strong>{{ name.replace('_', ' ') }}</strong>
+          <small>{{ desc }}</small>
+        </label>
+        {% endfor %}
+      </div>
+      <p class="hint">Every voice can speak every language below except Burmese, which has its own four
+        voices (Thiri, Nandar, Kyaw, U Ba). Hindi has two choices: four native Hindi voices (Meera, Anaya,
+        Arjun, Vikram), or any of the first nine, which speak it with a foreign accent. Burmese and Hindi
+        text are detected automatically.</p>
+      <label>How should it sound? <span class="hint">Optional — describe the delivery in plain words.</span>
+        <input name="instruct" id="instruct" maxlength="500" placeholder="warm and slow, like a bedtime story">
+      </label>
+      <div class="chips" aria-label="Delivery ideas">
+        {% for c in ["calm and warm", "excited and fast", "whispering", "sad, with pauses",
+                     "deep movie-trailer narrator", "cheerful, smiling", "angry, shouting",
+                     "news anchor, crisp and neutral"] %}
+          <button type="button" class="chip" data-instruct="{{ c }}">{{ c }}</button>
+        {% endfor %}
+      </div>
+    </div>
+
+    <!-- Voice clone -->
+    <div class="stack" data-vpanel="clone" hidden>
+      <div class="clip-source">
+        <label class="dropzone" id="clip-drop">
+          <input type="file" name="reference" id="clip" accept="audio/*,video/*">
+          <strong>Upload a voice clip</strong>, or drop one here
+          <small class="muted">One person talking, 8–20 seconds, no music behind it. Any audio or video file.</small>
+        </label>
+        <div class="recorder" id="recorder">
+          <button type="button" class="btn" id="rec-btn">● Record with your microphone</button>
+          <span class="rec-time" id="rec-time" hidden>0:00 / 0:30</span>
+          <p class="hint" id="rec-hint">Speak naturally in a quiet room, about 10–20 seconds. Not sure what to say? Read this:</p>
+          <blockquote class="rec-script" id="rec-script">The best part of my day is the walk home. The streets get quiet, the light turns gold, and I finally have a few minutes to think about nothing at all.</blockquote>
+        </div>
+      </div>
+      <div id="clip-info" hidden>
+        <audio id="clip-preview" controls preload="metadata"></audio>
+        <p class="hint" id="clip-meta"></p>
+      </div>
+
+      <label>
+        <span class="field-head"><span>Exactly what is said in the clip</span><span class="hint" id="transcribe-state"></span></span>
+        <textarea name="reference_text" id="reference-text" rows="4"
+          placeholder="Filled in automatically when you choose a clip — then fix any mistakes."></textarea>
+      </label>
+      <p class="hint">This is what makes the clone sound like the person and not just a similar voice: the model hears the clip <em>with</em> its words and carries on in the same accent, pace and manner. Correct any misheard words — the closer this matches, the closer the clone.</p>
+
+      <fieldset class="modes">
+        <legend>How close a match?</legend>
+        <label class="mode">
+          <input type="radio" name="match" value="style" checked>
+          <div><strong>Copy the speaking style</strong> — recommended
+            <p class="muted">Voice, accent, rhythm, pitch and delivery. Uses the transcript above.</p></div>
+        </label>
+        <label class="mode">
+          <input type="radio" name="match" value="timbre">
+          <div><strong>Voice colour only</strong>
+            <p class="muted">Just the sound of the voice; the model speaks in its own way. Use when the clip is noisy or the transcript can’t be trusted.</p></div>
+        </label>
+      </fieldset>
+
+      <details class="more">
+        <summary>Tips for a closer clone</summary>
+        <ul class="examples hint">
+          <li>Clean speech beats long speech: 8–20 seconds with no music, echo or other voices.</li>
+          <li>The clip’s mood carries over — for a calm read, use a calm clip.</li>
+          <li>Same language in the clip and the text gives the strongest accent match.</li>
+          <li>Not quite right? Make 3 takes and keep the best, or nudge expressiveness below.</li>
+          <li>Only clone voices you have permission to use.</li>
+        </ul>
+      </details>
+    </div>
+
+    <div class="grid3">
+      <label>Language
+        <select name="language">
+          {% for l in languages %}<option value="{{ l }}">{{ 'Detect automatically' if l == 'Auto' else ('Sanskrit — śloka chant' if l == 'Sanskrit' else l) }}</option>{% endfor %}
+        </select>
+      </label>
+      <label id="meter-row" hidden>Metre (chandas)
+        <select name="meter">
+          {% for m in meters %}<option value="{{ m }}">{{ 'Detect from the verse' if m == 'auto' else m }}</option>{% endfor %}
+        </select>
+      </label>
+      <label>Takes
+        <select name="takes">
+          <option value="1">1</option><option value="2">2 — pick the better one</option><option value="3">3 — pick the best one</option>
+        </select>
+      </label>
+    </div>
+
+    <details class="more">
+      <summary>Fine-tune</summary>
+      <div class="stack">
+        <label>Expressiveness <span class="hint" id="temp-value"></span>
+          <span class="range-row"><span class="hint">steady</span>
+            <input type="range" id="temp-range" min="0.1" max="1.5" step="0.05" value="0.9">
+            <span class="hint">lively</span></span>
+          <input type="hidden" name="temperature" id="temperature">
+          <span class="hint">How much each take varies. For clones, 0.6–0.8 stays closest to the clip; higher sounds livelier but drifts from it.</span>
+        </label>
+        <div class="grid3">
+          <label>Seed <input type="number" name="seed" id="seed" min="0" placeholder="random">
+            <span class="hint">Every clip shows its seed — paste it here to repeat that take.</span></label>
+        </div>
+      </div>
+    </details>
+
+    <div class="formbar">
+      <button class="btn primary" type="submit">Generate speech</button>
+      <span class="error" role="alert"></span>
+    </div>
+  </form>
+</section>
+
+<section class="card">
+  <h2>Your clips</h2>
+  <ul class="tracklist" id="speech-list" aria-live="polite"></ul>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/media.js"></script>
+<script>
+const projects = {{ projects | tojson }};
+const form = document.getElementById('speech-form');
+const clip = document.getElementById('clip'), refText = document.getElementById('reference-text');
+const tempRange = document.getElementById('temp-range'), temp = document.getElementById('temperature');
+let vtab = 'preset', tempTouched = false;
+
+// Only the active tab's fields are sent: a disabled input is not submitted.
+function syncVoice() {
+  document.querySelectorAll('[data-vtab]').forEach(b => b.classList.toggle('on', b.dataset.vtab === vtab));
+  document.querySelectorAll('[data-vpanel]').forEach(p => {
+    p.hidden = p.dataset.vpanel !== vtab;
+    p.querySelectorAll('input, textarea, select').forEach(el => el.disabled = p.hidden);
+  });
+  // Clones are closest around 0.7 (measured); presets keep the model's 0.9.
+  if (!tempTouched) tempRange.value = vtab === 'clone' ? 0.7 : 0.9;
+  showTemp();
+}
+function showTemp() {
+  document.getElementById('temp-value').textContent = Number(tempRange.value).toFixed(2);
+  temp.value = tempTouched || vtab === 'clone' ? tempRange.value : '';
+}
+tempRange.addEventListener('input', () => { tempTouched = true; showTemp(); });
+document.querySelectorAll('[data-vtab]').forEach(b => b.addEventListener('click', () => {
+  vtab = b.dataset.vtab; syncVoice(); }));
+document.querySelectorAll('[data-instruct]').forEach(b => b.addEventListener('click', () => {
+  const i = document.getElementById('instruct'); i.value = b.dataset.instruct; i.focus(); }));
+
+// Burmese has its own voices (VoxCPM2). Typing Burmese moves the choice to one of
+// them, and a Burmese voice moves the language to Burmese, so a default never
+// produces a "does not speak Burmese" error. Same 50% rule as speech._has_burmese.
+const burmeseVoices = {{ burmese_speakers | tojson }};
+const langSel = form.querySelector('select[name=language]');
+const isBurmese = t => { const l = [...t].filter(c => /\p{L}|[က-႟]/u.test(c));
+  return l.length > 0 && l.filter(c => /[က-႟ꩠ-ꩿꧠ-꧿]/u.test(c)).length / l.length >= 0.5; };
+function pickedVoice() { const r = form.querySelector('input[name=speaker]:checked'); return r && r.value; }
+function setVoice(v) { const r = form.querySelector(`input[name=speaker][value="${v}"]`); if (r) r.checked = true; }
+// Hindi has BOTH: native voices (VoxCPM2) and the Qwen voices with an accent. Devanagari
+// moves an untouched or wrong-language choice to the first native Hindi voice; a Qwen
+// voice the person picked on purpose is kept. Same 50% rule as speech._has_hindi.
+const hindiVoices = {{ hindi_speakers | tojson }};
+const isHindi = t => { const l = [...t].filter(c => /\p{L}|[\u0900-\u097f]/u.test(c));
+  return l.length > 0 && l.filter(c => /[\u0900-\u097f\ua8e0-\ua8ff]/u.test(c)).length / l.length >= 0.5; };
+let voiceTouched = false;
+// Sanskrit is chanted by its one voice and never auto-detected (it shares Devanagari
+// with Hindi): picking either the language or the voice selects the other.
+const meterRow = document.getElementById('meter-row');
+function syncSanskrit() { meterRow.hidden = langSel.value !== 'Sanskrit'; }
+langSel.addEventListener('change', () => {
+  if (langSel.value === 'Sanskrit') setVoice('Vagdhenu');
+  else if (pickedVoice() === 'Vagdhenu') setVoice({{ default_speaker | tojson }});
+  syncSanskrit();
+});
+form.querySelector('textarea[name=text]').addEventListener('input', e => {
+  const mm = isBurmese(e.target.value), hi = !mm && isHindi(e.target.value), v = pickedVoice();
+  if (mm && !burmeseVoices.includes(v)) setVoice(burmeseVoices[0]);
+  if (hi && langSel.value !== 'Sanskrit' && (burmeseVoices.includes(v) || !voiceTouched) && !hindiVoices.includes(v)) setVoice(hindiVoices[0]);
+  if (!mm && !hi && (burmeseVoices.includes(v) || hindiVoices.includes(v)) && e.target.value.trim())
+    setVoice({{ default_speaker | tojson }});
+  if (mm && langSel.value !== 'Auto' && langSel.value !== 'Burmese') langSel.value = 'Burmese';
+  if (hi && langSel.value !== 'Auto' && langSel.value !== 'Hindi' && langSel.value !== 'Sanskrit') langSel.value = 'Hindi';
+});
+form.querySelectorAll('input[name=speaker]').forEach(r => r.addEventListener('change', () => {
+  voiceTouched = true;
+  if (r.value === 'Vagdhenu') { langSel.value = 'Sanskrit'; syncSanskrit(); return; }
+  if (langSel.value === 'Sanskrit') { langSel.value = 'Auto'; syncSanskrit(); }
+  if (burmeseVoices.includes(r.value)) { if (langSel.value !== 'Auto') langSel.value = 'Burmese'; }
+  else if (hindiVoices.includes(r.value)) { if (langSel.value !== 'Auto') langSel.value = 'Hindi'; }
+  else if (langSel.value === 'Burmese') langSel.value = 'Auto';
+}));
+
+// Recording: MediaRecorder -> a File put into the same input as an upload, so
+// everything after (preview, transcript, submit) is one code path.
+const recBtn = document.getElementById('rec-btn'), recTime = document.getElementById('rec-time');
+const MAX_REC_S = 30;
+let recorder = null, recTimer = null;
+if (!navigator.mediaDevices || !window.MediaRecorder) {
+  recBtn.disabled = true;
+  document.getElementById('rec-hint').textContent = 'Recording needs a browser with microphone access over https — upload a clip instead.';
+}
+function stopRecording() { if (recorder && recorder.state === 'recording') recorder.stop(); }
+recBtn.addEventListener('click', async () => {
+  if (recorder && recorder.state === 'recording') { stopRecording(); return; }
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, channelCount: 1 } });
+  } catch (e) {
+    document.getElementById('rec-hint').innerHTML = '<span class="error">Microphone permission was refused or no microphone was found.</span>';
+    return;
+  }
+  const chunks = [], started = Date.now();
+  recorder = new MediaRecorder(stream);
+  recorder.ondataavailable = ev => ev.data.size && chunks.push(ev.data);
+  recorder.onstop = () => {
+    clearInterval(recTimer);
+    stream.getTracks().forEach(t => t.stop());
+    recBtn.textContent = '● Record again';
+    recBtn.classList.remove('recording');
+    const type = recorder.mimeType || 'audio/webm';
+    const ext = type.includes('mp4') ? 'm4a' : type.includes('ogg') ? 'ogg' : 'webm';
+    const file = new File([new Blob(chunks, { type })], `recording.${ext}`, { type });
+    const dt = new DataTransfer(); dt.items.add(file); clip.files = dt.files;
+    clip.dispatchEvent(new Event('change'));
+  };
+  recorder.start(250);
+  recBtn.textContent = '■ Stop recording';
+  recBtn.classList.add('recording');
+  recTime.hidden = false;
+  recTimer = setInterval(() => {
+    const s = Math.floor((Date.now() - started) / 1000);
+    recTime.textContent = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')} / 0:${MAX_REC_S}`;
+    if (s >= MAX_REC_S) stopRecording();
+  }, 250);
+});
+
+// Choosing a clip: preview it, and fill the transcript from Whisper so the
+// clone runs in the style-copying mode without the person typing anything.
+const drop = document.getElementById('clip-drop');
+['dragover', 'dragenter'].forEach(e => drop.addEventListener(e, ev => { ev.preventDefault(); drop.classList.add('over'); }));
+['dragleave', 'drop'].forEach(e => drop.addEventListener(e, () => drop.classList.remove('over')));
+drop.addEventListener('drop', ev => { ev.preventDefault(); clip.files = ev.dataTransfer.files; clip.dispatchEvent(new Event('change')); });
+clip.addEventListener('change', async () => {
+  const f = clip.files[0], state = document.getElementById('transcribe-state');
+  if (!f) return;
+  drop.querySelector('strong').textContent = f.name;
+  document.getElementById('clip-info').hidden = false;
+  document.getElementById('clip-preview').src = URL.createObjectURL(f);
+  const meta = document.getElementById('clip-meta');
+  meta.textContent = '';
+  state.textContent = 'Listening to the clip…';
+  refText.value = ''; refText.placeholder = 'Transcribing…';
+  const fd = new FormData(); fd.append('reference', f);
+  try {
+    const r = await fetch('/api/speech/transcribe', { method: 'POST', body: fd, headers: { Accept: 'application/json' } });
+    const body = await r.json();
+    if (!r.ok) { state.textContent = ''; meta.innerHTML = `<span class="error">${esc(body.error || 'Could not read that clip')}</span>`; return; }
+    refText.value = body.text || '';
+    state.textContent = body.text ? 'Transcribed — check it' : 'No words heard';
+    const s = body.seconds;
+    meta.textContent = `${s} s of speech after trimming silence` +
+      (s < 5 ? ' — short; 8–20 s gives a closer match.' : s > 25 ? ' — long; only the first 30 s is used.' : '.');
+  } catch (e) { state.textContent = 'Could not transcribe — type the words in.'; }
+  finally { refText.placeholder = 'Exactly what is said in the clip'; }
+});
+
+mediaPage({
+  kind: 'speech', form, list: document.getElementById('speech-list'), projects,
+  onSubmitted: () => { form.text.value = ''; form.text.dispatchEvent(new Event('input')); },
+  render: it => {
+    const p = it.params || {};
+    const take = p.takes > 1 ? ` · take ${p.take} of ${p.takes}` : '';
+    const how = it.voice === 'clone'
+      ? `Cloned voice (${p.match === 'timbre' ? 'voice colour only' : 'speaking style'})`
+      : esc(it.voice.replace('_', ' ')) + (it.instruct ? ' · “' + esc(it.instruct) + '”' : '');
+    return `
+    <li class="track">
+      <div class="track-head">
+        <span class="pill ${it.status}">${it.status}</span>
+        <strong>${esc(it.text.length > 110 ? it.text.slice(0, 110) + '…' : it.text)}</strong>
+      </div>
+      <div class="meta">${how} · ${esc(it.language)}${take}
+        ${p.temperature != null ? ' · expressiveness ' + p.temperature : ''}
+        ${p.seed != null ? ' · seed ' + p.seed : ''}
+        ${it.duration_s ? ' · ' + it.duration_s.toFixed(1) + ' s' : ''} · ${esc(it.created)}
+        ${it.deletes ? ` · <span class="${it.deletes.days_left < 14 ? 'expiring' : ''}">deleted on ${esc(it.deletes.deleted_on)}</span>` : ''}</div>
+      ${statusLine(it)}
+      ${it.audio ? `<audio controls preload="none" src="${it.audio}"></audio>` : ''}
+      ${it.voice === 'clone' && it.reference_text ? `<details><summary>Transcript of the clip it used</summary><pre>${esc(it.reference_text)}</pre></details>` : ''}
+      <div class="actions">
+        ${it.audio ? `<a class="btn tiny" href="${it.audio}?download=1">Download</a>` : ''}
+        ${p.seed != null && it.status === 'succeeded' ? `<button class="btn tiny" data-seed="${p.seed}" title="Put this seed in Fine-tune">Reuse seed</button>` : ''}
+        ${projectPicker('speech', it, projects)}
+        ${it.status !== 'generating' ? `<button class="btn tiny danger" data-delete="${it.id}">Delete</button>` : ''}
+      </div>
+    </li>`;
+  },
+});
+document.getElementById('speech-list').addEventListener('click', ev => {
+  const b = ev.target.closest('[data-seed]');
+  if (!b) return;
+  document.getElementById('seed').value = b.dataset.seed;
+  document.getElementById('seed').closest('details').open = true;
+  form.scrollIntoView({ behavior: 'smooth', block: 'start' });
+});
+syncVoice();
+</script>
+{% endblock %}

@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block title %}Sign in an app · Story Studio{% endblock %}
+{% block body %}
+<section class="card narrow">
+  {% if done == "approved" %}
+    <h1>You're signed in</h1>
+    <p><strong>{{ client_name or "The app" }}</strong> can now use your Story Studio account. Go back
+      to the app — it will continue on its own in a few seconds.</p>
+    <p class="muted">Access ends when your account does, or when the administrator disables it.</p>
+  {% elif done == "denied" %}
+    <h1>Cancelled</h1>
+    <p>The app was not given access. You can close this page.</p>
+  {% else %}
+    <h1>Sign in an app</h1>
+    <p>Enter the code the app is showing you. Only do this if you just started signing in to an app
+      yourself.</p>
+    {% if client_name %}
+      <p><strong>{{ client_name }}</strong> is asking to use your Story Studio account: to make and
+        change your projects, pictures, speech, songs and voices on your behalf.</p>
+    {% endif %}
+    {% if error %}<p class="error">{{ error }}</p>{% endif %}
+    <form method="post" action="/activate" class="stack">
+      <label>Code
+        <input name="code" value="{{ code or '' }}" placeholder="ABCD-EFGH" autocomplete="one-time-code"
+               autocapitalize="characters" spellcheck="false" maxlength="12" required
+               style="font-family:ui-monospace,monospace;letter-spacing:.12em;text-transform:uppercase"
+               {% if not code %}autofocus{% endif %}>
+      </label>
+      {% if user %}
+        <p>Signed in as <strong>{{ user.username }}</strong>.</p>
+      {% else %}
+        <label>Username <input name="username" autocomplete="username" required {% if code %}autofocus{% endif %}></label>
+        <label>Password <input name="password" type="password" autocomplete="current-password" required></label>
+      {% endif %}
+      <button class="btn primary" type="submit" name="action" value="allow">Allow</button>
+      <button class="btn" type="submit" name="action" value="deny" formnovalidate>Cancel</button>
+    </form>
+    <p class="muted">The code works once and expires 15 minutes after the app shows it.</p>
+  {% endif %}
+</section>
+{% endblock %}

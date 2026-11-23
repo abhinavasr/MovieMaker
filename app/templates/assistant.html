@@ -1,0 +1,117 @@
+{% extends "base.html" %}
+{% block title %}Assistant · Story Studio{% endblock %}
+{% block body %}
+<link rel="stylesheet" href="/static/agent.css">
+<div class="ws" id="ws">
+  <!-- conversations -->
+  <aside class="ws-rail ws-pane" id="rail" aria-label="Conversations">
+    <button class="ws-btn primary" id="new-chat" type="button">＋ New conversation</button>
+    <input class="ws-search" id="search" type="search" placeholder="Search conversations" aria-label="Search conversations">
+    <div class="ws-threads" id="threads"></div>
+    <div class="ws-railfoot">
+      <b>Planner</b> {{ planner }} · GPU<br>
+      <b>Executors</b> {{ executor }} · CPU<br>
+      New GPU work waits while the planner thinks. Running work is checked every 30 s, with a planner review when something finishes and at least every {{ review_min }} min.
+    </div>
+  </aside>
+
+  <!-- conversation -->
+  <section class="ws-center" id="center">
+    <div class="ws-head">
+      <button class="ws-btn ghost ws-icon ws-only-narrow" id="open-rail" type="button" aria-label="Conversations">☰</button>
+      <h1 id="title" title="Click to rename">New conversation</h1>
+      <span class="ws-pill" id="pill"><span class="ws-dot" id="pill-dot"></span><span id="pill-t">ready</span></span>
+      <button class="ws-btn ghost sm ws-only-ctx" id="open-ctx" type="button">Context <span id="ctx-n"></span></button>
+      <button class="ws-btn ghost ws-icon" id="del" type="button" title="Delete conversation" aria-label="Delete conversation" hidden>🗑</button>
+    </div>
+
+    <div class="ws-feed" id="feed">
+      <div class="ws-col" id="col">
+        <div class="ws-empty" id="empty">
+          <h2>What shall we make?</h2>
+          <p>Describe it, drop in pictures, audio, video or a script for context. I plan it, run it on the studio, check the results and fix what's off.</p>
+          <div class="ws-ex">
+            <button type="button" data-ex="Make a 15-second clip of a paper boat sailing down a rainy street at night, with sound."><b>🎬 A clip with sound</b>Paper boat on a rainy night street</button>
+            <button type="button" data-ex="Draw 3 storybook pictures of a fox who finds a lantern, then turn them into a storyboard video with gentle camera moves."><b>🖼 Pictures → film</b>A fox who finds a lantern, in 3 scenes</button>
+            <button type="button" data-ex="Write and sing a 40-second lo-fi song about monsoon evenings."><b>🎵 A song</b>Lo-fi, about monsoon evenings</button>
+            <button type="button" data-ex="Read the attached script aloud in Meera's voice, calm and warm."><b>🔊 Narrate a script</b>Attach a .txt, .pdf or .docx</button>
+            <button type="button" data-ex="Use the attached photo as the main character and make a short storyboard where they explore a night market."><b>📎 From your photo</b>Your picture as the hero</button>
+            <button type="button" data-ex="What failed in my studio today, and can you fix it?"><b>🛠 Fix my failures</b>Diagnose and retry</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <button class="ws-btn ws-jump" id="jump" type="button" hidden>↓ New activity</button>
+
+    <div class="ws-dock">
+      <div class="ws-col">
+        <div class="ws-status" id="status" aria-live="polite">
+          <span class="ws-dot" id="st-dot"></span><span class="txt" id="st-txt">Ready.</span>
+          <button class="ws-btn sm danger" id="stop" type="button" hidden>■ Stop</button>
+        </div>
+        <div class="ws-pending" id="pending"></div>
+        <form class="ws-box" id="say">
+          <div class="ws-slash" id="slash" hidden></div>
+          <button class="ws-btn ghost ws-icon" id="attach" type="button" title="Attach files (or drop / paste them)" aria-label="Attach files">📎</button>
+          <button class="ws-btn ghost ws-icon" id="lib" type="button" title="Add from your library" aria-label="Add from your library">🗂</button>
+          <textarea id="text" rows="1" placeholder="Ask for anything, or give feedback on what I made…  (/ for commands)" aria-label="Message"></textarea>
+          <button class="ws-btn primary ws-icon" type="submit" id="send" aria-label="Send">➤</button>
+          <input type="file" id="file" multiple hidden accept="{{ accept }}">
+        </form>
+        <div class="ws-hint">Enter to send · Shift+Enter for a new line · drop or paste files · click anything made to reuse it</div>
+      </div>
+    </div>
+    <div class="ws-drop">Drop files to add them to the conversation</div>
+  </section>
+
+  <!-- context -->
+  <aside class="ws-ctx ws-pane" id="ctx" aria-label="Context">
+    <div class="ws-sec">
+      <h3>Running now <span class="c" id="next-check"></span></h3>
+      <div id="jobs"><div class="ws-empty-s">Nothing running.</div></div>
+    </div>
+    <div class="ws-sec">
+      <h3>Your files <span class="c"><button class="ws-btn sm" id="attach2" type="button">＋ Add</button></span></h3>
+      <div class="ws-grid" id="files"></div>
+      <div class="ws-empty-s" id="files-empty">Pictures, audio, video, PDFs, Word and text files. I read and see them; say “use F1” or click a tile.</div>
+    </div>
+    <div class="ws-sec">
+      <h3>Made here <span class="c" id="made-n"></span></h3>
+      <div class="ws-grid" id="made"></div>
+      <div class="ws-empty-s" id="made-empty">Pictures, clips, speech and songs from this conversation appear here.</div>
+    </div>
+    <div class="ws-sec">
+      <h3>From your library <span class="c"><button class="ws-btn sm" id="lib2" type="button">＋ Pin</button></span></h3>
+      <div class="ws-list" id="pins"></div>
+      <div class="ws-empty-s" id="pins-empty">Pin earlier pictures, videos, speech or songs so I can use them.</div>
+    </div>
+    <div class="ws-sec">
+      <h3>What I remember about you</h3>
+      <div class="ws-list" id="lessons"></div>
+      <form class="ws-lesson-add" id="lesson-form"><input id="lesson-in" placeholder="e.g. always portrait, 9:16" maxlength="300"><button class="ws-btn sm" type="submit">Add</button></form>
+    </div>
+    <div class="ws-how" id="keep"></div>
+  </aside>
+  <div class="ws-scrim" id="scrim"></div>
+</div>
+
+<div class="ws-modal" id="libmodal" hidden>
+  <div class="ws-sheet" role="dialog" aria-modal="true" aria-labelledby="lib-h">
+    <header><h2 id="lib-h">Add from your library</h2><button class="ws-btn ghost ws-icon" id="lib-x" type="button" aria-label="Close">✕</button></header>
+    <div class="ws-tabs" id="lib-tabs">
+      <button type="button" data-t="images" class="on">Pictures</button><button type="button" data-t="videos">Videos</button>
+      <button type="button" data-t="speech">Speech</button><button type="button" data-t="music">Songs</button>
+    </div>
+    <div class="body" id="lib-body"></div>
+  </div>
+</div>
+<div class="ws-lb" id="lb" hidden><div class="in" id="lb-in"></div></div>
+<div class="ws-toast" id="toast" hidden></div>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/agent-chat.js"></script>
+<script>
+AgentChat.mount({page: true});
+</script>
+{% endblock %}

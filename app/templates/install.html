@@ -1,0 +1,96 @@
+{% extends "base.html" %}
+{% block title %}Connect an assistant · Story Studio{% endblock %}
+{% block body %}
+<h1>Connect your AI assistant</h1>
+<p class="muted">Use Story Studio from Claude or ChatGPT — make pictures, speech and songs, turn them into videos,
+  and regenerate scenes just by asking. You sign in with your Story Studio username and
+  password; there is no separate key.</p>
+
+<section class="card">
+  <h2><span class="step">1</span> Copy the server address</h2>
+  <div class="copy">
+    <code id="mcp-url">{{ base }}/mcp</code>
+    <button class="btn tiny" type="button" data-copy="mcp-url">Copy</button>
+  </div>
+</section>
+
+<section class="card">
+  <h2><span class="step">2</span> Add it to your app</h2>
+  <div class="apps">
+    <div class="app">
+      <h3>Claude <span class="muted">(claude.ai or desktop)</span></h3>
+      <ol>
+        <li><strong>Settings → Connectors → Add custom connector</strong></li>
+        <li>Name <code>Story Studio</code>, paste the address</li>
+        <li>Press <strong>Connect</strong> and sign in</li>
+      </ol>
+    </div>
+    <div class="app">
+      <h3>ChatGPT</h3>
+      <ol>
+        <li><strong>Settings → Apps &amp; Connectors → Advanced</strong>: turn on
+          <strong>Developer mode</strong></li>
+        <li><strong>Create</strong> a connector: name <code>Story Studio</code>, paste the
+          address, authentication <strong>OAuth</strong></li>
+        <li>Sign in, then switch it on in a chat from the <strong>+</strong> menu</li>
+      </ol>
+    </div>
+    <div class="app">
+      <h3>Claude Code</h3>
+      <div class="copy">
+        <code id="cc-cmd">claude mcp add --transport http --scope user story-studio {{ base }}/mcp</code>
+        <button class="btn tiny" type="button" data-copy="cc-cmd">Copy</button>
+      </div>
+      <p>Then type <code>/mcp</code>, pick <strong>story-studio</strong> and choose
+        <strong>Authenticate</strong>.</p>
+    </div>
+  </div>
+  <p class="muted">Shortcut: tell your assistant <code>Install {{ base }}/install</code> and it
+    will set itself up, or tell you the clicks it can't do for you.</p>
+</section>
+
+<p class="retention-note" role="note">⏳ {{ keep_a_copy() }}</p>
+
+<section class="card">
+  <h2><span class="step">3</span> Just ask</h2>
+  <ul class="examples">
+    <li>“Make a picture of a lighthouse at sunset, landscape.”</li>
+    <li>“Same picture, but in a storm at night.”</li>
+    <li>“Turn these three pictures into a short video about a stormy night.”</li>
+    <li>“Regenerate scene 2 of my last video with a slower camera.”</li>
+    <li>“Read this paragraph aloud in a warm, slow voice.”</li>
+    <li>“Write and sing a Hindi lullaby about the moon, soft piano.”</li>
+  </ul>
+  <p class="muted">Pictures and speech take about 10–30 seconds; videos about 2 minutes per 5 seconds.
+    Everything counts against your account's hourly limits, and an assistant's access ends
+    when your account does.</p>
+</section>
+
+<details class="card">
+  <summary>Everything an assistant can do ({{ tools|length }} tools)</summary>
+  <table>
+    <tbody>
+    {% for name, description in tools %}
+      <tr><td><code>{{ name }}</code></td><td>{{ description }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  <p class="muted">The same instructions as plain text, for a program:
+    <a href="/install.md">/install.md</a>.</p>
+</details>
+
+<p class="muted">Building your own app? The API spec for developers is at <a href="/dev">{{ base }}/dev</a>.</p>
+{% if user %}<a class="back" href="/studio">← Projects</a>{% else %}<a class="back" href="/login">Sign in to the studio</a>{% endif %}
+
+<script>
+document.querySelectorAll("[data-copy]").forEach(function (btn) {
+  btn.addEventListener("click", function () {
+    var text = document.getElementById(btn.dataset.copy).textContent.trim();
+    navigator.clipboard.writeText(text).then(function () {
+      btn.textContent = "Copied";
+      setTimeout(function () { btn.textContent = "Copy"; }, 1500);
+    }, function () { btn.textContent = "Select and copy"; });
+  });
+});
+</script>
+{% endblock %}

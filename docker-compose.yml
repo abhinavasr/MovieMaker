@@ -1,0 +1,360 @@
+# Story Studio -- its own project, its own network, its own port.
+#
+# It joins the existing `wis_default` network as well, because that is the only
+# way to reach the WIS API: wis-api publishes to 127.0.0.1:8090 on the host,
+# which a container cannot see. Joining a network does not restart or
+# reconfigure anything already on it.
+services:
+  web:
+    build: .
+    image: story-studio:latest
+    container_name: story-studio
+    restart: unless-stopped
+    user: "${STUDIO_UID:-1000}:${STUDIO_GID:-1000}"
+    env_file: .env
+    environment:
+      STUDIO_DATA_DIR: /data
+      STUDIO_WIS_URL: ${STUDIO_WIS_URL:-http://wis-api:8090}
+    # The assistant's planner/executor models are served by the host's Ollama.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./data:/data
+      # Style songs are staged here for the style engine (music-train), which sees it as /app/training.
+      - ./music-training:/training
+      # The API spec served at /dev (read-only; rebuilt with docs/build_spec.py).
+      - ./docs:/srv/docs:ro
+    ports:
+      # Host-local only. The public front door is the tunnel below, so nothing
+      # here needs to listen on the LAN.
+      - "127.0.0.1:8120:8120"
+    networks:
+      - default
+      - wis
+      - vagdhenu
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8120/healthz', timeout=8).status==200 else 1)"]
+      interval: 30s
+      timeout: 10s
+      start_period: 20s
+      retries: 3
+
+  # Burmese (Myanmar) speech: VoxCPM2 (Apache-2.0), chosen by the 2026-11-20
+  # bake-off in ~/mm-tts-bakeoff. Same /speak + /clone contract as `tts`;
+  # app/speech.py sends Burmese clips here. Weights and the four preset voice
+  # clips are in ./tts-models/voxcpm. Studio network only; no port.
+  tts-my:
+    build: ./tts-my
+    image: studio-tts-my:latest
+    container_name: story-studio-tts-my
+    restart: unless-stopped
+    user: "${STUDIO_UID:-1000}:${STUDIO_GID:-1000}"
+    command: ["python", "-m", "uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8098"]
+    working_dir: /studio-tts-my
+    environment:
+      HOME: /tmp
+      HF_HOME: /tmp/hf
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      MALLOC_ARENA_MAX: "2"
+      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+    volumes:
+      - ./tts-my/server.py:/studio-tts-my/server.py:ro
+      - ./tts-models/voxcpm:/models/voxcpm:ro
+    networks:
+      - default
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    shm_size: "2gb"
+    mem_limit: 16g
+    memswap_limit: 16g
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8098/healthz',timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+
+  # Qwen3-TTS for the generate_speech tool. Reuses the Vagdhenu stack's Qwen
+  # image (nothing rebuilt there) with the studio's own small server, so that
+  # stack and tts.abhinava.xyz are never touched. The Base checkpoint used for
+  # cloning is Vagdhenu's copy, mounted read-only. Studio network only; no port.
+  tts:
+    image: vagdhenu-qwen-tts:latest
+    container_name: story-studio-tts
+    restart: unless-stopped
+    user: "${STUDIO_UID:-1000}:${STUDIO_GID:-1000}"
+    command: ["python", "-m", "uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8097"]
+    working_dir: /studio-tts
+    environment:
+      HF_HOME: /models/hf
+      HOME: /models
+      XDG_CACHE_HOME: /models/cache
+      NUMBA_CACHE_DIR: /models/numba
+      HF_HUB_OFFLINE: "1"
+      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+    volumes:
+      - ./tts/server.py:/studio-tts/server.py:ro
+      - ./tts-models:/models
+      - ${STUDIO_TTS_BASE_HF:-/home/abhinava/vagdhenu/models/qwen/hf}:/base-hf:ro
+    networks:
+      - default
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    shm_size: "2gb"
+    mem_limit: 16g
+    memswap_limit: 16g
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8097/healthz',timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+
+  # ACE-Step 1.5 for the generate_music tool and the /music page. Built from
+  # the upstream repo (./music-src, pinned by its git checkout); weights in
+  # ./music-models. XL turbo for songs/covers/repaint, XL base for stems,
+  # layers and extend, the 4B composer LM for lyrics. Everything is offloaded
+  # to host RAM between jobs so the card goes back to WIS; the studio's GPU
+  # queue (app/gpuqueue.py) only starts a job when WIS is idle.
+  music:
+    image: studio-music:latest
+    container_name: story-studio-music
+    restart: unless-stopped
+    user: "${STUDIO_UID:-1000}:${STUDIO_GID:-1000}"
+    # studio_entry.py runs the upstream server and exits it after 10 idle
+    # minutes: with offload every loaded model sits in host RAM (34 GB
+    # measured), and restart: unless-stopped brings it back empty.
+    entrypoint: ["/app/.venv/bin/python", "/studio/studio_entry.py",
+                 "--host", "0.0.0.0", "--port", "8001"]
+    environment:
+      HOME: /cache
+      HF_HOME: /cache/hf
+      XDG_CACHE_HOME: /cache
+      ACESTEP_TMPDIR: /cache/tmp
+      TRITON_CACHE_DIR: /cache/triton
+      TORCHINDUCTOR_CACHE_DIR: /cache/inductor
+      ACESTEP_INIT_SERVICE: "true"
+      ACESTEP_CONFIG_PATH: acestep-v15-xl-turbo
+      # Empty until the XL base weights are on disk: ACE-Step downloads a
+      # configured model it cannot find, and that must never happen silently.
+      ACESTEP_CONFIG_PATH2: ${STUDIO_MUSIC_BASE_MODEL-acestep-v15-xl-base}
+      ACESTEP_INIT_LLM: "true"
+      ACESTEP_LM_MODEL_PATH: acestep-5Hz-lm-4B
+      ACESTEP_LM_BACKEND: pt
+      ACESTEP_OFFLOAD_TO_CPU: "true"
+      # Without this the DiT stays on the card between jobs (measured: 10 GB
+      # held after a song). With it, the idle engine keeps ~0.8 GB.
+      ACESTEP_OFFLOAD_DIT_TO_CPU: "true"
+      ACESTEP_LM_OFFLOAD_TO_CPU: "true"
+      ACESTEP_QUEUE_WORKERS: "1"
+      STUDIO_MUSIC_IDLE_EXIT_S: ${STUDIO_MUSIC_IDLE_EXIT_S:-600}
+      PYTHONPATH: /app
+      TOKENIZERS_PARALLELISM: "false"
+      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+    volumes:
+      - ./music-models/checkpoints:/app/checkpoints
+      - ./music-models/cache:/cache
+      # ACE-Step keeps a request cache under /app/.cache; the image's /app is
+      # root-owned and this runs as the host user.
+      - ./music-models/cache/app:/app/.cache
+      - ./music/studio_entry.py:/studio/studio_entry.py:ro
+    networks:
+      - default
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    shm_size: "4gb"
+    # Two 9 GB DiTs + the 4B LM live in host RAM between jobs.
+    mem_limit: 40g
+    memswap_limit: 40g
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:8001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 600s
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+
+  # The style engine (layer 3): ACE-Step for singing-style LoKr training and for songs
+  # rendered with a person's style adapter. Separate from `music` because it must run
+  # with offload OFF (preprocess breaks with it on) and must exit after each job
+  # (training leaves the adapter attached) -- see music/train_entry.py. Lazy: holds
+  # ~0.6 GB until asked; turbo only, no composer LM (the `music` engine composes).
+  # Measured: ~20 GB of the card while training, so the studio only trains in a
+  # night window with WIS idle (app/voices.py).
+  music-train:
+    image: studio-music:latest
+    container_name: story-studio-music-train
+    restart: unless-stopped
+    user: "${STUDIO_UID:-1000}:${STUDIO_GID:-1000}"
+    entrypoint: ["/app/.venv/bin/python", "/studio/train_entry.py",
+                 "--host", "0.0.0.0", "--port", "8001"]
+    environment:
+      HOME: /cache
+      HF_HOME: /cache/hf
+      XDG_CACHE_HOME: /cache
+      ACESTEP_TMPDIR: /cache/tmp
+      TRITON_CACHE_DIR: /cache/triton
+      TORCHINDUCTOR_CACHE_DIR: /cache/inductor
+      ACESTEP_INIT_SERVICE: "true"
+      ACESTEP_CONFIG_PATH: acestep-v15-xl-turbo
+      ACESTEP_CONFIG_PATH2: ""
+      ACESTEP_INIT_LLM: "false"
+      ACESTEP_LM_MODEL_PATH: acestep-5Hz-lm-4B
+      ACESTEP_LM_BACKEND: pt
+      ACESTEP_OFFLOAD_TO_CPU: "false"
+      ACESTEP_OFFLOAD_DIT_TO_CPU: "false"
+      ACESTEP_LM_OFFLOAD_TO_CPU: "false"
+      ACESTEP_QUEUE_WORKERS: "1"
+      STUDIO_STYLE_IDLE_EXIT_S: ${STUDIO_STYLE_IDLE_EXIT_S:-45}
+      PYTHONPATH: /app
+      TOKENIZERS_PARALLELISM: "false"
+      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+    volumes:
+      - ./music-models/checkpoints:/app/checkpoints:ro
+      - ./music-models/cache:/cache
+      - ./music-models/cache/app:/app/.cache
+      - ./music/train_entry.py:/studio/train_entry.py:ro
+      # Training paths must sit under /app (ACE-Step's safe root). Shared with web.
+      - ./music-training:/app/training
+    networks:
+      - default
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    shm_size: "4gb"
+    mem_limit: 24g
+    memswap_limit: 24g
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:8001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    container_name: story-studio-tunnel
+    restart: unless-stopped
+    # --protocol http2 for the same measured reason as the WIS tunnel: QUIC to
+    # the edge does not stay up on this uplink while the box is generating.
+    command: >
+      tunnel --no-autoupdate --metrics 127.0.0.1:20242
+      --protocol http2 --edge-ip-version auto
+      --retries 10 --grace-period 30s
+      run
+    environment:
+      TUNNEL_TOKEN: ${STUDIO_TUNNEL_TOKEN:-}
+    # host networking, because the dashboard route points at
+    # http://127.0.0.1:8120 -- the port `web` publishes on the HOST. From a
+    # bridge-network container 127.0.0.1 is that container's own loopback and
+    # the route would 502. Same arrangement as wis-tunnel. Metrics on 20242 so
+    # it does not collide with wis-tunnel's 20241.
+    network_mode: host
+    depends_on:
+      - web
+    profiles: ["tunnel"]
+
+  # Voice cloning (RVC) for the voice features. Reuses the Ultimate RVC image and its
+  # venv READ-ONLY from ~/Documents/RVC-Docker, so the user's own ultimate-rvc
+  # container (:8550) is never touched; base models (embedders, pitch predictors,
+  # pretrained weights) are mounted read-only from there too. Everything the studio
+  # writes -- clips, training runs, trained voices -- lives in ./rvc-data.
+  # Studio network only; no port. Each GPU op runs in a child process (rvc/ops.py),
+  # so the card is empty between jobs.
+  rvc:
+    image: rvc-docker-ultimate-rvc:latest
+    container_name: story-studio-rvc
+    restart: unless-stopped
+    user: "${STUDIO_UID:-1000}:${STUDIO_GID:-1000}"
+    entrypoint: ["/app/venv/bin/python", "-m", "uvicorn", "server:app", "--host", "0.0.0.0",
+                 "--port", "8098", "--app-dir", "/studio-rvc"]
+    working_dir: /cache
+    environment:
+      RVC_DATA: /data
+      URVC_MODELS_DIR: /models
+      URVC_AUDIO_DIR: /data/audio
+      URVC_TEMP_DIR: /data/temp
+      URVC_CONFIG_DIR: /cache/config
+      HOME: /cache
+      XDG_CACHE_HOME: /cache
+      NUMBA_CACHE_DIR: /cache/numba
+      MPLCONFIGDIR: /cache/mpl
+      HF_HUB_OFFLINE: "1"
+      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+    volumes:
+      - ./rvc/server.py:/studio-rvc/server.py:ro
+      - ./rvc/ops.py:/studio-rvc/ops.py:ro
+      - ${STUDIO_RVC_VENV:-/home/abhinava/Documents/RVC-Docker/venv}:/app/venv:ro
+      - ./rvc-data/models:/models
+      - ${STUDIO_RVC_BASE:-/home/abhinava/Documents/RVC-Docker/models/rvc}/embedders:/models/rvc/embedders:ro
+      - ${STUDIO_RVC_BASE:-/home/abhinava/Documents/RVC-Docker/models/rvc}/predictors:/models/rvc/predictors:ro
+      - ${STUDIO_RVC_BASE:-/home/abhinava/Documents/RVC-Docker/models/rvc}/pretraineds:/models/rvc/pretraineds:ro
+      - ./rvc-data/data:/data
+      - ./rvc-data/cache:/cache
+      - ./rvc-data/logs:/app/logs
+      # static_sox writes a lock file inside its own package dir; give it a writable copy
+      - ./rvc-data/static_sox:/app/venv/lib/python3.12/site-packages/static_sox
+      # the trainer caches spectrograms next to its bundled silence clips
+      - ./rvc-data/rvc_mute:/app/venv/lib/python3.12/site-packages/ultimate_rvc/rvc/train/models/mute
+    networks:
+      - default
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    shm_size: "4gb"
+    mem_limit: 24g
+    memswap_limit: 24g
+    healthcheck:
+      test: ["CMD", "/app/venv/bin/python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8098/health',timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    logging:
+      driver: json-file
+      options: {max-size: "20m", max-file: "3"}
+
+networks:
+  default:
+  wis:
+    external: true
+    name: wis_default
+  # Sanskrit chant (Vāgdhenu, ~/vagdhenu). Joining it restarts nothing over there.
+  vagdhenu:
+    name: vagdhenu_default
+    external: true

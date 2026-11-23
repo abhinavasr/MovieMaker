@@ -1,0 +1,257 @@
+{% extends "base.html" %}
+{% block title %}{{ p.title }} · Story Studio{% endblock %}
+{% block body %}
+<a class="back" href="/studio">← Projects</a>
+<h1>{{ p.title }}</h1>
+<p class="{% if deletes.days_left < 14 %}expiring{% else %}muted{% endif %}">This project and its files will be deleted on
+  <strong>{{ deletes.deleted_on }}</strong> ({{ deletes.days_left }} days, counted from the last change). Download the video and anything else you want to keep.</p>
+<p class="muted">
+  {% if p.mode == 'single' %}
+    Single clip · up to {{ max_images }} reference images and {{ max_audio }} audio clips ·
+    the model generates its own soundtrack
+  {% else %}
+    Storyboard · one shot per image, joined into one film · silent unless you upload a soundtrack
+  {% endif %}
+</p>
+
+<div id="status" class="banner {{ p.status }}" data-status="{{ p.status }}">
+  <span class="pill {{ p.status }}" id="status-pill">{{ p.status }}</span>
+  <span id="status-msg">{{ p.message }}</span>
+  <div class="bar"><div id="status-bar" style="width: {{ p.progress }}%"></div></div>
+</div>
+{% if p.error %}<div class="banner error"><strong>Failed.</strong> <code>{{ p.error }}</code></div>{% endif %}
+
+{% if p.status == 'succeeded' %}
+<div id="result" class="card">
+  <h2>Your video</h2>
+  <video controls playsinline preload="metadata" src="/projects/{{ p.id }}/video"></video>
+  <p><a class="btn primary" href="/projects/{{ p.id }}/video?download=1">Download MP4</a>
+     <span class="muted">{% if p.has_audio %}with sound{% else %}silent{% endif %}</span></p>
+</div>
+{% endif %}
+
+<section class="card">
+  <h2>Story &amp; settings</h2>
+  <form method="post" action="/projects/{{ p.id }}/settings" class="stack">
+    <label>Title <input name="title" value="{{ p.title }}" required></label>
+    <label>
+      {% if p.mode == 'single' %}Prompt{% else %}Story{% endif %}
+      <textarea name="story" rows="7" placeholder="{% if p.mode == 'single' %}Describe the scene, the motion, the camera and the sound. Refer to your pictures as <Picture 1>, <Picture 2>…{% else %}Write the story. It will be split into one prompt per image, which you can then edit.{% endif %}">{{ p.story }}</textarea>
+      <small class="muted">
+      {% if p.mode == 'single' %}
+        This is sent to the model as-is. Address your references by tag — they are numbered in
+        upload order, shown under each picture below. If you write no tags, a roster line is
+        added for you, but naming them yourself works better.
+      {% else %}
+        This is the raw material for the shot prompts, not a prompt itself. Press
+        <em>Plan shots</em> below to split it.
+      {% endif %}
+      </small>
+    </label>
+    <div class="grid3">
+      <label>Shape
+        <select name="orientation">
+          <option value="portrait" {% if params.orientation != 'landscape' and params.orientation != 'square' %}selected{% endif %}>Portrait 480×864</option>
+          <option value="landscape" {% if params.orientation == 'landscape' %}selected{% endif %}>Landscape 864×480</option>
+          <option value="square" {% if params.orientation == 'square' %}selected{% endif %}>Square 640×640</option>
+        </select>
+        <small class="muted">These are the model's native sizes on this card. Larger runs out of
+          video memory part way through.</small>
+      </label>
+      <label>{% if p.mode == 'single' %}Length{% else %}Seconds per shot{% endif %}
+        <input name="seconds" type="number" min="1" max="{% if p.mode == 'single' %}15{% else %}11{% endif %}" value="{{ params.seconds or 5 }}">
+        <small class="muted">~2 minutes of GPU per 5 seconds.</small>
+      </label>
+      <label>Upscale 2× <span class="muted">(experimental)</span>
+        <select name="upscale">
+          {% set up = params.upscale or 'off' %}
+          <option value="off" {% if up == 'off' %}selected{% endif %}>Off — normal size</option>
+          <option value="latent" {% if up == 'latent' %}selected{% endif %}>Latent — sharper, ~2.4× slower</option>
+          <option value="refine" {% if up == 'refine' %}selected{% endif %}>Refine — cleanest detail, ~2.7× slower</option>
+        </select>
+        <small class="muted">Made at the normal size, delivered at twice it; sound is kept.</small>
+      </label>
+      {% if p.mode == 'single' %}
+      <label>Reference fidelity
+        <select name="ref_image_size">
+          <option value="match" {% if params.ref_image_size != 'max' %}selected{% endif %}>Match — faster</option>
+          <option value="max" {% if params.ref_image_size == 'max' %}selected{% endif %}>Max — stronger likeness, much slower</option>
+        </select>
+        <small class="muted">Reference detail rides through every sampling step.</small>
+      </label>
+      {% else %}
+      <label class="check">
+        <input type="checkbox" name="continuity" {% if params.continuity %}checked{% endif %}>
+        Match cuts
+        <small class="muted">Each shot ends on the next shot's picture, so the clips join without
+          a jump. Constrains the motion.</small>
+      </label>
+      {% endif %}
+    </div>
+    <button class="btn" type="submit">Save</button>
+  </form>
+</section>
+
+<section class="card">
+  <h2>Pictures <span class="muted">{{ images|length }} / {{ max_images }}</span></h2>
+  {% if images %}
+  <div class="assets">
+    {% for a in images %}
+      <figure>
+        <img src="/projects/{{ p.id }}/asset/{{ a.id }}" alt="">
+        <figcaption>
+          {% if p.mode == 'single' %}<code>&lt;Picture {{ a.idx + 1 }}&gt;</code>
+          {% else %}Shot {{ a.idx + 1 }}{% endif %}
+          <form method="post" action="/projects/{{ p.id }}/assets/{{ a.id }}/delete">
+            <button class="btn tiny danger">Remove</button>
+          </form>
+        </figcaption>
+      </figure>
+    {% endfor %}
+  </div>
+  {% else %}<p class="muted">No pictures yet.</p>{% endif %}
+
+  <h3>Audio <span class="muted">{{ audios|length }} / {{ max_audio }}</span></h3>
+  {% if audios %}
+    <ul class="audios">
+      {% for a in audios %}
+        <li>
+          {% if p.mode == 'single' %}<code>&lt;Audio {{ a.idx + 1 }}&gt;</code>{% else %}Soundtrack{% endif %}
+          <audio controls src="/projects/{{ p.id }}/asset/{{ a.id }}"></audio>
+          <span class="muted">{{ a.orig_name }}</span>
+          <form method="post" action="/projects/{{ p.id }}/assets/{{ a.id }}/delete">
+            <button class="btn tiny danger">Remove</button>
+          </form>
+        </li>
+      {% endfor %}
+    </ul>
+  {% else %}
+    <p class="muted">
+      {% if p.mode == 'single' %}Optional. A voice or a piece of music here is used as a reference —
+        the model imitates it in the soundtrack it generates.
+      {% else %}Optional. One audio file here is laid over the finished film as its soundtrack.
+      {% endif %}
+    </p>
+  {% endif %}
+
+  <form method="post" action="/projects/{{ p.id }}/upload" enctype="multipart/form-data"
+        class="upload" id="uploader">
+    <input type="file" name="files" id="files" multiple
+           accept="image/png,image/jpeg,image/webp,audio/*">
+    <label for="files" class="dropzone" id="dropzone">
+      <strong>Choose files</strong> or drag them here
+      <small class="muted">PNG, JPEG or WebP · WAV, MP3, FLAC, OGG or M4A · up to 16 MB each.
+        Pictures are numbered in the order you add them.</small>
+    </label>
+    <button class="btn" type="submit">Upload</button>
+  </form>
+</section>
+
+{% if p.mode == 'storyboard' %}
+<section class="card">
+  <h2>Shots</h2>
+  {% if not images %}
+    <p class="muted">Upload some pictures first — each one becomes a shot.</p>
+  {% else %}
+    <div class="shot-actions">
+      <form method="post" action="/projects/{{ p.id }}/plan" class="inline">
+        <button class="btn primary" {% if not p.story.strip() %}disabled{% endif %}>
+          {% if shots %}Re-plan from the story{% else %}Plan shots from the story{% endif %}
+        </button>
+      </form>
+      <form method="post" action="/projects/{{ p.id }}/shots/blank" class="inline"
+            {% if shots %}onsubmit="return confirm('Replace the current shots with empty ones?')"{% endif %}>
+        <button class="btn">Write the shots myself</button>
+      </form>
+    </div>
+    <p class="muted">
+      {% if not p.story.strip() %}
+        <strong>Write the story above first</strong> — it is what gets split into one prompt
+        per picture. Or press <em>Write the shots myself</em> to start from blanks.
+      {% else %}
+        Writes one prompt per picture from your story. You can edit every one of them, and
+        every shot needs a prompt before it will render.
+      {% endif %}
+    </p>
+  {% endif %}
+
+  {% if shots %}
+  <form method="post" action="/projects/{{ p.id }}/shots" class="stack shots">
+    {% for s in shots %}
+      <div class="shot">
+        <img src="/projects/{{ p.id }}/asset/{{ s.asset_id }}" alt="">
+        <div class="shot-fields">
+          <label>Shot {{ s.idx + 1 }}
+            <input name="title_{{ s.id }}" value="{{ s.title or '' }}" placeholder="working title">
+          </label>
+          <label>What moves, and how the camera moves
+            <textarea name="prompt_{{ s.id }}" rows="3" required>{{ s.prompt }}</textarea>
+          </label>
+          <label class="short">Seconds
+            <input name="seconds_{{ s.id }}" type="number" min="1" max="11" value="{{ s.seconds }}">
+          </label>
+        </div>
+      </div>
+    {% endfor %}
+    <button class="btn" type="submit">Save shots</button>
+  </form>
+  {% endif %}
+</section>
+{% endif %}
+
+<section class="card">
+  <h2>Render</h2>
+  {% if p.status in ('queued', 'running') %}
+    <form method="post" action="/projects/{{ p.id }}/cancel">
+      <button class="btn danger">Cancel this render</button>
+      <span class="muted">Frees the GPU straight away.</span>
+    </form>
+  {% else %}
+    <form method="post" action="/projects/{{ p.id }}/render">
+      <button class="btn primary">
+        {% if p.mode == 'single' %}Generate the clip{% else %}Generate {{ shots|length }} shot(s) and join them{% endif %}
+      </button>
+      <span class="muted">
+        {% if p.mode == 'single' %}About 2–5 minutes.
+        {% else %}About 2 minutes per shot, one at a time.{% endif %}
+        {% if queue %}{{ queue }} render(s) ahead of you.{% endif %}
+      </span>
+    </form>
+  {% endif %}
+  <form method="post" action="/projects/{{ p.id }}/delete" class="right"
+        onsubmit="return confirm('Delete this project and its files?')">
+    <button class="btn tiny danger">Delete project</button>
+  </form>
+</section>
+
+<script>
+const PROJECT = {{ p.id | tojson }};
+const dz = document.getElementById('dropzone'), fi = document.getElementById('files');
+if (dz) {
+  ['dragover','dragenter'].forEach(e => dz.addEventListener(e, ev => {
+    ev.preventDefault(); dz.classList.add('over'); }));
+  ['dragleave','drop'].forEach(e => dz.addEventListener(e, () => dz.classList.remove('over')));
+  dz.addEventListener('drop', ev => { ev.preventDefault(); fi.files = ev.dataTransfer.files; });
+  fi.addEventListener('change', () => {
+    dz.querySelector('strong').textContent = fi.files.length + ' file(s) selected'; });
+}
+
+// Poll only while there is something to watch, and reload once on a state
+// change so the page's forms reflect what is now allowed.
+let last = document.getElementById('status').dataset.status;
+async function tick() {
+  try {
+    const r = await fetch(`/api/projects/${PROJECT}/status`);
+    if (!r.ok) return;
+    const s = await r.json();
+    document.getElementById('status-pill').textContent = s.status;
+    document.getElementById('status-pill').className = 'pill ' + s.status;
+    document.getElementById('status-msg').textContent = s.message || '';
+    document.getElementById('status-bar').style.width = (s.progress || 0) + '%';
+    if (s.status !== last) { location.reload(); return; }
+    if (s.status === 'queued' || s.status === 'running') setTimeout(tick, 3000);
+  } catch (e) { setTimeout(tick, 8000); }
+}
+if (last === 'queued' || last === 'running') setTimeout(tick, 2000);
+</script>
+{% endblock %}

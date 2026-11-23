@@ -1,0 +1,1338 @@
+"""The MCP endpoint -- Story Studio as a set of tools an assistant can call.
+
+Streamable HTTP, stateless: every POST to /mcp is one JSON-RPC message and gets
+one JSON answer. There is no session and no server-sent stream, because nothing
+here pushes -- a render takes minutes, so the assistant starts it and polls
+`get_status`, the same way the project page does.
+
+The tools are a second front door onto `app.service`, not a second
+implementation. Each handler finds the project, calls the same function the
+form handler calls, and reports what the project looks like afterwards.
+
+Vocabulary: the pages say "shot", assistants are told "scene". They are the
+same row. A video made WITH scenes is a `storyboard` project; one made WITHOUT
+is a `single` clip.
+"""
+from __future__ import annotations
+
+import asyncio
+import base64
+import inspect
+import ipaddress
+import json
+import logging
+import socket
+from pathlib import Path
+from urllib.parse import urljoin, urlsplit
+
+import httpx
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import JSONResponse, Response
+
+from app import auth, db, gpuqueue, images, music, oauth, render, service, speech, voices
+from app.config import cfg
+
+log = logging.getLogger("studio.mcp")
+router = APIRouter()
+
+PROTOCOLS = ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05")
+VIDEO_LINK_TTL = 24 * 3600
+UPLOAD_LINK_TTL = 3600
+
+INSTRUCTIONS = """Story Studio turns pictures plus a story into a video on a single GPU.
+
+A project is made one of two ways, and `update_project` can switch it:
+- storyboard = WITH scenes. One picture per scene, each animated for a few seconds, joined \
+into one film. Silent unless a soundtrack was uploaded. Each scene has its own prompt, which \
+should describe what MOVES and how the CAMERA moves -- the model already has the picture.
+- single = WITHOUT scenes. One clip of up to ~15 s made from the story as the prompt, with up \
+to 9 reference pictures (called <Picture 1>, <Picture 2>... in the prompt) and generated sound.
+
+To regenerate a video: get_project, change the story or scenes, then render_video. In a \
+storyboard, pass `scenes` to render_video to regenerate only those scenes and keep the rest. \
+For a sharper result, update_project(upscale="refine" or "latent") delivers the video at twice \
+the size (experimental, off by default, about 2.5x the render time). \
+Rendering takes about 2 minutes per 5 seconds of video and runs one project at a time, so \
+render_video returns at once: call get_status every 20-30 seconds until status is \
+`succeeded`, then give the person the video_url. A picture that is in the conversation (generated \
+or attached) goes in with add_file. A file on the person's own disk that you can reach with a \
+shell goes in with get_upload_link; otherwise send them to the project page.
+
+The studio also makes still pictures with generate_image: from a prompt alone (text-to-image), \
+or from up to 4 source pictures plus a prompt saying what to change or combine (image-to-image). \
+`model` chooses FLUX.2 klein (default) or Qwen-Image-2.1 (turbo or base; strong at lettering). \
+Sources can be a file in this chat, a public URL, an earlier image_id, or a project's pictures. \
+It usually finishes within the call (10-30 s); if it is still generating, call get_image. \
+To edit a result, pass its image_id as a source. To use one in a video, add_file(image_id=...).
+
+It also speaks text aloud with generate_speech (Qwen3-TTS): one of nine preset speakers, \
+optionally steered with `instruct` ("calm and slow", "excited"), or a clone of a voice clip \
+you supply. Sanskrit ślokas can be CHANTED (language=Sanskrit, Vāgdhenu; metre detected or given). \
+Burmese (Myanmar) text is spoken by VoxCPM2 with its own four speakers (Thiri, \
+Nandar, Kyaw, U_Ba) or a clone; Burmese script is detected automatically. Hindi has two \
+options: four native Hindi voices on VoxCPM2 (Meera, the default, Anaya, Arjun, Vikram) or any of \
+the nine Qwen voices (understandable, with a foreign accent); Devanagari is detected automatically. It usually finishes within the call; if not, call get_speech. Give the person the \
+audio_url. To use a clip as a storyboard soundtrack, add_file(speech_id=...).
+
+And it makes songs with generate_music (ACE-Step 1.5): describe a song in a sentence and it \
+writes the lyrics too, or give your own lyrics ([Verse]/[Chorus] tags) and a style, optionally \
+with a reference track for the sound. It can also cover, repaint a section of, extract a stem \
+from, add a layer to, extend, or build a band around (accompany) an existing track. Speech and songs wait in a queue while the \
+GPU is busy with pictures or videos; the reply gives the queue position. Poll get_music.
+
+Personal voices: a person can train their OWN voice from their recordings (they create it and \
+upload in their browser — get_voice_upload_link gives the page), then resing_song (change a \
+song's singer to them, mixed back on the original music), sing_song (a new song in their range \
+and manner, sung in their voice) and speak_as_voice. Voices are private to their owner. Poll \
+get_voice_job for results.
+
+Everything made or uploaded here is deleted 90 days after it last changed (each result says \
+`deleted_on`). Tell the person to download anything they want to keep and save their own copy. \
+Trained voices and voice profiles are the exception and are kept until deleted."""
+
+
+# --------------------------------------------------------------------------- views
+
+def _project(user: auth.User, args: dict):
+    return service.owned_project(user, str(args.get("project_id") or ""))
+
+
+def _video_url(project, base: str) -> str | None:
+    path = project["output_path"]
+    if project["status"] != "succeeded" or not path or not Path(path).exists():
+        return None
+    return base + service.signed_path("video", project["id"], VIDEO_LINK_TTL)
+
+
+def _scenes(project_id: str, images: list) -> list[dict]:
+    number = {a["id"]: i + 1 for i, a in enumerate(images)}
+    return [{"scene": i + 1, "title": s["title"], "prompt": s["prompt"],
+             "seconds": s["seconds"], "picture": number.get(s["asset_id"]),
+             "status": s["status"], **({"error": s["error"]} if s["error"] else {})}
+            for i, s in enumerate(service.shots_of(project_id))]
+
+
+def _describe(project_id: str, base: str) -> dict:
+    project = db.one("SELECT * FROM projects WHERE id=?", (project_id,))
+    assets = db.query("SELECT * FROM assets WHERE project_id=? ORDER BY kind, idx", (project_id,))
+    images = [a for a in assets if a["kind"] == "image"]
+    audios = [a for a in assets if a["kind"] == "audio"]
+    params = db.params_of(project)
+    single = project["mode"] == "single"
+    max_img, max_aud = service.limits(project["mode"])
+    settings = {"orientation": params.get("orientation", "portrait"),
+                "size": f"{params.get('width', 480)}x{params.get('height', 864)}"}
+    if single:
+        settings["seconds"] = params.get("seconds", 10)
+        settings["reference_fidelity"] = params.get("ref_image_size", "match")
+    else:
+        settings["seconds_per_new_scene"] = params.get("seconds", cfg.DEFAULT_SHOT_SECONDS)
+        settings["match_cuts"] = bool(params.get("continuity"))
+    settings["upscale"] = params.get("upscale", "off")
+    out = {
+        "project_id": project_id,
+        "title": project["title"],
+        **service.retention(project["updated_at"]),
+        "mode": project["mode"],
+        "made": ("without scenes: one clip from the story, pictures used as references, "
+                 "sound generated" if single else
+                 "with scenes: one picture per scene, clips joined into one film"),
+        "story": project["story"],
+        "settings": settings,
+        "pictures": [{"picture": i + 1, "name": a["orig_name"],
+                      **({"tag": f"<Picture {i + 1}>"} if single else {})}
+                     for i, a in enumerate(images)],
+        "picture_slots": max_img,
+        "audio": [a["orig_name"] for a in audios],
+        "audio_slots": max_aud,
+        "status": project["status"],
+        "progress": project["progress"],
+        "message": project["message"],
+        "page_url": f"{base}/projects/{project_id}",
+    }
+    if not single:
+        out["scenes"] = _scenes(project_id, images)
+    if project["error"]:
+        out["error"] = project["error"]
+    video = _video_url(project, base)
+    if video:
+        out["video_url"] = video
+        out["video_has_sound"] = bool(project["has_audio"])
+    return out
+
+
+def _status(project_id: str, base: str) -> dict:
+    project = db.one("SELECT * FROM projects WHERE id=?", (project_id,))
+    out = {"project_id": project_id, "status": project["status"],
+           "progress": project["progress"], "message": project["message"],
+           "renders_waiting": render.queue_depth()}
+    if project["error"]:
+        out["error"] = project["error"]
+    if project["mode"] == "storyboard":
+        out["scenes"] = [{"scene": i + 1, "status": s["status"],
+                          **({"error": s["error"]} if s["error"] else {})}
+                         for i, s in enumerate(service.shots_of(project_id))]
+    video = _video_url(project, base)
+    if video:
+        out["video_url"] = video
+        out["video_has_sound"] = bool(project["has_audio"])
+    elif service.is_rendering(project):
+        out["next"] = "not finished; call get_status again in 20-30 seconds"
+    return out
+
+
+# --------------------------------------------------------------------------- fetching
+
+async def _fetch_public(url: str, limit: int) -> tuple[str, str, bytes]:
+    """Download a picture or audio file an assistant gave by URL.
+
+    This is the one place the server makes a request to an address a caller
+    chose, and it sits on a docker network next to the WIS API. So every hop is
+    resolved first and refused unless all of its addresses are public, and
+    redirects are followed by hand so each one gets the same check. The body is
+    only ever parsed as media and never echoed back, which is what limits a
+    resolver that changes its answer between the check and the connect.
+    """
+    loop = asyncio.get_running_loop()
+    # Named honestly: several image hosts refuse a library's default agent.
+    agent = {"User-Agent": "StoryStudio/1.0 (media fetch for a user-supplied URL)"}
+    async with httpx.AsyncClient(timeout=30.0, follow_redirects=False,
+                                 headers=agent) as client:
+        for _ in range(4):
+            parts = urlsplit(url)
+            if parts.scheme not in ("http", "https") or not parts.hostname:
+                raise HTTPException(400, f"{url[:200]} is not an http(s) URL")
+            try:
+                infos = await loop.getaddrinfo(parts.hostname, parts.port or 443,
+                                               type=socket.SOCK_STREAM)
+            except OSError:
+                raise HTTPException(400, f"could not resolve {parts.hostname}")
+            if not infos or any(not ipaddress.ip_address(i[4][0]).is_global for i in infos):
+                raise HTTPException(400, f"{parts.hostname} is not a public address")
+            try:
+                async with client.stream("GET", url) as resp:
+                    if resp.status_code in (301, 302, 303, 307, 308):
+                        url = urljoin(url, resp.headers.get("location", ""))
+                        continue
+                    if resp.status_code >= 400:
+                        raise HTTPException(400, f"{parts.hostname} answered HTTP "
+                                                 f"{resp.status_code} for that URL")
+                    chunks, size = [], 0
+                    async for chunk in resp.aiter_bytes():
+                        size += len(chunk)
+                        if size > limit:
+                            raise HTTPException(
+                                413, f"that file is over {cfg.MAX_UPLOAD_MB} MB")
+                        chunks.append(chunk)
+                    name = Path(parts.path).name or "download"
+                    ctype = resp.headers.get("content-type", "").split(";")[0].strip()
+                    return name, ctype, b"".join(chunks)
+            except httpx.HTTPError as exc:
+                raise HTTPException(400, f"could not download from {parts.hostname}: "
+                                         f"{type(exc).__name__}")
+    raise HTTPException(400, "too many redirects")
+
+
+# --------------------------------------------------------------------------- tools
+
+def _list_projects(user, args, base):
+    rows = db.query("SELECT * FROM projects WHERE user_id=? ORDER BY updated_at DESC LIMIT 60",
+                    (user.id,))
+    out = []
+    for p in rows:
+        counts = db.one("SELECT COUNT(*) AS n FROM assets WHERE project_id=? AND kind='image'",
+                        (p["id"],))
+        out.append({"project_id": p["id"], "title": p["title"], "mode": p["mode"],
+                    "status": p["status"], "pictures": counts["n"],
+                    "has_video": _video_url(p, base) is not None,
+                    **service.retention(p["updated_at"])})
+    return {"projects": out}
+
+
+def _get_project(user, args, base):
+    return _describe(_project(user, args)["id"], base)
+
+
+def _create_project(user, args, base):
+    title = str(args.get("title") or "").strip()
+    if not title:
+        raise HTTPException(400, "a title is required")
+    project_id = service.create_project(user, title, str(args.get("mode") or "storyboard"),
+                                        str(args.get("story") or ""))
+    out = _describe(project_id, base)
+    out["next"] = ("add pictures with add_file (files in this chat), add_media (public URLs) "
+                   "or get_upload_link (local files via curl), then write the scenes or the story and call render_video")
+    return out
+
+
+def _update_project(user, args, base):
+    project = _project(user, args)
+    orientation = args.get("orientation")
+    if orientation is not None and orientation not in service.SIZES:
+        raise HTTPException(400, "orientation must be portrait, landscape or square")
+    fidelity = args.get("reference_fidelity")
+    if fidelity is not None and fidelity not in ("match", "max"):
+        raise HTTPException(400, "reference_fidelity must be match or max")
+    service.save_settings(
+        project,
+        title=args.get("title"), story=args.get("story"), mode=args.get("mode"),
+        orientation=orientation, seconds=args.get("seconds"),
+        continuity=args.get("match_cuts"), ref_image_size=fidelity,
+        upscale=args.get("upscale"))
+    return _describe(project["id"], base)
+
+
+async def _add_media(user, args, base):
+    project = _project(user, args)
+    urls = args.get("urls")
+    if not isinstance(urls, list) or not urls or len(urls) > 12:
+        raise HTTPException(400, "urls must be a list of 1-12 public http(s) links")
+    limit = cfg.MAX_UPLOAD_MB * 1024 * 1024
+    files = [await _fetch_public(str(u), limit) for u in urls]
+    added = service.add_files(project, files)
+    out = _describe(project["id"], base)
+    out["added"] = added
+    return out
+
+
+async def _add_file(user, args, base):
+    """One picture or audio file handed over by the assistant itself.
+
+    ChatGPT keeps the images it generates (and the files a person attaches) in
+    a sandbox that cannot reach this server, so an upload link is useless to
+    it. What it CAN do is pass the file as a tool argument: for a field named
+    in `openai/fileParams` it substitutes {download_url, file_id}, and the
+    download happens from here. `base64` is the same door for clients that have
+    the bytes but no such mechanism.
+    """
+    project = _project(user, args)
+    if args.get("music_id"):
+        added = music.add_to_project(user, str(args["music_id"]), project)
+        out = _describe(project["id"], base)
+        out["added"] = added
+        return out
+    if args.get("speech_id"):
+        added = speech.add_to_project(user, str(args["speech_id"]), project)
+        out = _describe(project["id"], base)
+        out["added"] = added
+        return out
+    if args.get("image_id"):
+        added = images.add_to_project(user, str(args["image_id"]), project)
+        out = _describe(project["id"], base)
+        out["added"] = added
+        return out
+    limit = cfg.MAX_UPLOAD_MB * 1024 * 1024
+    ref, raw64 = args.get("file"), args.get("base64")
+    given_name = str(args.get("filename") or "")
+    if isinstance(ref, dict) and ref.get("download_url"):
+        name, ctype, raw = await _fetch_public(str(ref["download_url"]), limit)
+        name = given_name or str(ref.get("file_name") or ref.get("name") or name)
+        ctype = str(ref.get("mime_type") or ctype)
+    elif isinstance(ref, str) and ref.startswith(("http://", "https://")):
+        name, ctype, raw = await _fetch_public(ref, limit)
+        name = given_name or name
+    elif isinstance(raw64, str) and raw64:
+        if raw64.startswith("data:"):
+            raw64 = raw64.partition(",")[2]
+        try:
+            raw = base64.b64decode(raw64, validate=False)
+        except ValueError:
+            raise HTTPException(400, "base64 is not valid base64")
+        name, ctype = given_name or "upload.png", ""
+    else:
+        raise HTTPException(
+            400, "pass `image_id` (a picture made with generate_image), `file` (an attached or "
+                 "generated file) or `base64`. If your client can do none of these, use "
+                 "add_media with a public URL, or get_upload_link.")
+    added = service.add_files(project, [(name, ctype, raw)])
+    out = _describe(project["id"], base)
+    out["added"] = added
+    return out
+
+
+def _get_upload_link(user, args, base):
+    project = _project(user, args)
+    url = base + service.signed_path("upload", project["id"], UPLOAD_LINK_TTL)
+    return {
+        "upload_url": url,
+        "expires_in_seconds": UPLOAD_LINK_TTL,
+        "how": "POST multipart/form-data with one or more `files` fields. Pictures: PNG, JPEG "
+               f"or WebP. Audio: WAV, MP3, FLAC, OGG or M4A. Up to {cfg.MAX_UPLOAD_MB} MB each. "
+               "Pictures are numbered in the order they arrive.",
+        "curl": f"curl -sS -F 'files=@first.png' -F 'files=@second.png' '{url}'",
+        "or_in_a_browser": f"{base}/projects/{project['id']}",
+    }
+
+
+async def _plan_scenes(user, args, base):
+    project = _project(user, args)
+    how = await service.plan_shots(project)
+    out = _describe(project["id"], base)
+    out["planned_by"] = ("the studio's planner" if how == "planned" else
+                         "an even split of the story, because the planner was busy with a "
+                         "render — rewrite these with set_scenes, or call plan_scenes again "
+                         "when nothing is rendering")
+    return out
+
+
+def _set_scenes(user, args, base):
+    project = _project(user, args)
+    scenes = args.get("scenes")
+    if not isinstance(scenes, list) or not scenes or not all(isinstance(s, dict) for s in scenes):
+        raise HTTPException(400, "scenes must be a list of {scene, prompt, title?, seconds?}")
+    service.set_scenes(project, scenes)
+    return _describe(project["id"], base)
+
+
+async def _render_video(user, args, base):
+    project = _project(user, args)
+    only = args.get("scenes")
+    if only is not None:
+        if not isinstance(only, list) or not all(isinstance(n, int) for n in only):
+            raise HTTPException(400, "scenes must be a list of scene numbers, e.g. [2, 4]")
+    depth = await service.start_render(project, user, only or None)
+    log.info("user %s queued %s over mcp (depth %d)", user.username, project["id"], depth)
+    out = _status(project["id"], base)
+    out["next"] = ("queued; call get_status every 20-30 seconds until status is `succeeded`. "
+                   "Roughly 2 minutes per 5 seconds of video being generated.")
+    return out
+
+
+def _get_status(user, args, base):
+    return _status(_project(user, args)["id"], base)
+
+
+# Kept well under the ~100 s at which the Cloudflare edge cuts a request: past
+# that the assistant gets an error page instead of an image_id to poll with.
+IMAGE_CALL_BUDGET = 70.0
+
+
+def _image_view(row, base: str, preview: bool = False) -> dict:
+    out = {"image_id": row["id"], "status": row["status"], "prompt": row["prompt"],
+           "made_from": (f"{row['sources']} source picture(s)" if row["sources"]
+                         else "the prompt alone"),
+           "size": f"{row['width']}x{row['height']}",
+           "model": row["model"] or cfg.IMAGE_MODEL,
+           **service.retention(row["updated_at"])}
+    if row["seed"] is not None:
+        out["seed"] = row["seed"]
+    if row["notes"]:
+        out["notes"] = json.loads(row["notes"])
+    if row["status"] == "succeeded" and row["path"] and Path(row["path"]).exists():
+        out["image_url"] = base + service.signed_path("image", row["id"], VIDEO_LINK_TTL)
+        out["link_expires_in_hours"] = VIDEO_LINK_TTL // 3600
+        if preview:
+            out["_preview"] = images.preview_jpeg(row["path"])
+    elif row["status"] in ("failed", "cancelled"):
+        out["error"] = row["error"] or row["status"]
+    else:
+        out["progress"] = row["progress"]
+        out["next"] = "still generating; call get_image with this image_id in about 10 seconds"
+    return out
+
+
+async def _generate_image(user, args, base):
+    started = asyncio.get_running_loop().time()
+    sources: list[tuple[str, bytes]] = []
+    limit = cfg.MAX_UPLOAD_MB * 1024 * 1024
+    ref = args.get("file")
+    if isinstance(ref, dict) and ref.get("download_url"):
+        name, _, raw = await _fetch_public(str(ref["download_url"]), limit)
+        sources.append((str(ref.get("file_name") or name), raw))
+    raw64 = args.get("base64")
+    if isinstance(raw64, str) and raw64:
+        if raw64.startswith("data:"):
+            raw64 = raw64.partition(",")[2]
+        try:
+            sources.append(("base64 source", base64.b64decode(raw64, validate=False)))
+        except ValueError:
+            raise HTTPException(400, "base64 is not valid base64")
+    for image_id in args.get("image_ids") or []:
+        sources.append(images.source_from_image(user, str(image_id)))
+    pictures = args.get("pictures") or []
+    if pictures and not args.get("project_id"):
+        raise HTTPException(400, "`pictures` are numbered within a project; pass project_id too")
+    for n in pictures:
+        sources.append(images.source_from_picture(user, str(args["project_id"]), n))
+    urls = args.get("urls") or []
+    if len(sources) + len(urls) > images.MAX_SOURCES:
+        raise HTTPException(400, f"at most {images.MAX_SOURCES} source pictures per image")
+    for url in urls:
+        name, _, raw = await _fetch_public(str(url), limit)
+        sources.append((name, raw))
+
+    image_id = await images.create(
+        user, str(args.get("prompt") or ""), sources,
+        orientation=args.get("orientation"), width=args.get("width"),
+        height=args.get("height"), seed=args.get("seed"), model=args.get("model"))
+    log.info("user %s started image %s (%d source(s))", user.username, image_id, len(sources))
+    spent = asyncio.get_running_loop().time() - started
+    row = await images.wait(image_id, max(5.0, IMAGE_CALL_BUDGET - spent))
+    return _image_view(row, base, preview=True)
+
+
+async def _get_image(user, args, base):
+    row = images.owned_image(user, str(args.get("image_id") or ""))
+    row = await images.refresh(row["id"])
+    return _image_view(row, base, preview=True)
+
+
+def _list_images(user, args, base):
+    rows = db.query("SELECT * FROM images WHERE user_id=? ORDER BY created_at DESC LIMIT 30",
+                    (user.id,))
+    return {"images": [_image_view(r, base) for r in rows]}
+
+
+def _queue_note(out: dict, kind: str, row, tool: str, key: str) -> None:
+    """Where a queued speech/music job stands, so the assistant can tell the person."""
+    pos = gpuqueue.position(kind, row["id"])
+    if pos is not None:
+        out["queue_position"] = pos
+    if row["message"] and row["message"] not in ("queued", "generating"):
+        out["waiting_for"] = row["message"]
+    out["next"] = (f"{'queued' if row['status'] == 'queued' else 'generating'}; call {tool} "
+                   f"with this {key} in about 20 seconds — it runs when the GPU is free")
+
+
+SPEECH_CALL_BUDGET = 70.0
+
+
+def _speech_view(row, base: str) -> dict:
+    out = {"speech_id": row["id"], "status": row["status"], "text": row["text"],
+           "voice": row["voice"] if row["voice"] != "clone" else "cloned from a reference clip",
+           "language": row["language"], **service.retention(row["updated_at"])}
+    if row["instruct"]:
+        out["instruct"] = row["instruct"]
+    p = speech.params(row)
+    for k in ("match", "temperature", "seed"):
+        if p.get(k) is not None:
+            out[k] = p[k]
+    if row["voice"] == "clone" and row["reference_text"]:
+        out["reference_transcript_used"] = row["reference_text"]
+    if row["status"] == "succeeded" and row["path"] and Path(row["path"]).exists():
+        out["audio_url"] = base + service.signed_path("speech", row["id"], VIDEO_LINK_TTL)
+        out["link_expires_in_hours"] = VIDEO_LINK_TTL // 3600
+        if row["duration_s"]:
+            out["duration_s"] = round(row["duration_s"], 1)
+    elif row["status"] == "failed":
+        out["error"] = row["error"] or "failed"
+    else:
+        _queue_note(out, "speech", row, "get_speech", "speech_id")
+    return out
+
+
+async def _generate_speech(user, args, base):
+    started = asyncio.get_running_loop().time()
+    limit = cfg.MAX_UPLOAD_MB * 1024 * 1024
+    reference = None
+    ref, raw64, url = args.get("file"), args.get("reference_base64"), args.get("reference_url")
+    if sum(bool(x) for x in (ref, raw64, url)) > 1:
+        raise HTTPException(400, "give one reference clip: `file`, `reference_base64` or "
+                                 "`reference_url`")
+    if isinstance(ref, dict) and ref.get("download_url"):
+        _, _, reference = await _fetch_public(str(ref["download_url"]), limit)
+    elif isinstance(raw64, str) and raw64:
+        if raw64.startswith("data:"):
+            raw64 = raw64.partition(",")[2]
+        try:
+            reference = base64.b64decode(raw64, validate=False)
+        except ValueError:
+            raise HTTPException(400, "reference_base64 is not valid base64")
+    elif isinstance(url, str) and url:
+        _, _, reference = await _fetch_public(url, limit)
+    if args.get("reference_text") and reference is None:
+        raise HTTPException(400, "reference_text goes with a reference clip; none was given")
+
+    ids = await speech.create(
+        user, str(args.get("text") or ""), speaker=args.get("speaker"),
+        language=args.get("language"), instruct=args.get("instruct"),
+        reference=reference, reference_text=args.get("reference_text"),
+        match=args.get("match"), temperature=args.get("temperature"), seed=args.get("seed"),
+        takes=args.get("takes") or 1, meter=args.get("meter"))
+    log.info("user %s started speech %s (%s)", user.username, ",".join(ids),
+             "clone" if reference is not None else args.get("speaker") or "default")
+    spent = asyncio.get_running_loop().time() - started
+    rows = []
+    for speech_id in ids:
+        left = SPEECH_CALL_BUDGET - (asyncio.get_running_loop().time() - started)
+        rows.append(await speech.wait(speech_id, max(1.0, left)))
+    if len(rows) == 1:
+        return _speech_view(rows[0], base)
+    return {"takes": [_speech_view(r, base) for r in rows],
+            "note": "several takes of the same text with different seeds — listen and keep "
+                    "the best; repeat one with its seed"}
+
+
+def _get_speech(user, args, base):
+    return _speech_view(speech.owned(user, str(args.get("speech_id") or "")), base)
+
+
+def _list_speech(user, args, base):
+    rows = db.query("SELECT * FROM speech WHERE user_id=? ORDER BY created_at DESC LIMIT 30",
+                    (user.id,))
+    return {"speech": [_speech_view(r, base) for r in rows]}
+
+
+MUSIC_CALL_BUDGET = 70.0
+
+
+def _music_view(row, base: str) -> dict:
+    p = json.loads(row["params"])
+    out = {"music_id": row["id"], "status": row["status"], "task": row["task"],
+           "title": row["title"], **service.retention(row["updated_at"])}
+    for k in ("description", "style", "language", "duration", "track"):
+        if p.get(k):
+            out[f"requested_{k}"] = p[k]
+    if p.get("instrumental"):
+        out["instrumental"] = True
+    if row["status"] == "succeeded" and row["path"] and Path(row["path"]).exists():
+        out["audio_url"] = base + service.signed_path("music", row["id"], VIDEO_LINK_TTL)
+        out["link_expires_in_hours"] = VIDEO_LINK_TTL // 3600
+        if row["duration_s"]:
+            out["duration_s"] = row["duration_s"]
+        m = music.meta(row)
+        out.update({k: m[k] for k in ("lyrics", "style", "bpm", "key", "seed") if m.get(k)})
+    elif row["status"] == "failed":
+        out["error"] = row["error"] or "failed"
+    else:
+        _queue_note(out, "music", row, "get_music", "music_id")
+    return out
+
+
+async def _audio_arg(user, args, prefix: str, limit: int) -> bytes | None:
+    """One audio input given as <prefix>_music_id / _speech_id / _file / _base64 / _url."""
+    given = [k for k in ("music_id", "speech_id", "file", "base64", "url")
+             if args.get(f"{prefix}_{k}")]
+    if len(given) > 1:
+        raise HTTPException(400, f"give one {prefix} track, not several")
+    if not given:
+        return None
+    kind, value = given[0], args[f"{prefix}_{given[0]}"]
+    if kind == "music_id":
+        return music.source_from_music(user, str(value))
+    if kind == "speech_id":
+        row = speech.owned(user, str(value))
+        if row["status"] != "succeeded" or not row["path"]:
+            raise HTTPException(400, f"speech {row['id']} is not finished")
+        return Path(row["path"]).read_bytes()
+    if kind == "file":
+        if not isinstance(value, dict) or not value.get("download_url"):
+            raise HTTPException(400, f"{prefix}_file needs a download_url")
+        return (await _fetch_public(str(value["download_url"]), limit))[2]
+    if kind == "base64":
+        raw64 = str(value)
+        if raw64.startswith("data:"):
+            raw64 = raw64.partition(",")[2]
+        try:
+            return base64.b64decode(raw64, validate=False)
+        except ValueError:
+            raise HTTPException(400, f"{prefix}_base64 is not valid base64")
+    return (await _fetch_public(str(value), limit))[2]
+
+
+async def _generate_music(user, args, base):
+    started = asyncio.get_running_loop().time()
+    limit = 50 * 1024 * 1024
+    source = await _audio_arg(user, args, "source", limit)
+    reference = await _audio_arg(user, args, "reference", limit)
+    music_id = await music.create(
+        user, task=str(args.get("task") or ("describe" if args.get("description") and not
+                                             (args.get("lyrics") or args.get("style"))
+                                             else "custom")),
+        description=args.get("description") or "", style=args.get("style") or "",
+        lyrics=args.get("lyrics") or "", instrumental=bool(args.get("instrumental")),
+        language=args.get("language"), duration=args.get("duration"), bpm=args.get("bpm"),
+        key=args.get("key") or "", time_signature=str(args.get("time_signature") or ""),
+        seed=args.get("seed"), strength=args.get("strength"), start=args.get("start"),
+        end=args.get("end"), track=args.get("track") or "",
+        instruments=args.get("instruments") or [], add_seconds=args.get("add_seconds"),
+        title=args.get("title") or "", source=source,
+        source_music_id=args.get("source_music_id") or None, reference=reference)
+    log.info("user %s queued music %s (%s)", user.username, music_id, args.get("task"))
+    spent = asyncio.get_running_loop().time() - started
+    row = await music.wait(music_id, max(5.0, MUSIC_CALL_BUDGET - spent))
+    return _music_view(row, base)
+
+
+def _get_music(user, args, base):
+    return _music_view(music.owned(user, str(args.get("music_id") or "")), base)
+
+
+def _list_music(user, args, base):
+    rows = db.query("SELECT * FROM music WHERE user_id=? ORDER BY created_at DESC LIMIT 30",
+                    (user.id,))
+    return {"music": [_music_view(r, base) for r in rows]}
+
+
+def _cancel_render(user, args, base):
+    project = _project(user, args)
+    if not service.is_rendering(project):
+        raise HTTPException(409, "this project is not rendering")
+    if render.request_cancel(project["id"]):
+        db.touch_project(project["id"], message="cancelling…")
+    return _status(project["id"], base)
+
+
+_PID = {"project_id": {"type": "string", "description": "A project id, e.g. prj_1a2b…"}}
+_MODE = {"type": "string", "enum": list(service.MODES),
+         "description": "storyboard = WITH scenes (one picture per scene, joined). "
+                        "single = WITHOUT scenes (one clip, pictures are references, has sound)."}
+
+
+
+# --------------------------------------------------------------------------- voices
+# Thin wrappers over app.voices (the same rules the /v1 API applies). Creating a voice
+# and uploading recordings are deliberately NOT tools: the person attests and uploads
+# in their own browser, never an assistant acting for them.
+
+VOICE_CALL_BUDGET = 70.0
+
+
+def _voice_brief(v: dict) -> dict:
+    out = {"voice_id": v["id"], "name": v["name"], "status": v["status"],
+           "recordings": v["dataset"]["clips_ok"],
+           "minutes_singing": round(v["dataset"]["singing_s"] / 60, 1),
+           "minutes_speech": round(v["dataset"]["speech_s"] / 60, 1),
+           "kept": v["kept"]}
+    if v["dataset"]["minutes_needed"]:
+        out["minutes_still_needed"] = v["dataset"]["minutes_needed"]
+    if v["status"] == "training":
+        out["training"] = {k: v["training"][k] for k in ("epochs_done", "epochs_target",
+                                                         "message", "queue_position")}
+    if v["profile"]:
+        p = v["profile"]
+        out["profile"] = {"voice_type": p["voice_type"], "range": p["range"],
+                          "vibrato": p["vibrato"], "style_caption": p["style_caption"]}
+    if v["last_error"]:
+        out["last_error"] = v["last_error"]
+    st = v.get("style_model")
+    if st:
+        out["singing_style"] = {"status": st["status"], "songs_confirmed": st["songs_confirmed"],
+                                "training_window": st["training"]["window"]}
+    return out
+
+
+def _list_voices(user, args, base):
+    rows = db.query("SELECT * FROM voices WHERE user_id=? ORDER BY created_at DESC", (user.id,))
+    out = {"voices": [_voice_brief(voices.voice_view(r)) for r in rows]}
+    if not rows:
+        out["how_to_start"] = (f"Voices are created in the browser: send the person to "
+                               f"{base}/voices to create one and upload their recordings.")
+    return out
+
+
+def _get_voice(user, args, base):
+    return _voice_brief(voices.voice_view(voices.owned(user, str(args.get("voice_id") or ""))))
+
+
+def _voice_upload_link(user, args, base):
+    if args.get("voice_id"):
+        v = voices.owned(user, str(args["voice_id"]))
+        return {"url": f"{base}/voices/{v['id']}",
+                "tell_the_person": "Open this page, signed in, to upload or record your own voice. "
+                                   "Only your own voice, or one you have permission to use."}
+    return {"url": f"{base}/voices",
+            "tell_the_person": "Open this page, signed in, to create a voice (you confirm it is "
+                               "yours) and upload or record your singing."}
+
+
+def _train_voice(user, args, base):
+    jid = voices.start_training(user, str(args.get("voice_id") or ""),
+                                str(args.get("quality") or "standard"))
+    return {"job_id": jid, "status": "queued",
+            "note": "Training runs in short slices on the shared GPU — usually 20-40 minutes in "
+                    "all. Check with get_voice every few minutes."}
+
+
+async def _wait_job(job_id: str, budget: float, started: float):
+    loop = asyncio.get_running_loop()
+    while True:
+        row = db.one("SELECT * FROM voice_jobs WHERE id=?", (job_id,))
+        if row["status"] in ("succeeded", "failed") or loop.time() - started > budget:
+            return row
+        await asyncio.sleep(2)
+
+
+def _job_out(row, base: str) -> dict:
+    j = voices.job_view(row, base)
+    out = {"job_id": j["id"], "kind": j["kind"], "status": j["status"],
+           "deleted_on": j["deleted_on"]}
+    if j.get("result"):
+        out.update({k: v for k, v in j["result"].items() if v not in (None, {}, "")})
+        out["link_expires_in_hours"] = 7 * 24
+        out["keep_a_copy"] = "Download it: files are deleted 90 days after they're made."
+    elif j["status"] == "failed":
+        out["error"] = j["error"] or "failed"
+    else:
+        out["message"] = j["message"]
+        if j["queue_position"]:
+            out["queue_position"] = j["queue_position"]
+        out["next"] = "Call get_voice_job with this job_id every ~20 s until it has succeeded."
+    return out
+
+
+async def _resing_song(user, args, base):
+    started = asyncio.get_running_loop().time()
+    source = await _audio_arg(user, args, "source", 100 * 1024 * 1024)
+    params = {"key": str(args.get("key", "auto")),
+              "keep_backing_vocals": args.get("keep_backing_vocals", True) is not False}
+    jid = await voices.use(user, str(args.get("voice_id") or ""), "resing", params, source)
+    return _job_out(await _wait_job(jid, VOICE_CALL_BUDGET, started), base)
+
+
+async def _sing_song(user, args, base):
+    started = asyncio.get_running_loop().time()
+    params = {k: args.get(k) for k in ("description", "lyrics", "style", "language",
+                                       "duration_s", "seed", "use_style_model", "style_strength")
+              if args.get(k) not in (None, "")}
+    jid = await voices.use(user, str(args.get("voice_id") or ""), "song", params)
+    return _job_out(await _wait_job(jid, VOICE_CALL_BUDGET, started), base)
+
+
+async def _speak_as_voice(user, args, base):
+    started = asyncio.get_running_loop().time()
+    params = {k: args.get(k) for k in ("text", "language", "delivery") if args.get(k)}
+    jid = await voices.use(user, str(args.get("voice_id") or ""), "speech", params)
+    return _job_out(await _wait_job(jid, VOICE_CALL_BUDGET, started), base)
+
+
+def _get_voice_job(user, args, base):
+    return _job_out(voices.owned_job(user, str(args.get("job_id") or "")), base)
+
+
+def _tool(name, title, description, handler, properties=None, required=(), *,
+          read_only=False, destructive=False, meta=None):
+    return {
+        "handler": handler,
+        "spec": {
+            **({"_meta": meta} if meta else {}),
+            "name": name, "title": title, "description": description,
+            "inputSchema": {"type": "object", "properties": properties or {},
+                            "required": list(required), "additionalProperties": False},
+            "annotations": {"title": title, "readOnlyHint": read_only,
+                            "destructiveHint": destructive, "openWorldHint": False},
+        },
+    }
+
+
+TOOLS = [
+    _tool("list_projects", "List projects",
+          "List the signed-in person's video projects, newest first, with each one's mode "
+          "(storyboard = with scenes, single = without) and whether it has a finished video.",
+          _list_projects, read_only=True),
+    _tool("get_project", "Get a project",
+          "Everything about one project: story, settings, pictures, each scene's prompt, render "
+          "status, and a download link for the finished video. Read this before regenerating.",
+          _get_project, _PID, ["project_id"], read_only=True),
+    _tool("create_project", "Create a project",
+          "Start a new video project. It has no pictures yet; add them next.",
+          _create_project,
+          {"title": {"type": "string"}, "mode": _MODE,
+           "story": {"type": "string",
+                     "description": "Storyboard: the story to split into scenes. Single: the "
+                                    "prompt itself — motion, camera and sound."}},
+          ["title", "mode"]),
+    _tool("update_project", "Change story or settings",
+          "Change a project's title, story or settings; anything left out is kept. Setting "
+          "`mode` switches the same pictures and story between WITH scenes (storyboard) and "
+          "WITHOUT scenes (single) — then call render_video to regenerate it that way. "
+          "Nothing is rendered by this call.",
+          _update_project,
+          {**_PID, "title": {"type": "string"},
+           "story": {"type": "string",
+                     "description": "Storyboard: raw material for plan_scenes. Single: the "
+                                    "prompt sent to the model; refer to pictures as "
+                                    "<Picture 1>, <Picture 2>…"},
+           "mode": _MODE,
+           "orientation": {"type": "string", "enum": list(service.SIZES),
+                           "description": "portrait 480x864, landscape 864x480, square 640x640"},
+           "seconds": {"type": "integer", "minimum": 1, "maximum": 15,
+                       "description": "Single: clip length, up to 15. Storyboard: length given "
+                                      "to newly planned scenes, up to 11 (existing scenes keep "
+                                      "theirs). Longer values are cut to the limit."},
+           "match_cuts": {"type": "boolean",
+                          "description": "Storyboard only: each scene ends on the next "
+                                         "scene's picture, so clips join without a jump."},
+           "reference_fidelity": {"type": "string", "enum": ["match", "max"],
+                                  "description": "Single only: max = stronger likeness, "
+                                                 "much slower."},
+           "upscale": {"type": "string", "enum": list(service.UPSCALE),
+                       "description": "Experimental 2x upscale, both modes (default off). "
+                                      "The video is made at the normal size and delivered at "
+                                      "twice it (portrait 960x1728), sound kept. latent: about "
+                                      "2.4x the render time, sharper but can invent fine "
+                                      "texture. refine: about 2.7x, adds a short second pass "
+                                      "and gives the cleanest detail. Applies to the next "
+                                      "render."}},
+          ["project_id"]),
+    _tool("add_media", "Add pictures or audio by URL",
+          "Add pictures (PNG/JPEG/WebP) or audio to a project from public http(s) URLs, in "
+          "order. In a storyboard each picture becomes a scene; in a single clip each is a "
+          "numbered reference. For a file in this chat use add_file instead.",
+          _add_media,
+          {**_PID, "urls": {"type": "array", "items": {"type": "string"}, "minItems": 1,
+                            "maxItems": 12}},
+          ["project_id", "urls"]),
+    _tool("add_file", "Add an attached or generated file",
+          "Add ONE picture (PNG/JPEG/WebP) or audio file that is in this conversation — an "
+          "image you generated or a file the person attached — to a project. Pass it as "
+          "`file`, or pass `image_id` for a picture made with generate_image, or `speech_id` "
+          "for a clip made with generate_speech, or `music_id` for a song from generate_music. "
+          "Call once per "
+          "file, in the order the pictures should be numbered. Use this instead of "
+          "get_upload_link whenever the file lives in the chat.",
+          _add_file,
+          {**_PID,
+           "image_id": {"type": "string",
+                        "description": "A finished picture from generate_image, e.g. img_1a2b…"},
+           "speech_id": {"type": "string",
+                         "description": "A finished clip from generate_speech, e.g. spk_1a2b… — "
+                                        "added as audio (a storyboard soundtrack)."},
+           "music_id": {"type": "string",
+                        "description": "A finished song from generate_music, e.g. mus_1a2b… — "
+                                       "added as audio (a storyboard soundtrack)."},
+           "file": {"type": "object",
+                    "description": "The conversation file to add.",
+                    "properties": {"download_url": {"type": "string"},
+                                   "file_id": {"type": "string"}},
+                    "required": ["download_url", "file_id"]},
+           "base64": {"type": "string",
+                      "description": "Alternative to `file`: the file's bytes, base64 "
+                                     "encoded. Only practical for small files."},
+           "filename": {"type": "string",
+                        "description": "Optional name; its extension decides picture vs audio."}},
+          ["project_id"], meta={"openai/fileParams": ["file"]}),
+    _tool("get_upload_link", "Get an upload link",
+          "A one-hour link that accepts picture and audio files for one project by HTTP POST, "
+          "with a ready curl command — for files on a disk you can reach with a shell. For a "
+          "file in this conversation (generated or attached), use add_file instead.",
+          _get_upload_link, _PID, ["project_id"], read_only=True),
+    _tool("plan_scenes", "Plan scenes from the story",
+          "Storyboard only. Split the project's story into one scene prompt per picture, "
+          "REPLACING the current scenes. Skip this if you would rather write the prompts "
+          "yourself with set_scenes.",
+          _plan_scenes, _PID, ["project_id"], destructive=True),
+    _tool("set_scenes", "Write scene prompts",
+          "Storyboard only. Set the prompt, title or length of scenes by number (scene 1 is "
+          "the first picture). Only the scenes listed change. A prompt should say what moves "
+          "and how the camera moves — not describe the still picture.",
+          _set_scenes,
+          {**_PID,
+           "scenes": {"type": "array", "minItems": 1, "items": {
+               "type": "object",
+               "properties": {"scene": {"type": "integer", "minimum": 1},
+                              "prompt": {"type": "string"}, "title": {"type": "string"},
+                              "seconds": {"type": "integer", "minimum": 1, "maximum": 11,
+                                          "description": "Scene length; the model's limit is 11 s."}},
+               "required": ["scene"]}}},
+          ["project_id", "scenes"]),
+    _tool("render_video", "Generate or regenerate the video",
+          "Queue a render of the project as it now stands, replacing its previous video. "
+          "Storyboard: renders every scene and joins them, or pass `scenes` to regenerate "
+          "only those and keep the other clips. Single: renders the one clip. Returns "
+          "immediately — poll get_status. Uses real GPU time and counts against the "
+          "account's hourly render limit.",
+          _render_video,
+          {**_PID, "scenes": {"type": "array", "items": {"type": "integer", "minimum": 1},
+                              "description": "Storyboard only: scene numbers to regenerate. "
+                                             "Omit to regenerate the whole video."}},
+          ["project_id"]),
+    _tool("get_status", "Check a render",
+          "Render progress for a project, per scene, and the video download link once it has "
+          "succeeded.",
+          _get_status, _PID, ["project_id"], read_only=True),
+    _tool("cancel_render", "Cancel a render",
+          "Stop a queued or running render and free the GPU. The previous video, if any, is kept.",
+          _cancel_render, _PID, ["project_id"]),
+    _tool("generate_image", "Generate a picture",
+          "Make a still picture on the studio's GPU. With only a prompt it is text-to-image. "
+          "With source pictures it is image-to-image: the prompt says what to change, or how "
+          "to combine them (\"the person in picture 1 standing in the room from picture 2\"). "
+          "Up to 4 sources, from any mix of `file`, `base64`, `image_ids`, project "
+          "`pictures` and `urls` — numbered in THAT order, which is what \"picture 1\" in "
+          "the prompt refers to. An edit with no size given comes back at the first "
+          "source's size. `model` picks the generator: flux-2-klein-9b (default), or "
+          "qwen-image-2.1-turbo / qwen-image-2.1 — Qwen-Image-2.1, one model that draws AND "
+          "edits, notably good at lettering and text in pictures. "
+          "Usually returns the finished picture within the call; if `status` is not "
+          "`succeeded`, call get_image. Counts against the account's hourly image limit.",
+          _generate_image,
+          {"prompt": {"type": "string",
+                      "description": "What to draw, or for image-to-image, what to change."},
+           "model": {"type": "string", "enum": list(images.MODELS),
+                     "description": "; ".join(f"{k}: {v}" for k, v in images.MODELS.items())},
+           "orientation": {"type": "string", "enum": list(images.SIZES),
+                           "description": "square 1024x1024, portrait 864x1536, landscape "
+                                          "1536x864. For a storyboard scene, match the "
+                                          "project's orientation."},
+           "width": {"type": "integer", "minimum": images.MIN_SIDE,
+                     "maximum": images.MAX_SIDE,
+                     "description": "Exact size instead of orientation; give height too."},
+           "height": {"type": "integer", "minimum": images.MIN_SIDE,
+                      "maximum": images.MAX_SIDE},
+           "seed": {"type": "integer", "minimum": 0,
+                    "description": "Repeat a result exactly with the same prompt and seed."},
+           "file": {"type": "object",
+                    "description": "Image-to-image: a picture in this conversation.",
+                    "properties": {"download_url": {"type": "string"},
+                                   "file_id": {"type": "string"}},
+                    "required": ["download_url", "file_id"]},
+           "base64": {"type": "string",
+                      "description": "Image-to-image: a picture's bytes, base64 encoded."},
+           "image_ids": {"type": "array", "items": {"type": "string"}, "maxItems": 4,
+                         "description": "Image-to-image: earlier results from "
+                                        "generate_image — pass the last one to refine it."},
+           "urls": {"type": "array", "items": {"type": "string"}, "maxItems": 4,
+                    "description": "Image-to-image: public http(s) links to pictures."},
+           "project_id": {"type": "string",
+                          "description": "Only with `pictures`: the project they are in."},
+           "pictures": {"type": "array", "items": {"type": "integer", "minimum": 1},
+                        "maxItems": 4,
+                        "description": "Image-to-image: picture numbers in project_id."}},
+          ["prompt"], meta={"openai/fileParams": ["file"]}),
+    _tool("get_image", "Check a picture",
+          "Status of a picture from generate_image; once it has succeeded, the picture "
+          "itself and a download link.",
+          _get_image,
+          {"image_id": {"type": "string", "description": "e.g. img_1a2b…"}},
+          ["image_id"], read_only=True),
+    _tool("generate_speech", "Speak text aloud",
+          "Turn text into speech with Qwen3-TTS on the studio's GPU. By default a preset "
+          "`speaker` reads it (Ryan if none given), optionally steered with `instruct`. To "
+          "speak in someone else's voice instead, pass ONE reference clip (`file`, "
+          "`reference_base64` or `reference_url`, 5-30 s of clear speech). BURMESE: text in Burmese "
+          "script (or language=Burmese) is spoken by a separate engine, VoxCPM2, with its own "
+          "speakers Thiri (default), Nandar, Kyaw and U_Ba; the other speakers cannot speak "
+          "Burmese and these four speak only Burmese. A clone can speak Burmese whatever "
+          "language the clip is in; for Burmese the clone uses the audio only, so "
+          "reference_text, match and temperature have no effect. HINDI: text in Devanagari "
+          "(or language=Hindi) has two choices of voice. The default is one of four native "
+          "Hindi speakers on VoxCPM2: Meera (default), Anaya, Arjun, Vikram; they speak only "
+          "Hindi and pronounce it like native speakers. Any of the nine Qwen speakers (Ryan, "
+          "Serena, ...) can also be picked for Hindi: clear, but with a noticeable foreign "
+          "accent. Hindi clones run on VoxCPM2 like Burmese ones. SANSKRIT ŚLOKA CHANT: "
+          "language=Sanskrit (or speaker=Vagdhenu) CHANTS the text as a traditional "
+          "recitation with Vāgdhenu, a metre-aware model with one voice. It is never "
+          "auto-detected, because Hindi and Sanskrit share Devanagari. Pass the verse in any "
+          "Indian script or IAST; several ślokas (each ending in ॥) are chanted one by one and "
+          "joined. The metre is detected unless `meter` is given; the result's message names "
+          "the metre used. No cloning and no `instruct`. By default "
+          "(match=style) the clone copies the speaker's accent, pace and delivery: that needs "
+          "the clip's exact words, which are transcribed automatically if `reference_text` is "
+          "not given (pass it when you know it — accuracy matters). match=timbre copies only "
+          "the voice colour. `takes` (1-3) makes variations to choose from; `seed` repeats "
+          "one. Up to 1200 characters per clip — split longer text. "
+          "Usually returns the finished clip within the call; if `status` is not "
+          "`succeeded`, call get_speech. While the GPU is busy with pictures or videos the "
+          "clip waits in a queue (the reply says its position) and runs when the card is "
+          "free. Counts against the account's hourly speech limit.",
+          _generate_speech,
+          {"text": {"type": "string", "maxLength": speech.MAX_TEXT,
+                    "description": "The words to speak."},
+           "speaker": {"type": "string", "enum": list(speech.SPEAKERS),
+                       "description": "Preset voice. " + "; ".join(
+                           f"{k} ({v})" for k, v in speech.SPEAKERS.items()) +
+                       ". The first nine (Qwen) speak every language except Burmese, Hindi with "
+                       "a foreign accent; Thiri, Nandar, Kyaw and U_Ba speak only Burmese; "
+                       "Meera, Anaya, Arjun and Vikram speak only Hindi, natively; Vagdhenu "
+                       "chants Sanskrit ślokas only."},
+           "meter": {"type": "string", "enum": speech.METERS,
+                     "description": "Sanskrit chant only: the chandas to chant in. auto "
+                                    "(default) detects it from the verse; anuṣṭubh is the "
+                                    "common śloka metre (e.g. the Gītā)."},
+           "language": {"type": "string", "enum": speech.LANGUAGES,
+                        "description": "Language of the text; Auto detects it (Burmese "
+                                       "script goes to the Burmese voices; Devanagari is Hindi, "
+                                       "spoken by Meera unless a speaker is given)."},
+           "instruct": {"type": "string", "maxLength": speech.MAX_INSTRUCT,
+                        "description": "Preset speakers only: how to say it, e.g. \"warm and "
+                                       "slow, like a bedtime story\" or \"angry, shouting\"."},
+           "file": {"type": "object",
+                    "description": "Voice clone: an audio clip in this conversation.",
+                    "properties": {"download_url": {"type": "string"},
+                                   "file_id": {"type": "string"}},
+                    "required": ["download_url", "file_id"]},
+           "reference_base64": {"type": "string",
+                                "description": "Voice clone: an audio clip's bytes, base64."},
+           "reference_url": {"type": "string",
+                             "description": "Voice clone: a public http(s) link to a clip."},
+           "reference_text": {"type": "string",
+                              "description": "Voice clone: the exact words spoken in the "
+                                             "reference clip. Transcribed automatically "
+                                             "when omitted."},
+           "match": {"type": "string", "enum": list(speech.MATCHES),
+                     "description": "Voice clone: style (default) = accent, pace and delivery "
+                                    "too; timbre = voice colour only."},
+           "temperature": {"type": "number", "minimum": 0.1, "maximum": 1.5,
+                           "description": "Expressiveness / variation. Clones default to "
+                                          "0.7; lower is flatter, higher is livelier."},
+           "seed": {"type": "integer", "minimum": 0,
+                    "description": "Repeat a take exactly (same text, voice and settings)."},
+           "takes": {"type": "integer", "minimum": 1, "maximum": speech.MAX_TAKES,
+                     "description": "How many variations to make (each counts toward the "
+                                    "hourly limit)."}},
+          ["text"], meta={"openai/fileParams": ["file"]}),
+    _tool("get_speech", "Check a speech clip",
+          "Status of a clip from generate_speech, and its audio link once it has succeeded.",
+          _get_speech,
+          {"speech_id": {"type": "string", "description": "e.g. spk_1a2b…"}},
+          ["speech_id"], read_only=True),
+    _tool("list_speech", "List speech clips",
+          "The signed-in person's 30 most recent clips from generate_speech, newest first, "
+          "with their text and audio links.",
+          _list_speech, read_only=True),
+    _tool("generate_music", "Make a song",
+          "Make music with ACE-Step 1.5 on the studio's GPU. `task` picks what to do:\n"
+          "- describe: one sentence in `description`; the model writes lyrics, style and "
+          "structure itself.\n"
+          "- custom (default): your `lyrics` — use [Verse], [Chorus], [Bridge], [Intro], "
+          "[Outro] tags on their own lines — plus a `style` (genre, instruments, mood, vocal "
+          "type, tempo: \"female vocal, acoustic folk, fingerpicked guitar, warm, 90 bpm\"). "
+          "Set instrumental=true for no vocals. A reference_* track steers the sound.\n"
+          "- cover: re-perform source_* in a new `style` (required) — the original words "
+          "are kept unless you give new `lyrics`; `strength` 0-1 = how closely to follow "
+          "the source (default 0.5; 0.3 = big genre change, 0.8 = subtle).\n"
+          "- repaint: regenerate seconds `start`..`end` (3-90 s) of source_*; the rest is "
+          "kept. `style`/`lyrics` default to the source song's.\n"
+          "- extract: pull one stem (`track`) out of source_*.\n"
+          "- add_layer: generate a new stem (`track`) that fits source_*; `style` "
+          "describes only that new part (required).\n"
+          "- extend: make source_* longer by `add_seconds` (10-120, default 30); optional "
+          "`lyrics` are sung in the new part.\n"
+          "- accompany: build `instruments` around a single track (e.g. a band under an "
+          "a-cappella vocal); `style` describes the arrangement (required).\n"
+          "For an uploaded source with no `lyrics`, the words are transcribed from it.\n"
+          "Usually 20-90 s once it starts. While the GPU is busy with pictures or videos it "
+          "waits in a queue; the reply gives queue_position — then poll get_music every ~20 s. "
+          "Give the person the audio_url. Counts against the account's hourly music limit.",
+          _generate_music,
+          {"task": {"type": "string", "enum": list(music.TASKS)},
+           "description": {"type": "string", "maxLength": music.MAX_PROMPT,
+                           "description": "describe: what the song should be, e.g. \"an "
+                                          "upbeat Hindi wedding song about the monsoon\"."},
+           "lyrics": {"type": "string", "maxLength": music.MAX_LYRICS,
+                      "description": "The words to sing, with [Verse]/[Chorus] section tags."},
+           "style": {"type": "string", "maxLength": music.MAX_PROMPT,
+                     "description": "Genre, instruments, mood, vocal type, tempo."},
+           "instrumental": {"type": "boolean", "description": "No vocals."},
+           "language": {"type": "string", "enum": list(music.LANGUAGES),
+                        "description": "Language the lyrics are sung in (code). unknown = auto."},
+           "duration": {"type": "number", "minimum": music.MIN_S, "maximum": music.MAX_S,
+                        "description": "Length in seconds; omit to let the model choose."},
+           "bpm": {"type": "integer", "minimum": 30, "maximum": 300},
+           "key": {"type": "string", "description": "e.g. \"C major\", \"A minor\"."},
+           "time_signature": {"type": "string", "enum": ["2", "3", "4", "6"],
+                              "description": "Beats per bar: 2, 3, 4, or 6 (6/8)."},
+           "seed": {"type": "integer", "minimum": 0,
+                    "description": "Repeat a result with the same inputs and seed."},
+           "strength": {"type": "number", "minimum": 0, "maximum": 1,
+                        "description": "cover: how closely to follow the source (default 0.5)."},
+           "start": {"type": "number", "minimum": 0, "description": "repaint: from (s)."},
+           "end": {"type": "number", "minimum": 0, "description": "repaint: to (s)."},
+           "add_seconds": {"type": "number", "minimum": music.MIN_ADD_S,
+                           "maximum": music.MAX_ADD_S,
+                           "description": "extend: how many seconds to add (default 30)."},
+           "track": {"type": "string", "enum": music.TRACKS,
+                     "description": "extract / add_layer: which stem."},
+           "instruments": {"type": "array", "items": {"type": "string", "enum": music.TRACKS},
+                           "description": "accompany: instruments to build around the track."},
+           "title": {"type": "string", "description": "Optional name for the song."},
+           "source_music_id": {"type": "string", "description": "source track for cover/repaint/extract/add_layer/extend/accompany: an earlier song from generate_music."},
+           "source_speech_id": {"type": "string", "description": "source track for cover/repaint/extract/add_layer/extend/accompany: a clip from generate_speech."},
+           "source_file": {"type": "object", "description": "source track for cover/repaint/extract/add_layer/extend/accompany: an audio file in this conversation.",
+                    "properties": {"download_url": {"type": "string"}, "file_id": {"type": "string"}},
+                    "required": ["download_url", "file_id"]},
+           "source_base64": {"type": "string", "description": "source track for cover/repaint/extract/add_layer/extend/accompany: audio bytes, base64."},
+           "source_url": {"type": "string", "description": "source track for cover/repaint/extract/add_layer/extend/accompany: a public http(s) link to audio."},
+           "reference_music_id": {"type": "string", "description": "Style reference (custom/describe): an earlier song from generate_music."},
+           "reference_speech_id": {"type": "string", "description": "Style reference (custom/describe): a clip from generate_speech."},
+           "reference_file": {"type": "object", "description": "Style reference (custom/describe): an audio file in this conversation.",
+                    "properties": {"download_url": {"type": "string"}, "file_id": {"type": "string"}},
+                    "required": ["download_url", "file_id"]},
+           "reference_base64": {"type": "string", "description": "Style reference (custom/describe): audio bytes, base64."},
+           "reference_url": {"type": "string", "description": "Style reference (custom/describe): a public http(s) link to audio."},
+          },
+          [], meta={"openai/fileParams": ["source_file", "reference_file"]}),
+    _tool("get_music", "Check a song",
+          "Status of a song from generate_music — queue position while waiting; once it has "
+          "succeeded, the audio link, the final lyrics and the bpm/key it was made in.",
+          _get_music,
+          {"music_id": {"type": "string", "description": "e.g. mus_1a2b…"}},
+          ["music_id"], read_only=True),
+    _tool("list_music", "List songs",
+          "The signed-in person's 30 most recent songs from generate_music, newest first.",
+          _list_music, read_only=True),
+    _tool("list_images", "List pictures",
+          "The signed-in person's 30 most recent pictures from generate_image, newest first, "
+          "with prompts and download links.",
+          _list_images, read_only=True),
+    _tool("list_voices", "List my voices",
+          "The person's own trained voices (made from their own recordings), with status, how "
+          "much audio they have, and the measured voice profile (range, vibrato, tone). Voices "
+          "are private to their owner and are kept until deleted.",
+          _list_voices, read_only=True),
+    _tool("get_voice", "Get a voice", "One voice: status, training progress, profile.",
+          _get_voice, {"voice_id": {"type": "string"}}, ["voice_id"], read_only=True),
+    _tool("get_voice_upload_link", "Link to add recordings",
+          "A page where the PERSON creates a voice and uploads or records their own voice in "
+          "their browser. Give them the URL. Never upload someone's voice for them.",
+          _voice_upload_link, {"voice_id": {"type": "string",
+                                            "description": "omit to create a new voice"}},
+          read_only=True),
+    _tool("train_voice", "Train a voice",
+          "Start training once the person has uploaded at least 5 minutes of singing (10-30 "
+          "sounds fuller). Runs in slices on the shared GPU (20-40 min). Poll get_voice.",
+          _train_voice, {"voice_id": {"type": "string"},
+                         "quality": {"type": "string", "enum": ["standard", "high"]}},
+          ["voice_id"]),
+    _tool("resing_song", "Change the singer to my voice",
+          "Re-sing a song's lead vocal in the person's trained voice and mix it back onto the "
+          "original music. key=auto moves the vocal by octaves into their range. It keeps the "
+          "original melody and phrasing. Give the song as one source_*.",
+          _resing_song, {"voice_id": {"type": "string"},
+                         "key": {"type": "string", "description": "auto, or semitones -24..24"},
+                         "keep_backing_vocals": {"type": "boolean"},
+                         "source_music_id": {"type": "string", "description": "a song from generate_music"},
+                         "source_file": {"type": "object", "properties": {"download_url": {"type": "string"},
+                                         "file_id": {"type": "string"}}, "required": ["download_url", "file_id"]},
+                         "source_url": {"type": "string", "description": "public http(s) audio link"},
+                         "source_base64": {"type": "string"}},
+          ["voice_id"]),
+    _tool("sing_song", "Sing a new song in my voice",
+          "Write (from `description`) or take (`lyrics` + optional `style`) a song, perform it in "
+          "the person's range and manner from their voice profile, and sing it in their trained "
+          "voice. About 1-2 minutes when the GPU is free.",
+          _sing_song, {"voice_id": {"type": "string"},
+                       "description": {"type": "string", "maxLength": 1000},
+                       "lyrics": {"type": "string", "maxLength": 4000},
+                       "style": {"type": "string", "maxLength": 1000},
+                       "language": {"type": "string"},
+                       "duration_s": {"type": "number", "minimum": 10, "maximum": 360},
+                       "seed": {"type": "integer", "minimum": 0},
+                       "use_style_model": {"type": "boolean", "description": "perform it with the person's trained singing style when they have one (default true)"},
+                       "style_strength": {"type": "number", "minimum": 0, "maximum": 1, "description": "how strongly (default 0.8)"}},
+          ["voice_id"]),
+    _tool("speak_as_voice", "Speak text in my voice",
+          "Say text in the person's trained voice. Burmese (Myanmar) and Hindi text work too: "
+          "they are detected automatically (or pass language=Burmese / language=Hindi) and "
+          "spoken by the VoxCPM2 engine before the person's timbre is applied.",
+          _speak_as_voice, {"voice_id": {"type": "string"},
+                            "text": {"type": "string", "maxLength": 2000},
+                            "language": {"type": "string"},
+                            "delivery": {"type": "string", "description": "e.g. calm and slow"}},
+          ["voice_id", "text"]),
+    _tool("get_voice_job", "Check a voice job",
+          "A resing/song/speech job: when it has succeeded, audio_url and stems (links work for "
+          "7 days; files are deleted after 90 days).",
+          _get_voice_job, {"job_id": {"type": "string"}}, ["job_id"], read_only=True),
+]
+_BY_NAME = {t["spec"]["name"]: t for t in TOOLS}
+
+
+# --------------------------------------------------------------------------- protocol
+
+def _result(msg_id, result: dict) -> dict:
+    return {"jsonrpc": "2.0", "id": msg_id, "result": result}
+
+
+def _error(msg_id, code: int, message: str) -> dict:
+    return {"jsonrpc": "2.0", "id": msg_id, "error": {"code": code, "message": message}}
+
+
+async def _call_tool(user: auth.User, params: dict, base: str) -> dict:
+    tool = _BY_NAME.get(params.get("name"))
+    if tool is None:
+        raise KeyError(params.get("name"))
+    args = params.get("arguments") or {}
+    try:
+        out = tool["handler"](user, args if isinstance(args, dict) else {}, base)
+        if inspect.isawaitable(out):
+            out = await out
+        preview = out.pop("_preview", None) if isinstance(out, dict) else None
+        content = [{"type": "text", "text": json.dumps(out, ensure_ascii=False, indent=1)}]
+        if preview:
+            # So the assistant can SEE what it made, and the person sees it in
+            # the chat. A small JPEG: the full PNG is behind image_url.
+            content.append({"type": "image", "mimeType": "image/jpeg",
+                            "data": base64.b64encode(preview).decode()})
+        return {"content": content}
+    except HTTPException as exc:
+        # A refusal is an answer, not a protocol fault: the assistant should
+        # read "plan the shots first" and act on it, so it goes back as the
+        # tool's own output with isError set.
+        return {"content": [{"type": "text", "text": str(exc.detail)}], "isError": True}
+    except Exception:                                          # noqa: BLE001
+        log.exception("tool %s failed", params.get("name"))
+        return {"content": [{"type": "text", "text": "the studio hit an internal error"}],
+                "isError": True}
+
+
+async def _handle(user: auth.User, msg, base: str) -> dict | None:
+    if not isinstance(msg, dict) or msg.get("jsonrpc") != "2.0":
+        return _error(None, -32600, "not a JSON-RPC 2.0 message")
+    method, msg_id = msg.get("method"), msg.get("id")
+    if method is None or "id" not in msg:
+        return None                      # a notification, or a response we never asked for
+    params = msg.get("params") if isinstance(msg.get("params"), dict) else {}
+    if method == "initialize":
+        wanted = params.get("protocolVersion")
+        log.info("user %s initialized (%s, protocol %s)", user.username,
+                 (params.get("clientInfo") or {}).get("name"), wanted)
+        return _result(msg_id, {
+            "protocolVersion": wanted if wanted in PROTOCOLS else PROTOCOLS[0],
+            "capabilities": {"tools": {"listChanged": False}},
+            "serverInfo": {"name": "story-studio", "title": "Story Studio", "version": "1.2.0"},
+            "instructions": INSTRUCTIONS,
+        })
+    if method == "ping":
+        return _result(msg_id, {})
+    if method == "tools/list":
+        # Logged so "my client still shows the old tools" can be told apart
+        # from a server that never got asked.
+        log.info("user %s listed tools (%d)", user.username, len(TOOLS))
+        return _result(msg_id, {"tools": [t["spec"] for t in TOOLS]})
+    if method == "tools/call":
+        try:
+            return _result(msg_id, await _call_tool(user, params, base))
+        except KeyError as exc:
+            return _error(msg_id, -32602, f"unknown tool {exc}")
+    return _error(msg_id, -32601, f"method not found: {method}")
+
+
+def _unauthorized(request: Request) -> JSONResponse:
+    # The header is the whole discovery mechanism: it is how ChatGPT and Claude
+    # learn where to send the person to sign in.
+    return JSONResponse(
+        {"error": "invalid_token",
+         "error_description": "Sign in to Story Studio to use this server. "
+                              f"See {service.base_url(request)}/install"},
+        status_code=401,
+        headers={"WWW-Authenticate":
+                 f'Bearer resource_metadata="{oauth.resource_metadata_url(request)}"'})
+
+
+@router.post("/mcp")
+async def mcp_post(request: Request):
+    user = oauth.user_for_request(request)
+    if user is None:
+        return _unauthorized(request)
+    try:
+        body = json.loads(await request.body())
+    except ValueError:
+        return JSONResponse(_error(None, -32700, "parse error"), status_code=400)
+    base = service.base_url(request)
+    if isinstance(body, list):
+        answers = [a for a in [await _handle(user, m, base) for m in body] if a is not None]
+        return JSONResponse(answers) if answers else Response(status_code=202)
+    answer = await _handle(user, body, base)
+    return JSONResponse(answer) if answer is not None else Response(status_code=202)
+
+
+@router.get("/mcp")
+@router.delete("/mcp")
+async def mcp_other(request: Request):
+    if oauth.user_for_request(request) is None:
+        return _unauthorized(request)
+    # No server-initiated stream and no session to end; the spec's answer for
+    # both is 405, and clients carry on with POST alone.
+    return Response(status_code=405, headers={"Allow": "POST"})

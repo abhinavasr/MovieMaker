@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+{% block title %}Projects · Story Studio{% endblock %}
+{% block body %}
+<h1>Your projects</h1>
+<p class="muted">Signed in as <strong>{{ user.username }}</strong> · access expires {{ expires }}
+  {% if queue %}· <strong>{{ queue }}</strong> render(s) waiting{% endif %}</p>
+<p class="muted">Rather ask an assistant to do it? <a href="/install">Connect Claude or ChatGPT</a>
+  and it can edit and regenerate these projects for you.</p>
+
+<section class="card">
+  <h2>Start something new</h2>
+  <form method="post" action="/projects" class="stack">
+    <label>Title <input name="title" required placeholder="The lighthouse keeper"></label>
+    <fieldset class="modes">
+      <legend>How should the video be made?</legend>
+      <label class="mode">
+        <input type="radio" name="mode" value="storyboard" checked>
+        <div>
+          <strong>Storyboard</strong> — one image per shot
+          <p class="muted">Every picture you upload becomes about five seconds of video, and the
+            clips are joined into one film. Any length of story. Silent, unless you also upload a
+            soundtrack. Best when the story moves through several different scenes.</p>
+        </div>
+      </label>
+      <label class="mode">
+        <input type="radio" name="mode" value="single">
+        <div>
+          <strong>Single clip</strong> — up to 9 reference images, with sound
+          <p class="muted">All the pictures condition one clip of up to ~15 seconds, and the model
+            generates its own stereo audio — voices, effects, music. Best when one scene needs a
+            consistent character, and the only way to get sound.</p>
+        </div>
+      </label>
+    </fieldset>
+    <button class="btn primary" type="submit">Create project</button>
+  </form>
+</section>
+
+<section class="card">
+  <h2>Recent</h2>
+  {% if not projects %}
+    <p class="muted">Nothing yet.</p>
+  {% else %}
+  <ul class="projects">
+    {% for p in projects %}
+      <li>
+        <a href="/projects/{{ p.id }}">
+          <span class="pill {{ p.status }}">{{ p.status }}</span>
+          <strong>{{ p.title }}</strong>
+          <small class="muted">{{ p.mode }} · {{ p.created }} ·
+            <span class="{% if p.deletes.days_left < 14 %}expiring{% endif %}">deleted on {{ p.deletes.deleted_on }}</span></small>
+        </a>
+        {% if p.status == 'succeeded' %}
+          <a class="btn tiny" href="/projects/{{ p.id }}/video?download=1">Download</a>
+        {% endif %}
+      </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+</section>
+{% endblock %}

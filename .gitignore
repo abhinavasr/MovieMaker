@@ -1,0 +1,23 @@
+# Secrets -- never commit. Copy .env.example to .env and fill it in.
+.env
+*.env.local
+
+# Runtime data: the database, uploads, renders, generated media.
+data/
+
+# Model weights and large runtime state (fetched/converted separately; see README).
+music-models/
+tts-models/
+rvc-data/
+music-training/
+# Upstream ACE-Step source, cloned at build time (see README).
+music-src/
+
+# Build logs, caches
+*.log
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+node_modules/

@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+{% block title %}Users · Story Studio{% endblock %}
+{% block body %}
+<h1>Temporary users</h1>
+<p class="muted">Each account has an expiry date. When it passes, the password stops
+working and any open session is dropped on its next request.</p>
+
+{% if created %}
+<div class="banner ok">
+  <strong>{{ created }}</strong> created.
+  {% if password %}
+    Password — <code class="secret">{{ password }}</code>
+    <span class="muted">Shown once. Only a hash is stored, so it cannot be shown again.</span>
+  {% else %}
+    <span class="muted">Using the password you supplied.</span>
+  {% endif %}
+</div>
+{% endif %}
+
+<section class="card">
+  <h2>Issue an account</h2>
+  <form method="post" action="/admin/users" class="row-form">
+    <label>Username <input name="username" required placeholder="e.g. priya"></label>
+    <label>Password <input name="password" placeholder="leave blank to generate"></label>
+    <label>Valid for <input name="days" type="number" value="7" min="0" max="365"> days
+      <small class="muted">0 = never expires</small></label>
+    <label class="grow">Note <input name="note" placeholder="who this is for"></label>
+    <button class="btn primary" type="submit">Create</button>
+  </form>
+</section>
+
+<section class="card">
+  <h2>Accounts <span class="muted">({{ users|length }})</span></h2>
+  {% if not users %}
+    <p class="muted">No accounts yet.</p>
+  {% else %}
+  <table>
+    <thead><tr>
+      <th>User</th><th>State</th><th>Expires</th><th>Hourly limits</th><th>Projects</th><th>Note</th><th>Actions</th>
+    </tr></thead>
+    <tbody>
+    {% for u in users %}
+      <tr>
+        <td><strong>{{ u.username }}</strong><br><small class="muted">since {{ u.created }}</small></td>
+        <td><span class="pill {{ u.state }}">{{ u.state }}</span></td>
+        <td>{{ u.expires }}</td>
+        <td>
+          {% if u.unlimited %}<span class="pill active">unlimited</span>
+          {% else %}<small class="muted">{{ renders_per_hour }} renders,<br>{{ images_per_hour }} pictures</small>{% endif %}
+          <form method="post" action="/admin/users/{{ u.id }}/{{ 'limited' if u.unlimited else 'unlimited' }}">
+            <button class="btn tiny">{{ 'Restore limits' if u.unlimited else 'Make unlimited' }}</button>
+          </form>
+        </td>
+        <td>{{ u.projects }}</td>
+        <td class="muted">{{ u.note }}</td>
+        <td class="actions">
+          <form method="post" action="/admin/users/{{ u.id }}/extend" class="inline">
+            <input name="days" type="number" value="7" min="1" max="365" class="tiny">
+            <button class="btn tiny">+days</button>
+          </form>
+          {% if u.state == 'disabled' %}
+            <form method="post" action="/admin/users/{{ u.id }}/enable" class="inline">
+              <button class="btn tiny">Enable</button></form>
+          {% else %}
+            <form method="post" action="/admin/users/{{ u.id }}/disable" class="inline">
+              <button class="btn tiny">Disable</button></form>
+          {% endif %}
+          <form method="post" action="/admin/users/{{ u.id }}/password" class="inline">
+            <input name="password" placeholder="new password" class="tiny">
+            <button class="btn tiny">Set</button>
+          </form>
+          <form method="post" action="/admin/users/{{ u.id }}/delete" class="inline"
+                onsubmit="return confirm('Delete {{ u.username }} and all their projects and files? This cannot be undone.')">
+            <button class="btn tiny danger">Delete</button>
+          </form>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2>Service</h2>
+  <p class="muted">Your admin account has no hourly limits.</p>
+  <p class="muted">Render queue depth: <strong>{{ queue }}</strong>.
+     Full upstream status at <a href="/healthz">/healthz</a>.</p>
+  <p><a class="btn" href="/studio">Open the studio as yourself</a></p>
+</section>
+{% endblock %}
