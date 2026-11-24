@@ -229,6 +229,7 @@
     f.style.width = w + "px"; f.style.height = h + "px";
   }
   addEventListener("resize", () => S && fitFrame());
+  if (window.ResizeObserver) new ResizeObserver(() => S && fitFrame()).observe($("stage"));
   $("aspect").onchange = async () => {
     const v = $("aspect").value;
     try { const r = await api(`/api/editor/${PID}/settings`, {aspect: v});
@@ -278,7 +279,7 @@
   }
 
   // ------------------------------------------------------------------ timeline
-  const TL = {a: 0, b: 10, pps: 40, off: 150};
+  const TL = {a: 0, b: 10, pps: 40, off: 150, zoom: 1};
   function tlRange() {
     if (view === "timeline" || !sel.scene) return [0, Math.max(10, S.duration)];
     const [a, b] = sceneSpan(sel.scene);
@@ -288,7 +289,9 @@
     const [a, b] = tlRange(); TL.a = a; TL.b = b;
     const lanesEl = $("lanes");
     TL.off = innerWidth <= 780 ? 84 : 150;            // the lane-label column (editor.css)
-    const w = Math.max(200, lanesEl.clientWidth - TL.off);
+    const fit = Math.max(200, $("tl-scroll").clientWidth - TL.off - 4);
+    const w = Math.round(fit * TL.zoom);
+    lanesEl.style.setProperty("--lanew", w + "px");
     TL.pps = w / Math.max(1, b - a);
     const x = (t) => (t - a) * TL.pps;
     $("tl-time").textContent = `${fmt(a)} – ${fmt(b)}`;
@@ -308,11 +311,13 @@
         <span>${c.status === "pending" ? "⏳ " : ""}${esc(c.name)}</span>${c.use_in_video ? `<span class="vid">🎬</span>` : ""}<span class="rs"></span></div>`;
     }).join("");
     const shotSound = shotsIn.filter((s) => s.make !== "animate").map((s) => `<div class="ed-blk shot ${s.id === sel.shot ? "on" : ""}" style="left:${x(s.start)}px;width:${s.seconds * TL.pps}px;opacity:.75" title="${s.make === "lipsync" ? "Lip-sync: the line is on the dialogue track, so this isn't mixed twice" : "Performance shot's own sound"}">${s.make === "lipsync" ? "👄 in dialogue" : "🎭 " + esc(s.title || "shot")}</div>`).join("");
+    const keep = [$("tl-scroll").scrollLeft, $("tl-scroll").scrollTop];
     lanesEl.innerHTML = `<div></div><div class="ed-lane ruler" id="ruler">${ticks}</div>
       <div class="ed-lh"><span class="nm">🎞 Shots</span></div><div class="ed-lane shots">${shotsIn.map((s) => `<div class="ed-blk shot ${s.id === sel.shot ? "on" : ""} ${s.scene_id !== sel.scene && view !== "timeline" ? "other" : ""}" data-tshot="${s.id}" style="left:${x(s.start)}px;width:${s.seconds * TL.pps - 2}px">${esc(s.framing || "")} ${esc(s.title || "shot " + s.n)}</div>`).join("")}</div>
       ${["dialogue", "ambience", "music"].map((t) => lh(t) + `<div class="ed-lane" data-lane="${t}">${blocks(t)}</div>`).join("")}
       ${S.shots.some((s) => s.make !== "animate") ? lh("shot") + `<div class="ed-lane" style="cursor:default">${shotSound}</div>` : ""}
       <div class="ed-head" id="head" style="left:${TL.off + x(Player.t)}px"></div>`;
+    $("tl-scroll").scrollLeft = keep[0]; $("tl-scroll").scrollTop = keep[1];
     paintWaves();
   }
   // Waveforms for ready clips, decoded once and cached.
@@ -336,8 +341,21 @@
     }
   }
   addEventListener("resize", () => S && paintTimeline());
+  $("tl-zoom").oninput = () => { TL.zoom = +$("tl-zoom").value; $("tl-zoom-v").textContent = TL.zoom === 1 ? "fit" : TL.zoom + "×";
+    const sc = $("tl-scroll"), mid = (sc.scrollLeft + sc.clientWidth / 2) / Math.max(1, sc.scrollWidth); paintTimeline(); sc.scrollLeft = mid * sc.scrollWidth - sc.clientWidth / 2; };
+  $("tl-scroll").addEventListener("wheel", (e) => { if (!e.ctrlKey && !e.metaKey) return; e.preventDefault();
+    $("tl-zoom").value = Math.max(1, Math.min(8, TL.zoom * (e.deltaY < 0 ? 1.25 : 0.8))); $("tl-zoom").oninput(); }, {passive: false});
+  const hKey = "ed-tl-height";
+  try { const h = +localStorage.getItem(hKey); if (h) ED.style.setProperty("--tlh", h + "px"); } catch { /* private mode */ }
+  $("tl-grip").addEventListener("pointerdown", (e) => {
+    const tl = $("tl"), y0 = e.clientY, h0 = tl.getBoundingClientRect().height; tl.classList.add("resizing"); $("tl-grip").setPointerCapture(e.pointerId);
+    const mv = (ev) => { const h = Math.max(110, Math.min(innerHeight * 0.7, h0 + (y0 - ev.clientY))); ED.style.setProperty("--tlh", h + "px"); fitFrame(); };
+    const up = () => { tl.classList.remove("resizing"); $("tl-grip").removeEventListener("pointermove", mv); $("tl-grip").removeEventListener("pointerup", up);
+      try { localStorage.setItem(hKey, String(Math.round(tl.getBoundingClientRect().height))); } catch { /* private mode */ } paintTimeline(); };
+    $("tl-grip").addEventListener("pointermove", mv); $("tl-grip").addEventListener("pointerup", up);
+  });
   const tlKey = "ed-tl-collapsed";
-  const setTl = (c) => { $("tl").classList.toggle("collapsed", c); $("tl-caret").textContent = c ? "▸" : "▾"; $("tl-toggle").setAttribute("aria-expanded", String(!c)); try { localStorage.setItem(tlKey, c ? "1" : ""); } catch { /* private mode */ } if (!c && S) paintTimeline(); };
+  const setTl = (c) => { setTimeout(() => S && fitFrame(), 0); $("tl").classList.toggle("collapsed", c); $("tl-caret").textContent = c ? "▸" : "▾"; $("tl-toggle").setAttribute("aria-expanded", String(!c)); try { localStorage.setItem(tlKey, c ? "1" : ""); } catch { /* private mode */ } if (!c && S) paintTimeline(); };
   $("tl-toggle").onclick = () => setTl(!$("tl").classList.contains("collapsed"));
   try { if (localStorage.getItem(tlKey)) setTl(true); } catch { /* private mode */ }
   $("lanes").addEventListener("input", (e) => { const g = e.target.dataset.gain; if (g) { e.target.title = `${TRACK_NAME[g]} level ${e.target.value} dB`; } });
@@ -669,7 +687,8 @@
       if (sh && !this.playing && sh.id !== sel.shot) { sel.shot = sh.id; sel.scene = sh.scene_id; paint(); }
       if (this.playing) { this.audios.forEach((a) => a.pause()); this.curShot = null; } this.paintHead(); },
     paintHead() {
-      const h = $("head"); if (h) h.style.left = (TL.off + (this.t - TL.a) * TL.pps) + "px";
+      const h = $("head"); const hx = TL.off + (this.t - TL.a) * TL.pps; if (h) h.style.left = hx + "px";
+      const sc = $("tl-scroll"); if (this.playing && sc && (hx > sc.scrollLeft + sc.clientWidth - 40 || hx < sc.scrollLeft + TL.off)) sc.scrollLeft = hx - TL.off - 20;
       const [a, b] = this.playing ? this.range : this.rangeNow();
       $("ptime").textContent = `${fmt(this.t - a)} / ${fmt(b - a)}`;
       $("scrub").value = b > a ? Math.round((this.t - a) / (b - a) * 1000) : 0;

@@ -51,9 +51,11 @@
       </div>
       <div id="v-assets" class="ed-assets" hidden></div>
       <div class="ed-tl" id="tl">
+        <div class="ed-tl-grip" id="tl-grip" title="Drag to resize the timeline" role="separator" aria-orientation="horizontal" aria-label="Resize timeline"></div>
         <div class="ed-tl-bar"><button type="button" class="ed-tl-toggle" id="tl-toggle" aria-expanded="true"><span id="tl-caret">▾</span><span id="tl-title">Scene timeline</span></button><span id="tl-time"></span><span class="sp"></span>
-          <label>Duck music under dialogue <select id="duck"><option value="0">off</option><option value="-6">-6 dB</option><option value="-10">-10 dB</option><option value="-14">-14 dB</option><option value="-20">-20 dB</option></select></label></div>
-        <div class="ed-lanes" id="lanes"></div>
+          <label class="ed-zoom" title="Zoom the timeline">🔍 <input type="range" id="tl-zoom" min="1" max="8" step="0.25" value="1" aria-label="Timeline zoom"><span id="tl-zoom-v">fit</span></label>
+          <label>Duck music <select id="duck"><option value="0">off</option><option value="-6">-6 dB</option><option value="-10">-10 dB</option><option value="-14">-14 dB</option><option value="-20">-20 dB</option></select></label></div>
+        <div class="ed-tl-scroll" id="tl-scroll"><div class="ed-lanes" id="lanes"></div></div>
         <div class="ed-hint">Click an empty spot on a lane to add a line of dialogue, music or ambience there · drag clips to move, drag their right edge to trim · click a clip to mix it</div>
       </div>
     </section>
