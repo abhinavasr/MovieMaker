@@ -427,3 +427,9 @@ body:has(.ed) footer, body:has(.ed) .retention-note { display: none; }
 .ed-rvid button:hover { color: var(--bad); }
 .ed-rvadd { display: flex; gap: 6px; margin-bottom: 6px; }
 .ed-rvadd select { flex: 1; font: inherit; font-size: .8rem; background: var(--panel-2); color: var(--ink); border: 1px solid var(--line); border-radius: 8px; padding: 5px 8px; }
+.ed-turn { grid-template-columns: repeat(auto-fill, minmax(84px, 1fr)); }
+.ed-turn .t { cursor: default; font-size: .7rem; }
+.ed-turn .t.mine { border-color: var(--good, #6bbf7a); }
+.ed-turn .t .tt { position: absolute; top: 3px; right: 3px; display: flex; gap: 2px; opacity: .92; }
+.ed-turn .t .tt button { width: 22px; height: 22px; border-radius: 6px; border: 0; background: rgba(0,0,0,.65); color: #fff; font-size: .72rem; cursor: pointer; padding: 0; }
+.ed-turn .t .tt button:hover { background: var(--gold); color: var(--accent-ink); }

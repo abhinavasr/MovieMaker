@@ -818,7 +818,8 @@ async def _run_angles() -> None:
         project = db.one("SELECT * FROM projects WHERE id=?", (r["project_id"],))
         if user is None or project is None:
             continue
-        db.run("UPDATE prod_refs SET angles='{}' WHERE id=?", (r["id"],))
+        db.run("UPDATE prod_refs SET angles=? WHERE id=?",
+               (json.dumps(_keep_mine(_jl(r["angles"], {}))), r["id"]))
         try:
             await make_angles(project, user, r["id"])
             log.info("turnaround queued for %s", r["name"])
@@ -1042,9 +1043,91 @@ def _angle_done(r) -> dict[str, str]:
     """{angle: image_id} for the finished angle pictures of a reference."""
     out = {}
     for k, i in _jl(r["angles"], {}).items():
-        if i and _img_done(i):
+        if isinstance(i, str) and not k.startswith("_") and _img_done(i):
             out[k] = i
     return out
+
+
+# The person's own photos (2026-11-24: "allow user to upload multiple photos if you are
+# unable to generate multiple angle photos from 1 pic"). In the angles map:
+#   a view key ("side", "wide", ...) -> an uploaded photo for that view, listed in _mine;
+#   "photo_N"                        -> extra photos, also in _mine;
+#   "_skip": views the person removed -- never redrawn automatically.
+# Generated views never overwrite anything in _mine.
+MAX_EXTRA_PHOTOS = 6
+
+
+def _marks(angles: dict) -> tuple[set, set]:
+    return set(angles.get("_mine") or []), set(angles.get("_skip") or [])
+
+
+def _keep_mine(angles: dict) -> dict:
+    """What survives a redraw: the person's photos and their removals."""
+    mine, skip = _marks(angles)
+    out = {k: v for k, v in angles.items() if k in mine}
+    if mine:
+        out["_mine"] = sorted(mine)
+    if skip:
+        out["_skip"] = sorted(skip)
+    return out
+
+
+def add_ref_photos(project, user: auth.User, ref_id: str, files: list[tuple[str, bytes]],
+                   slot: str | None = None) -> dict:
+    pid = project["id"]
+    r = _ref(pid, ref_id)
+    views = views_for(r["kind"])
+    angles = {k: v for k, v in _jl(r["angles"], {}).items() if k != "_auto"}
+    mine, skip = _marks(angles)
+    ids = [_import_picture(user, name, raw) for name, raw in files if raw]
+    if not ids:
+        raise HTTPException(400, "no photo")
+    placed = []
+    if slot:
+        if slot == "main":
+            db.run("UPDATE prod_refs SET image_id=? WHERE id=?", (ids[0], ref_id))
+            placed.append("main")
+        elif slot in views or (slot.startswith("photo_") and slot in angles):
+            angles[slot] = ids[0]
+            mine.add(slot)
+            skip.discard(slot)
+            placed.append(slot)
+        else:
+            raise HTTPException(400, "no such view")
+    else:
+        queue = list(ids)
+        if not (r["image_id"] and _img_done(r["image_id"])):
+            db.run("UPDATE prod_refs SET image_id=? WHERE id=?", (queue.pop(0), ref_id))
+            placed.append("main")
+        n = 1
+        for i in queue:
+            while f"photo_{n}" in angles:
+                n += 1
+            if n > MAX_EXTRA_PHOTOS:
+                break
+            angles[f"photo_{n}"] = i
+            mine.add(f"photo_{n}")
+            placed.append(f"photo_{n}")
+    angles["_mine"] = sorted(mine)
+    if skip:
+        angles["_skip"] = sorted(skip)
+    db.run("UPDATE prod_refs SET angles=? WHERE id=?", (json.dumps(angles), ref_id))
+    _touch(pid)
+    return {"placed": placed, "dropped": len(ids) - len(placed)}
+
+
+def remove_ref_view(project, ref_id: str, key: str) -> None:
+    pid = project["id"]
+    r = _ref(pid, ref_id)
+    angles = _jl(r["angles"], {})
+    mine, skip = _marks(angles)
+    angles.pop(key, None)
+    mine.discard(key)
+    if key in views_for(r["kind"]):
+        skip.add(key)                     # removed on purpose: do not draw it again by itself
+    angles["_mine"], angles["_skip"] = sorted(mine), sorted(skip)
+    db.run("UPDATE prod_refs SET angles=? WHERE id=?", (json.dumps(angles), ref_id))
+    _touch(pid)
 
 
 async def make_angles(project, user: auth.User, ref_id: str, only: list | None = None) -> dict:
@@ -1054,12 +1137,28 @@ async def make_angles(project, user: auth.User, ref_id: str, only: list | None =
     if not r["image_id"] or not _img_done(r["image_id"]):
         raise HTTPException(400, f"{r['name']} needs its main picture first")
     src = [images.source_from_image(user, r["image_id"])]
+    for i in _own_photos(r)[:3]:                 # the person's photos say more than one picture
+        try:
+            src.append(images.source_from_image(user, i))
+        except HTTPException:
+            pass
+    more = (f" Pictures 2-{len(src)} are more photos of the same "
+            f"{'place' if r['kind'] == 'location' else 'character'}." if len(src) > 1 else "")
     params = db.params_of(project)
     angles = {k: v for k, v in _jl(r["angles"], {}).items() if k != "_auto"}
     views = views_for(r["kind"])
     if not views:
         raise HTTPException(400, f"{r['kind']} references have no extra views")
-    for key in [k for k in (only or list(views)) if k in views]:
+    mine, skip = _marks(angles)
+    if only:                         # the person asked for these: redraw even their own
+        keys = [k for k in only if k in views]
+        mine -= set(keys)
+        skip -= set(keys)
+    else:                            # all: everything except the person's photos
+        keys = [k for k in views if k not in mine]
+        skip = set()
+    angles["_mine"], angles["_skip"] = sorted(mine), sorted(skip)
+    for key in keys:
         if r["kind"] == "location":
             text = (f"Same place as picture 1 ({r['name']}), but {views[key]}. Keep the same "
                     "landmarks, colours, light and style. No characters.")
@@ -1070,7 +1169,7 @@ async def make_angles(project, user: auth.User, ref_id: str, only: list | None =
             text = (f"The same character as in picture 1: {r['name']}, {r['description']}. "
                     f"{views[key]}. Exactly the same design, outfit, colours and proportions; "
                     "plain soft background; character turnaround reference.")
-        angles[key] = await images.create(user, text[:1900], src,
+        angles[key] = await images.create(user, (text + more)[:1900], src,
                                           orientation=params.get("orientation", "portrait"),
                                           model=PLACE_VIEW_MODEL if r["kind"] == "location" else None)
     db.run("UPDATE prod_refs SET angles=? WHERE id=?", (json.dumps(angles), ref_id))
@@ -1080,25 +1179,52 @@ async def make_angles(project, user: auth.User, ref_id: str, only: list | None =
 
 def _want_angles(pid: str, ref_id: str) -> None:
     """Mark a character or place for its views once its main picture is ready (pending_loop)."""
+    r = db.one("SELECT angles FROM prod_refs WHERE id=?", (ref_id,))
+    keep = _keep_mine(_jl(r["angles"] if r else "{}", {}))
     db.run("UPDATE prod_refs SET angles=? WHERE id=? AND kind IN ('character','location')",
-           (json.dumps({"_auto": True}), ref_id))
+           (json.dumps({**keep, "_auto": True}), ref_id))
 
 
-def _ref_sources(user: auth.User, pid: str, ref_ids: list) -> list[tuple[str, bytes]]:
-    """Source pictures for a shot's picture: each reference's main picture, and a
-    character's three-quarter view while there is room (WIS takes 4)."""
-    main, extra = [], []
-    for rid in ref_ids:
-        r = db.one("SELECT * FROM prod_refs WHERE id=? AND project_id=?", (rid, pid))
-        if r and r["image_id"] and _img_done(r["image_id"]):
+def _own_photos(r) -> list[str]:
+    """The person's own photos of a reference (views they replaced, then extra photos)."""
+    angles = _jl(r["angles"], {})
+    mine, _ = _marks(angles)
+    done = _angle_done(r)
+    order = [k for k in views_for(r["kind"]) if k in mine] + \
+        sorted(k for k in mine if k.startswith("photo_"))
+    return [done[k] for k in order if k in done]
+
+
+def _ref_sources(user: auth.User, pid: str, ref_ids: list,
+                 limit: int = 4) -> tuple[list[tuple[str, bytes]], str]:
+    """Source pictures for a shot's picture, and the sentence naming them.
+
+    WIS takes 4. Every reference's main picture first; then the person's own photos
+    (2026-11-24: "the system should use the multiple reference photos (if uploaded) to
+    generate better images"), one reference at a time; then a drawn three-quarter view."""
+    refs = [r for r in (db.one("SELECT * FROM prod_refs WHERE id=? AND project_id=?", (rid, pid))
+                        for rid in ref_ids) if r and r["image_id"] and _img_done(r["image_id"])]
+    rounds = [[(r, r["image_id"]) for r in refs]]
+    photos = [_own_photos(r) for r in refs]
+    for i in range(max((len(p) for p in photos), default=0)):
+        rounds.append([(r, p[i]) for r, p in zip(refs, photos) if i < len(p)])
+    rounds.append([(r, _angle_done(r)["three_quarter"]) for r in refs
+                   if "three_quarter" in _angle_done(r)])
+    sources, who = [], {}
+    for rnd in rounds:
+        for r, image_id in rnd:
+            if len(sources) >= limit:
+                break
             try:
-                main.append(images.source_from_image(user, r["image_id"]))
-                a = _angle_done(r).get("three_quarter")
-                if a:
-                    extra.append(images.source_from_image(user, a))
+                sources.append(images.source_from_image(user, image_id))
             except HTTPException:
-                pass
-    return (main + extra)[:4]
+                continue
+            who.setdefault(r["name"], []).append(len(sources))
+    text = " ".join(f"{name} looks exactly like picture {nums[0]}." if len(nums) == 1 else
+                    f"{name} looks exactly like pictures {', '.join(map(str, nums[:-1]))} and "
+                    f"{nums[-1]} (the same {('place' if any(r['name'] == name and r['kind'] == 'location' for r in refs) else 'character')} in each)."
+                    for name, nums in who.items())
+    return sources, text
 
 
 def _shot_context(pid: str, shot) -> str:
@@ -1129,13 +1255,9 @@ async def picture_options(project, user: auth.User, shot_id: str, prompt: str = 
                                                   _shot_context(pid, shot)) if x)
     if not text:
         raise HTTPException(400, "describe the picture, or give the shot a title and prompt")
-    sources = _ref_sources(user, pid, _jl(shot["refs"], []))[:4]
-    if sources:
-        names = [db.one("SELECT name FROM prod_refs WHERE id=?", (r,))["name"]
-                 for r in _jl(shot["refs"], []) if db.one("SELECT image_id FROM prod_refs "
-                                                         "WHERE id=?", (r,))["image_id"]][:4]
-        text += " " + " ".join(f"{n} looks exactly like picture {i + 1}."
-                               for i, n in enumerate(names))
+    sources, who = _ref_sources(user, pid, _jl(shot["refs"], []))
+    if who:
+        text += " " + who
     params = db.params_of(project)
     ids = []
     for i in range(count):
@@ -1223,8 +1345,9 @@ def _ref_ready(r) -> str:
     angles = _jl(r["angles"], {})
     if angles.get("_auto"):
         return "waiting"
+    _, skip = _marks(angles)
     states = [(db.one("SELECT status FROM images WHERE id=?", (angles[k],)) or {"status": "failed"})["status"]
-              if isinstance(angles.get(k), str) else "missing" for k in views]
+              if isinstance(angles.get(k), str) else "missing" for k in views if k not in skip]
     if any(st not in images.TERMINAL and st != "missing" for st in states):
         return "waiting"
     return "ready" if all(st == "succeeded" for st in states) else "missing"
@@ -2217,6 +2340,8 @@ def state(project, base: str) -> dict:
                           "image": base + service.stable_signed_path("image", r["image_id"], 86400)
                           if r["image_id"] and _img_done(r["image_id"]) else None,
                           "image_pending": bool(r["image_id"]) and not _img_done(r["image_id"]),
+                          "mine": sorted(_marks(_jl(r["angles"], {}))[0]),
+                          "skipped": sorted(_marks(_jl(r["angles"], {}))[1]),
                           "angles": [{"angle": k, "image_id": v,
                                       "status": (db.one("SELECT status FROM images WHERE id=?", (v,)) or
                                                  {"status": "gone"})["status"],
@@ -2482,7 +2607,17 @@ async def make_ref_picture(project, user: auth.User, ref_id: str, prompt: str = 
     r = _ref(pid, ref_id)
     params = db.params_of(project)
     text = prompt.strip() or ref_prompt(project, r)
-    image_id = await images.create(user, text[:1900], [], orientation=params.get("orientation", "portrait"),
+    src = []
+    for i in _own_photos(r)[:4]:
+        try:
+            src.append(images.source_from_image(user, i))
+        except HTTPException:
+            pass
+    if src:
+        text += (f" Exactly the same {'place' if r['kind'] == 'location' else 'person'} as in "
+                 f"the {'photo' if len(src) == 1 else str(len(src)) + ' photos'}: same face, "
+                 "features, build and colours.")
+    image_id = await images.create(user, text[:1900], src, orientation=params.get("orientation", "portrait"),
                                    model=model)
     db.run("UPDATE prod_refs SET image_id=? WHERE id=?", (image_id, ref_id))
     _want_angles(pid, ref_id)
@@ -3086,6 +3221,24 @@ async def api_ref_angles(pid: str, rid: str, request: Request):
     b = await _body(request)
     only = [a for a in (b.get("only") or []) if a in ANGLES or a in PLACE_VIEWS] or None
     return {"angles": await make_angles(project, user, rid, only)}
+
+
+@router.post("/api/editor/{pid}/refs/{rid}/photos")
+async def api_ref_photos(pid: str, rid: str, request: Request):
+    """multipart: file (one or more), slot? ('main', a view key, or an existing photo_N)."""
+    user = _user(request)
+    project = production(user, pid)
+    form = await request.form()
+    files = [(getattr(f, "filename", "photo.png"), await f.read())
+             for f in form.getlist("file") if hasattr(f, "read")]
+    return add_ref_photos(project, user, rid, files, str(form.get("slot") or "") or None)
+
+
+@router.post("/api/editor/{pid}/refs/{rid}/views/{key}/delete")
+async def api_ref_view_delete(pid: str, rid: str, key: str, request: Request):
+    user = _user(request)
+    remove_ref_view(production(user, pid), rid, key)
+    return {"ok": True}
 
 
 @router.post("/api/editor/{pid}/ref-pictures")

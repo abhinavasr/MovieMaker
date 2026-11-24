@@ -264,7 +264,7 @@
   function paintRefs() {
     $("refs").innerHTML = S.refs.length ? S.refs.map((r) => `<div class="ed-ref" data-ref="${r.id}">
       <div class="th">${r.image ? `<img src="${esc(r.image)}" alt="" loading="lazy">` : r.image_pending ? "⏳" : ({character: "👤", location: "🏛", prop: "🗝", style: "🎨", voice: "🎙"}[r.kind] || "📌")}</div>
-      <div><b>${esc(r.name)}</b><span>${esc(r.kind[0].toUpperCase() + r.kind.slice(1))}${r.description ? " · " + esc(r.description) : ""}</span>${r.voice ? `<span class="v">🎙 voice sample</span>` : r.speaker ? `<span class="v">🎙 ${esc(r.speaker)}</span>` : ""}${r.kind === "character" || r.kind === "location" ? `<span class="v" style="color:var(--muted)">🔄 ${(r.angles || []).filter((a) => a.status === "succeeded").length}/4 ${r.kind === "location" ? "views" : "angles"}${(r.angles || []).some((a) => !["succeeded", "failed", "gone"].includes(a.status)) || r.angles_waiting ? " · drawing" : ""}</span>` : ""}</div>
+      <div><b>${esc(r.name)}</b><span>${esc(r.kind[0].toUpperCase() + r.kind.slice(1))}${r.description ? " · " + esc(r.description) : ""}</span>${r.voice ? `<span class="v">🎙 voice sample</span>` : r.speaker ? `<span class="v">🎙 ${esc(r.speaker)}</span>` : ""}${r.kind === "character" || r.kind === "location" ? `<span class="v" style="color:var(--muted)">🔄 ${(r.angles || []).filter((a) => a.status === "succeeded" && !a.angle.startsWith("photo_")).length}/4 ${r.kind === "location" ? "views" : "angles"}${(r.angles || []).some((a) => a.angle.startsWith("photo_")) ? ` + ${(r.angles || []).filter((a) => a.angle.startsWith("photo_")).length} photo(s)` : ""}${(r.angles || []).some((a) => !["succeeded", "failed", "gone"].includes(a.status)) || r.angles_waiting ? " · drawing" : ""}</span>` : ""}</div>
       <span>⋮</span></div>`).join("") : `<div class="ed-note" style="padding:4px 6px">Characters, places and voices the film keeps coming back to. Shots that include them get them as references, so faces and voices stay consistent.</div>`;
   }
   $("refs").addEventListener("click", (e) => { const d = e.target.closest("[data-ref]"); if (d) refModal(refById(d.dataset.ref)); });
@@ -298,8 +298,9 @@
           </div>
         </div>
         <div class="ed-refopts" id="rf-opts"></div></div>
-      ${r && (r.kind === "character" || r.kind === "location") ? `<div class="ed-field">${r.kind === "location" ? "Views of the place" : "Turnaround — every angle"}, drawn from the main picture <div class="ed-turn" id="rf-turn"></div>
-        <div style="display:flex;gap:6px;margin-top:6px"><button class="ed-btn sm" type="button" id="rf-angles">↻ Redraw all angles</button><span class="ed-note" id="rf-turn-note"></span></div></div>` : ""}
+      ${r && (r.kind === "character" || r.kind === "location") ? `<div class="ed-field">${r.kind === "location" ? "Views of the place" : "Every angle"} — drawn from the main picture and your photos <div class="ed-turn" id="rf-turn"></div>
+        <div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap;align-items:center"><button class="ed-btn sm" type="button" id="rf-photos">⤒ Add photos</button><button class="ed-btn sm" type="button" id="rf-angles">↻ Redraw all</button><span class="ed-note" id="rf-turn-note"></span></div>
+        <div class="ed-note" style="margin-top:4px">Drawn views not right? Use your own photos: ⤒ on a view replaces it, ✕ removes it, and “Add photos” takes several at once as extra references. Your photos are never redrawn.</div></div>` : ""}
       <input type="file" id="rf-picfile" accept="image/*" hidden>
       <div class="ed-row2" id="rf-voicerow" ${voiced(r?.kind || "character") ? "" : "hidden"}><label class="ed-field">Preset voice<select id="rf-speaker"><option value="">— none —</option>${S.speakers.map((s) => `<option value="${esc(s)}" ${r?.speaker === s ? "selected" : ""}>${esc(voiceLabel(s))}</option>`).join("")}</select></label>
       <label class="ed-field">…or a voice sample to clone<div class="ed-drop" id="rf-voice">${r?.voice ? "🎙 sample saved — click to replace" : "5–30 s of clear speech"}</div><input type="file" id="rf-voicefile" accept="audio/*" hidden></label></div>
@@ -330,16 +331,27 @@
       if (!$("rf-turn") || !r) return;
       const cur = S.refs.find((x) => x.id === r.id) || r;
       const by = Object.fromEntries((cur.angles || []).map((a) => [a.angle, a]));
+      const mine = new Set(cur.mine || []), skipped = new Set(cur.skipped || []);
+      const tools = (k, canRedraw) => `<span class="tt">${canRedraw ? `<button type="button" data-angle="${k}" title="Draw it again">↻</button>` : ""}<button type="button" data-vup="${k}" title="Use my photo for this">⤒</button>${by[k] ? `<button type="button" data-vdel="${k}" title="Remove">✕</button>` : ""}</span>`;
       $("rf-turn").innerHTML = `<div class="t main">${cur.image ? `<img src="${esc(cur.image)}" alt="">` : "—"}<span>${cur.kind === "location" ? "Main" : "Front"}</span></div>`
         + Object.keys(ANG).map((k) => { const a = by[k];
-          return `<button type="button" class="t" data-angle="${k}" title="Redraw the ${ANG[k]}">${a && a.status === "succeeded" ? `<img src="${esc(a.url)}" alt="">` : a && a.status !== "failed" ? `<i class="spin"></i>` : cur.angles_waiting ? "⏳" : "—"}<span>${ANG[k]}</span></button>`; }).join("");
+          return `<div class="t ${mine.has(k) ? "mine" : ""}">${a && a.status === "succeeded" ? `<img src="${esc(a.url)}" alt="">` : a && a.status !== "failed" ? `<i class="spin"></i>` : skipped.has(k) ? "removed" : cur.angles_waiting ? "⏳" : "—"}<span>${ANG[k]}${mine.has(k) ? " · yours" : ""}</span>${tools(k, true)}</div>`; }).join("")
+        + (cur.angles || []).filter((a) => a.angle.startsWith("photo_")).map((a) => `<div class="t mine">${a.status === "succeeded" ? `<img src="${esc(a.url)}" alt="">` : `<i class="spin"></i>`}<span>Photo ${a.angle.slice(6)}</span>${tools(a.angle, false)}</div>`).join("");
       const pending = (cur.angles || []).filter((a) => !["succeeded", "failed", "cancelled", "gone"].includes(a.status)).length;
       $("rf-turn-note").textContent = !cur.image ? "Set the main picture first; the angles follow automatically." : cur.angles_waiting ? "Waiting for the main picture to finish…" : pending ? `Drawing ${pending} angle(s)…` : "";
     }
     paintTurn();
     const turnTimer = setInterval(async () => { if ($("modal").hidden || !$("rf-turn")) { clearInterval(turnTimer); return; } await load(); paintTurn(); }, 3000);
     if ($("rf-angles")) $("rf-angles").onclick = async () => { try { await api(`/api/editor/${PID}/refs/${r.id}/angles`, {}); toast("Drawing every angle from the main picture"); await load(true); paintTurn(); } catch (e) { toast(e.message); } };
-    if ($("rf-turn")) $("rf-turn").addEventListener("click", async (e) => { const b = e.target.closest("[data-angle]"); if (!b) return;
+    const pickPhotos = (multiple, slot) => { const inp = document.createElement("input"); inp.type = "file"; inp.accept = "image/*"; inp.multiple = multiple;
+      inp.onchange = async () => { if (!inp.files.length) return; const fd = new FormData(); [...inp.files].forEach((f) => fd.append("file", f)); if (slot) fd.append("slot", slot);
+        try { const d = await api(`/api/editor/${PID}/refs/${r.id}/photos`, fd); toast(`Added ${d.placed.length} photo(s)` + (d.dropped ? ` · ${d.dropped} over the limit of 6 extra photos` : "")); await load(true); paintTurn(); } catch (err) { toast(err.message); } };
+      inp.click(); };
+    if ($("rf-photos")) $("rf-photos").onclick = () => { if (!r) { toast("Save it first"); return; } pickPhotos(true, null); };
+    if ($("rf-turn")) $("rf-turn").addEventListener("click", async (e) => {
+      const up = e.target.closest("[data-vup]"); if (up) { pickPhotos(false, up.dataset.vup); return; }
+      const del = e.target.closest("[data-vdel]"); if (del) { try { await api(`/api/editor/${PID}/refs/${r.id}/views/${del.dataset.vdel}/delete`, {}); toast("Removed"); await load(true); paintTurn(); } catch (err) { toast(err.message); } return; }
+      const b = e.target.closest("[data-angle]"); if (!b) return;
       try { await api(`/api/editor/${PID}/refs/${r.id}/angles`, {only: [b.dataset.angle]}); toast("Redrawing that angle"); await load(true); paintTurn(); } catch (err) { toast(err.message); } });
     $("rf-gen").onclick = async () => {
       const btn = $("rf-gen"); btn.disabled = true;
