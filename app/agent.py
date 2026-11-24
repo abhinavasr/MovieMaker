@@ -54,7 +54,11 @@ router = APIRouter()
 
 MAX_ROUNDS = 6                 # planner calls per turn (continue / self-fix rounds)
 EXECUTOR_TRIES = 3             # calls per step, including executor repairs
-LEASE_HOLD_S = 900
+# Renewed before every planner call, so this only bounds how long a lease outlives a
+# crashed or restarted process. It was 900 s: a deploy mid-turn left the card held,
+# idle, for up to 15 minutes (2026-11-24). The lease id is also kept on disk and
+# returned at startup (see _remember_lease / release_leftover_lease).
+LEASE_HOLD_S = 240
 TERMINAL = {"succeeded", "failed", "cancelled", "canceled", "error", "done"}
 # Tools that put work on the GPU (or wait on WIS, which queues behind the
 # planner's lease): the planner's GPU turn must end before they run, or they
@@ -422,6 +426,8 @@ class GpuTurn:
             while True:
                 try:
                     self.lease = await wis.lease_gpu("studio-planner", LEASE_HOLD_S)
+                    if self.lease:
+                        _remember_lease(self.lease)
                 except Exception as exc:                       # noqa: BLE001
                     log.warning("no WIS lease for the planner (%s); running without", exc)
                     self.lease = ""
@@ -445,6 +451,7 @@ class GpuTurn:
             await asyncio.shield(_unload(cfg.PLANNER_MODEL))
             if self.lease:
                 await asyncio.shield(wis.release_gpu(self.lease))
+                _remember_lease(None)
         finally:
             self.lease = None
             gpuqueue.resume()
@@ -1169,8 +1176,35 @@ async def _turn(thread_id: str) -> None:
 
 # =========================================================================== loops
 
+def _lease_file():
+    return cfg.DATA_DIR / "planner_lease.txt"
+
+
+def _remember_lease(lease_id: str | None) -> None:
+    try:
+        if lease_id:
+            _lease_file().write_text(lease_id)
+        else:
+            _lease_file().unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+async def release_leftover_lease() -> None:
+    """A restart mid-turn leaves the planner's lease held in WIS with nothing using the
+    card; hand it back before the worker starts."""
+    f = _lease_file()
+    if f.exists():
+        lease = f.read_text().strip()
+        if lease:
+            log.info("returning the planner's GPU lease %s left by the previous process", lease)
+            await wis.release_gpu(lease)
+        _remember_lease(None)
+
+
 async def worker() -> None:
     """One planner at a time: there is one GPU and one big model."""
+    await release_leftover_lease()
     db.run("UPDATE agent_threads SET status='queued', reason='resumed after a restart' "
            "WHERE status IN ('planning','executing','queued')")
     while True:
