@@ -1501,6 +1501,11 @@ def _asset_url(pid: str, asset_id: str | None) -> str | None:
     return f"/projects/{pid}/asset/{asset_id}" if asset_id else None
 
 
+def _img_done(image_id: str) -> bool:
+    row = db.one("SELECT status FROM images WHERE id=?", (image_id,))
+    return bool(row and row["status"] == "succeeded")
+
+
 def state(project, base: str) -> dict:
     pid = project["id"]
     refresh_clips(pid)
@@ -1540,7 +1545,8 @@ def state(project, base: str) -> dict:
                           "description": r["description"], "speaker": r["speaker"],
                           "image_id": r["image_id"],
                           "image": base + service.signed_path("image", r["image_id"], 86400)
-                          if r["image_id"] else None,
+                          if r["image_id"] and _img_done(r["image_id"]) else None,
+                          "image_pending": bool(r["image_id"]) and not _img_done(r["image_id"]),
                           "voice": f"/api/editor/{pid}/refs/{r['id']}/voice"
                           if r["voice_path"] else None})
     props = []
@@ -1740,18 +1746,43 @@ def _t_storyboard(user, args, base):
                              "summary": args.get("summary") or "", "changes": changes}, base)
 
 
+def ref_prompt(project, r) -> str:
+    """The default picture prompt for a reference: its look, in the film's style."""
+    style = ""
+    story = (project["story"] or "").lower()
+    for word in ("3d animated", "3d animation", "pixar", "watercolor", "watercolour", "anime", "ghibli",
+                 "2d", "cel shad", "claymation", "stop-motion", "photoreal", "cinematic"):
+        if word in story:
+            style = f" Style: {word}."
+            break
+    look = {"character": "Character reference sheet: full body, front view, neutral pose, plain soft "
+                         "background, clear face, consistent design.",
+            "location": "Establishing view of the place, no people, clear layout, natural light.",
+            "prop": "The object alone, clear view, plain background.",
+            "style": "A frame that shows this visual style.",
+            "voice": "A portrait of the speaker, plain background."}.get(r["kind"], "")
+    return f"{r['name']}, {r['description']}. {look}{style}".strip()
+
+
+async def ref_picture_options(project, user: auth.User, ref_id: str, prompt: str = "",
+                              count: int = 2, model: str | None = None) -> list[str]:
+    """Picture options for a reference; the person picks one (nothing is set yet)."""
+    r = _ref(project["id"], ref_id)
+    params = db.params_of(project)
+    text = (prompt.strip() or ref_prompt(project, r))[:1900]
+    orient = "landscape" if r["kind"] == "location" and params.get("orientation") == "landscape" else \
+        params.get("orientation", "portrait")
+    return [await images.create(user, text, [], orientation=orient, model=model)
+            for _ in range(max(1, min(4, int(count or 2))))]
+
+
 async def make_ref_picture(project, user: auth.User, ref_id: str, prompt: str = "",
                            model: str | None = None) -> str:
     """A picture for a character/place reference (a clean, front-on look the shots copy)."""
     pid = project["id"]
     r = _ref(pid, ref_id)
     params = db.params_of(project)
-    text = prompt.strip() or (
-        f"{r['name']}, {r['description']}. " +
-        ("Character reference: full body, front view, neutral pose, plain soft background, "
-         "clear face, consistent design." if r["kind"] == "character" else
-         "Establishing view of the place, no people, clear layout." if r["kind"] == "location" else
-         "Clear reference picture, plain background."))
+    text = prompt.strip() or ref_prompt(project, r)
     image_id = await images.create(user, text[:1900], [], orientation=params.get("orientation", "portrait"),
                                    model=model)
     db.run("UPDATE prod_refs SET image_id=? WHERE id=?", (image_id, ref_id))
@@ -1997,6 +2028,17 @@ async def api_create(request: Request):
     return {"id": pid}
 
 
+async def _refresh_refs(pid: str) -> None:
+    for r in db.query("SELECT image_id FROM prod_refs WHERE project_id=? AND image_id IS NOT NULL",
+                      (pid,)):
+        row = db.one("SELECT status FROM images WHERE id=?", (r["image_id"],))
+        if row and row["status"] not in images.TERMINAL:
+            try:
+                await images.refresh(r["image_id"])
+            except Exception:                                  # noqa: BLE001
+                pass
+
+
 async def refresh_pending(pid: str) -> None:
     """Studio pictures learn they are finished only when someone asks WIS; the
     page asks through here, or picture options would wait forever (2026-11-24)."""
@@ -2015,6 +2057,7 @@ async def api_state(pid: str, request: Request):
     user = _user(request)
     project = production(user, pid)
     await refresh_pending(pid)
+    await _refresh_refs(pid)
     return state(project, service.base_url(request))
 
 
@@ -2185,6 +2228,50 @@ async def api_edit_ref(pid: str, rid: str, request: Request):
             f["voice"], f["voice_name"] = raw, getattr(voice, "filename", "")
     edit_ref(project, rid, user=user, **f)
     return {"ok": True}
+
+
+@router.post("/api/editor/{pid}/refs/{rid}/generate")
+async def api_ref_generate(pid: str, rid: str, request: Request):
+    """{prompt?, count?} -> picture options for a reference (poll /images, then set one)."""
+    user = _user(request)
+    project = production(user, pid)
+    b = await _body(request)
+    ids = await ref_picture_options(project, user, rid, str(b.get("prompt") or ""),
+                                    int(b.get("count") or 2), b.get("model"))
+    return {"image_ids": ids, "prompt": str(b.get("prompt") or "") or ref_prompt(project, _ref(pid, rid))}
+
+
+@router.post("/api/editor/{pid}/ref-pictures")
+async def api_refs_generate_missing(pid: str, request: Request):
+    """A picture for every reference that has none (one each, set directly)."""
+    user = _user(request)
+    project = production(user, pid)
+    made = []
+    for r in db.query("SELECT id FROM prod_refs WHERE project_id=? AND (image_id IS NULL OR "
+                      "image_id='') ORDER BY idx", (pid,)):
+        made.append(await make_ref_picture(project, user, r["id"]))
+    return {"made": len(made)}
+
+
+@router.get("/api/editor/{pid}/images")
+async def api_images(pid: str, request: Request, ids: str = ""):
+    """Status and links of studio pictures (refreshing unfinished ones from WIS)."""
+    user = _user(request)
+    production(user, pid)
+    out = []
+    for i in [x for x in ids.split(",") if x][:8]:
+        row = db.one("SELECT user_id, status FROM images WHERE id=?", (i,))
+        if row is None or row["user_id"] != user.id:
+            continue
+        if row["status"] not in images.TERMINAL:
+            try:
+                row = await images.refresh(i)
+            except Exception:                                  # noqa: BLE001
+                pass
+        out.append({"image_id": i, "status": row["status"],
+                    "url": service.base_url(request) + service.signed_path("image", i, 86400)
+                    if row["status"] == "succeeded" else None})
+    return {"images": out}
 
 
 @router.post("/api/editor/{pid}/refs/{rid}/delete")

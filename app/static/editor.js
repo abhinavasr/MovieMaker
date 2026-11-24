@@ -198,40 +198,97 @@
 
   function paintRefs() {
     $("refs").innerHTML = S.refs.length ? S.refs.map((r) => `<div class="ed-ref" data-ref="${r.id}">
-      <div class="th">${r.image ? `<img src="${esc(r.image)}" alt="" loading="lazy">` : ({character: "👤", location: "🏛", prop: "🗝", style: "🎨", voice: "🎙"}[r.kind] || "📌")}</div>
+      <div class="th">${r.image ? `<img src="${esc(r.image)}" alt="" loading="lazy">` : r.image_pending ? "⏳" : ({character: "👤", location: "🏛", prop: "🗝", style: "🎨", voice: "🎙"}[r.kind] || "📌")}</div>
       <div><b>${esc(r.name)}</b><span>${esc(r.kind[0].toUpperCase() + r.kind.slice(1))}${r.description ? " · " + esc(r.description) : ""}</span>${r.voice ? `<span class="v">🎙 voice sample</span>` : r.speaker ? `<span class="v">🎙 ${esc(r.speaker)}</span>` : ""}</div>
       <span>⋮</span></div>`).join("") : `<div class="ed-note" style="padding:4px 6px">Characters, places and voices the film keeps coming back to. Shots that include them get them as references, so faces and voices stay consistent.</div>`;
   }
   $("refs").addEventListener("click", (e) => { const d = e.target.closest("[data-ref]"); if (d) refModal(refById(d.dataset.ref)); });
   $("add-ref").onclick = () => refModal(null);
+  $("refs-gen").onclick = async () => {
+    const missing = S.refs.filter((r) => !r.image && !r.image_pending).length;
+    if (!missing) { toast("Every reference already has a picture"); return; }
+    $("refs-gen").disabled = true; toast(`Drawing ${missing} reference picture(s)…`);
+    try { await api(`/api/editor/${PID}/ref-pictures`, {}); load(true); } catch (e) { toast(e.message); }
+    finally { $("refs-gen").disabled = false; }
+  };
   $("open-left").onclick = () => ED.classList.toggle("left-open");
 
   function refModal(r) {
     const kinds = ["character", "location", "prop", "style", "voice"];
+    let pickedImage = null, polling = null;
+    const voiced = (k) => k === "character" || k === "voice";
     modal(`<h2>${r ? "Edit reference" : "New reference"}</h2>
       <div class="ed-row2"><label class="ed-field">Name<input id="rf-name" value="${esc(r?.name || "")}" maxlength="80" placeholder="Name"></label>
       <label class="ed-field">Kind<select id="rf-kind">${kinds.map((k) => `<option ${r?.kind === k ? "selected" : ""}>${k}</option>`).join("")}</select></label></div>
       <label class="ed-field">Description (used in prompts)<textarea id="rf-desc" rows="3" placeholder="How they look — used in every prompt they appear in">${esc(r?.description || "")}</textarea></label>
-      <label class="ed-field">Picture<div class="ed-drop" id="rf-pic">${r?.image ? `<img src="${esc(r.image)}" alt="">` : ""}Click or drop a picture</div><input type="file" id="rf-picfile" accept="image/*" hidden></label>
-      <div class="ed-row2"><label class="ed-field">Preset voice<select id="rf-speaker"><option value="">— none —</option>${S.speakers.map((s) => `<option ${r?.speaker === s ? "selected" : ""}>${esc(s)}</option>`).join("")}</select></label>
+      <div class="ed-field">Picture
+        <div class="ed-refpic">
+          <div class="ed-drop" id="rf-pic">${r?.image ? `<img src="${esc(r.image)}" alt="">` : r?.image_pending ? "⏳ being drawn…" : ""}Click or drop a picture</div>
+          <div class="ed-refgen">
+            <button class="ed-btn gold" type="button" id="rf-gen">✨ Generate picture</button>
+            <label class="ed-note">Options <select id="rf-count"><option>1</option><option selected>2</option><option>3</option><option>4</option></select></label>
+            <details><summary class="ed-note">Edit the prompt</summary><textarea id="rf-prompt" rows="3" placeholder="Empty = from the name, kind and description, in the film's style"></textarea></details>
+          </div>
+        </div>
+        <div class="ed-refopts" id="rf-opts"></div></div>
+      <input type="file" id="rf-picfile" accept="image/*" hidden>
+      <div class="ed-row2" id="rf-voicerow" ${voiced(r?.kind || "character") ? "" : "hidden"}><label class="ed-field">Preset voice<select id="rf-speaker"><option value="">— none —</option>${S.speakers.map((s) => `<option ${r?.speaker === s ? "selected" : ""}>${esc(s)}</option>`).join("")}</select></label>
       <label class="ed-field">…or a voice sample to clone<div class="ed-drop" id="rf-voice">${r?.voice ? "🎙 sample saved — click to replace" : "5–30 s of clear speech"}</div><input type="file" id="rf-voicefile" accept="audio/*" hidden></label></div>
       ${r?.voice ? `<audio src="${esc(r.voice)}" controls style="width:100%"></audio>` : ""}
       <div class="acts">${r ? `<button class="ed-btn danger" data-act="delete" style="margin-right:auto">Delete</button>` : ""}<button class="ed-btn ghost" data-act="close">Cancel</button><button class="ed-btn gold" data-act="save">Save</button></div>`,
     async (act) => {
+      clearTimeout(polling);
       if (act === "delete") { if (!confirm(`Delete ${r.name}? Shots stop using it.`)) return false; await api(`/api/editor/${PID}/refs/${r.id}/delete`, {}); load(true); return true; }
       if (act !== "save") return true;
+      try { await saveRef(); toast("Saved"); load(true); return true; } catch (e) { toast(e.message); return false; }
+    });
+    async function saveRef() {
       const fd = new FormData();
       fd.append("name", $("rf-name").value.trim()); fd.append("kind", $("rf-kind").value);
-      fd.append("description", $("rf-desc").value); fd.append("speaker", $("rf-speaker").value);
+      fd.append("description", $("rf-desc").value);
+      fd.append("speaker", voiced($("rf-kind").value) ? $("rf-speaker").value : "");
       if ($("rf-picfile").files[0]) fd.append("picture", $("rf-picfile").files[0]);
-      if ($("rf-voicefile").files[0]) fd.append("voice", $("rf-voicefile").files[0]);
-      if (!fd.get("name")) { toast("Give it a name"); return false; }
-      try { await api(`/api/editor/${PID}/refs${r ? "/" + r.id : ""}`, fd); toast("Saved"); load(true); return true; }
-      catch (e) { toast(e.message); return false; }
+      else if (pickedImage) fd.append("image_id", pickedImage);
+      if (voiced($("rf-kind").value) && $("rf-voicefile").files[0]) fd.append("voice", $("rf-voicefile").files[0]);
+      if (!fd.get("name")) throw new Error("Give it a name");
+      const d = await api(`/api/editor/${PID}/refs${r ? "/" + r.id : ""}`, fd);
+      if (!r && d.id) r = {id: d.id, kind: fd.get("kind"), name: fd.get("name")};
+      return r;
+    }
+    $("rf-kind").onchange = () => { $("rf-voicerow").hidden = !voiced($("rf-kind").value); };
+    $("rf-gen").onclick = async () => {
+      const btn = $("rf-gen"); btn.disabled = true;
+      try {
+        await saveRef();                         // a new reference is created first; edits are kept
+        const d = await api(`/api/editor/${PID}/refs/${r.id}/generate`, {prompt: $("rf-prompt").value, count: +$("rf-count").value});
+        if (!$("rf-prompt").value) $("rf-prompt").placeholder = d.prompt;
+        const ids = d.image_ids;
+        $("rf-opts").innerHTML = ids.map((id, i) => `<button type="button" class="opt" data-img="${id}"><span>drawing ${i + 1}…</span><span class="pg"><i></i></span></button>`).join("");
+        const t0 = Date.now();
+        const poll = async () => {
+          if ($("modal").hidden || !$("rf-opts")) return;
+          const st = await api(`/api/editor/${PID}/images?ids=${ids.join(",")}`);
+          for (const im of st.images) {
+            const el = $("rf-opts").querySelector(`[data-img="${im.image_id}"]`); if (!el) continue;
+            if (im.status === "succeeded" && !el.querySelector("img")) el.innerHTML = `<img src="${esc(im.url)}" alt="option">`;
+            else if (im.status === "failed") el.innerHTML = "failed";
+          }
+          const left = st.images.filter((x) => !["succeeded", "failed", "cancelled"].includes(x.status)).length;
+          btn.textContent = left ? `✨ Drawing… ${Math.round((Date.now() - t0) / 1000)} s` : "✨ Generate again";
+          if (left) polling = setTimeout(poll, 2000); else { btn.disabled = false; toast("Click a picture to use it"); }
+        };
+        poll();
+      } catch (e) { toast(e.message); btn.disabled = false; }
+    };
+    $("rf-opts").addEventListener("click", async (e) => {
+      const b = e.target.closest("[data-img]"); if (!b || !b.querySelector("img")) return;
+      pickedImage = b.dataset.img; $("rf-picfile").value = "";
+      $("rf-opts").querySelectorAll(".opt").forEach((x) => x.classList.toggle("on", x === b));
+      $("rf-pic").innerHTML = `<img src="${esc(b.querySelector("img").src)}" alt="">Chosen — Save to keep it`;
     });
     const hook = (drop, input, show) => { $(drop).onclick = () => $(input).click(); $(input).onchange = () => show($(input).files[0]);
       $(drop).ondragover = (e) => e.preventDefault(); $(drop).ondrop = (e) => { e.preventDefault(); const f = e.dataTransfer.files[0]; if (!f) return; const dt = new DataTransfer(); dt.items.add(f); $(input).files = dt.files; show(f); }; };
-    hook("rf-pic", "rf-picfile", (f) => { $("rf-pic").innerHTML = `<img src="${URL.createObjectURL(f)}" alt="">${esc(f.name)}`; });
+    hook("rf-pic", "rf-picfile", (f) => { pickedImage = null; $("rf-pic").innerHTML = `<img src="${URL.createObjectURL(f)}" alt="">${esc(f.name)}`; });
     hook("rf-voice", "rf-voicefile", (f) => { $("rf-voice").textContent = "🎙 " + f.name; });
   }
 
