@@ -1677,18 +1677,19 @@ def _probe_seconds(path: Path) -> float:
         return 0.0
 
 
-def _ref_video_b64(path: Path, width: int, height: int) -> str:
-    """As the model reads them: 24 fps, 2-15 s, fitted inside the clip's size, no sound."""
-    dur = _probe_seconds(path)
+def _ref_video_b64(path: Path, width: int, height: int, seconds: float = 5.0) -> str:
+    """As the model reads them: 24 fps, fitted inside the clip's size, no sound, and as
+    long as the shot (2-15 s). A shorter reference is LOOPED to the shot's length: on
+    2026-11-24 a 3.5 s dance reference for a 5 s shot ran out of motion and the model cut
+    to one of the reference pictures for the rest of the clip."""
+    want = max(2.1, min(REF_VIDEO_MAX_S, float(seconds or 5)))
     vf = (f"fps=24,scale={width}:{height}:force_original_aspect_ratio=decrease,"
           "scale=trunc(iw/2)*2:trunc(ih/2)*2")
-    if dur < 2.1:
-        vf += f",tpad=stop_mode=clone:stop_duration={2.1 - dur:.2f}"
     with tempfile.TemporaryDirectory() as tmp:
         out = Path(tmp) / "ref.mp4"
-        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(path), "-t",
-                        str(REF_VIDEO_MAX_S), "-vf", vf, "-an", "-c:v", "libx264", "-crf", "23",
-                        "-preset", "veryfast", "-pix_fmt", "yuv420p", str(out)],
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-stream_loop", "-1", "-i",
+                        str(path), "-t", f"{want:.2f}", "-vf", vf, "-an", "-c:v", "libx264",
+                        "-crf", "23", "-preset", "veryfast", "-pix_fmt", "yuv420p", str(out)],
                        check=True, timeout=300)
         return wis.b64(out.read_bytes())
 
@@ -1790,10 +1791,17 @@ def perform_payload(project_id: str, shot, image_path: str | None, params: dict)
             if row and row["path"] and Path(row["path"]).exists():
                 pics.append((r["name"], row["path"]))
         for key, i in _angle_done(r).items():
+            if key == "back":
+                continue      # a plain back view got cut into a clip as its own shot (2026-11-24)
             row = db.one("SELECT path FROM images WHERE id=?", (i,))
             if row and row["path"] and Path(row["path"]).exists():
                 later.append((f"{r['name']} ({key.replace('_', '-')})", row["path"]))
     pics = (pics + later)[:MAX_IMAGE_REFS]
+    if _ref_video_items(pid, shot) and "ref_videos" in shot and pics:
+        # With a reference video the model kept cutting to the extra reference pictures
+        # (a back view, then a face close-up; 2026-11-24). The shot picture already shows
+        # who is in it, so it goes alone.
+        pics = pics[:1] if image_path else [p for p in pics if "(" not in p[0]]
     start, length = timings(pid).get(shot["id"], (0.0, float(shot.get("seconds") or 5)))
     under = [c for c in db.query("SELECT * FROM prod_clips WHERE project_id=? AND status='ready' "
                                  "AND use_in_video=1", (pid,))
@@ -1817,9 +1825,16 @@ def perform_payload(project_id: str, shot, image_path: str | None, params: dict)
             lines.append(f"Someone says \"{c['text']}\", as in <Audio {i + 1}>.")
         else:
             lines.append(f"The {c['track']} sounds like <Audio {i + 1}>.")
+    # The reference model can cut between shots; a storyboard shot is ONE shot, and the
+    # pictures are looks, not shots (it inserted a plain reference photo as a cut).
+    lines.append("One continuous shot with no cuts. The pictures only show what the people "
+                 "and places look like; never show a picture on its own.")
     vids = _ref_video_items(pid, shot)[:MAX_REF_VIDEOS] if "ref_videos" in shot else []
     for k, (label, _) in enumerate(vids):
-        lines.append(f"<Video {k + 1}> is {label}: follow its motion and camera movement.")
+        lines.append(f"<Video {k + 1}> is {label}, a MOTION reference only: the people in this "
+                     "shot make exactly the same body movements, move for move, with the same "
+                     "rhythm and camera movement as in it, for the whole clip. Do not copy its "
+                     "person, clothes or room.")
     ctx = _shot_context(pid, shot)
     prompt = " ".join([shot.get("prompt") or "", *lines, ctx]).strip()
     payload = {
@@ -1836,7 +1851,8 @@ def perform_payload(project_id: str, shot, image_path: str | None, params: dict)
                                       for c in under]
     if vids:
         payload["reference_videos"] = [
-            {"b64": _ref_video_b64(p, payload["width"], payload["height"]), "mime": "video/mp4"}
+            {"b64": _ref_video_b64(p, payload["width"], payload["height"], payload["seconds"]),
+             "mime": "video/mp4"}
             for _, p in vids]
     if params.get("upscale") in ("latent", "refine"):
         payload["upscale"] = params["upscale"]
