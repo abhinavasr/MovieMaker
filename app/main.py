@@ -55,8 +55,11 @@ async def lifespan(app: FastAPI):
     gpuqueue.register("voice_jobs", voices.run)
     gpu_task = asyncio.create_task(gpuqueue.worker())
     asyncio.create_task(_reap_loop())
-    agent_tasks = [asyncio.create_task(agent.worker()), asyncio.create_task(agent.monitor()),
-                   asyncio.create_task(editor.pending_loop())]
+    agent_tasks = [asyncio.create_task(editor.pending_loop())]
+    if cfg.AGENT_WORKER:
+        agent_tasks += [asyncio.create_task(agent.worker()), asyncio.create_task(agent.monitor())]
+    else:
+        log.info("agent worker off (STUDIO_AGENT_WORKER=0)")
     log.info("story studio up; upstream %s", cfg.WIS_BASE_URL)
     yield
     render.stop()
@@ -64,6 +67,14 @@ async def lifespan(app: FastAPI):
     gpu_task.cancel()
     for t in agent_tasks:
         t.cancel()
+    # Hand back any GPU turn this process holds, so a stopped or redeployed studio never
+    # leaves the card held for nobody until the lease times out.
+    try:
+        await asyncio.wait_for(asyncio.gather(agent.release_leftover_lease(),
+                                              gpuqueue.release_leftover_lease(),
+                                              return_exceptions=True), 8)
+    except Exception:                                          # noqa: BLE001
+        pass
 
 
 app = FastAPI(title="Story Studio", lifespan=lifespan, docs_url=None, redoc_url=None)

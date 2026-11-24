@@ -74,6 +74,9 @@ class Config:
     # every REVIEW seconds while work is still running. Each review pauses the
     # GPU for about a minute, so this is a throughput trade-off.
     AGENT_POLL_S = _i("STUDIO_AGENT_POLL_S", 30)
+    # 0 = no agent planner worker in this process (test copies: a test container's worker
+    # once resumed an old test conversation and held the real GPU, 2026-11-24).
+    AGENT_WORKER = _s("STUDIO_AGENT_WORKER", "1") not in ("0", "false", "no")
     AGENT_REVIEW_S = _i("STUDIO_AGENT_REVIEW_S", 600)
     # Review-driven correction rounds per request before it must ask the person.
     AGENT_MAX_CORRECTIONS = _i("STUDIO_AGENT_MAX_CORRECTIONS", 3)
