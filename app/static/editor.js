@@ -199,7 +199,7 @@
   function paintRefs() {
     $("refs").innerHTML = S.refs.length ? S.refs.map((r) => `<div class="ed-ref" data-ref="${r.id}">
       <div class="th">${r.image ? `<img src="${esc(r.image)}" alt="" loading="lazy">` : r.image_pending ? "⏳" : ({character: "👤", location: "🏛", prop: "🗝", style: "🎨", voice: "🎙"}[r.kind] || "📌")}</div>
-      <div><b>${esc(r.name)}</b><span>${esc(r.kind[0].toUpperCase() + r.kind.slice(1))}${r.description ? " · " + esc(r.description) : ""}</span>${r.voice ? `<span class="v">🎙 voice sample</span>` : r.speaker ? `<span class="v">🎙 ${esc(r.speaker)}</span>` : ""}</div>
+      <div><b>${esc(r.name)}</b><span>${esc(r.kind[0].toUpperCase() + r.kind.slice(1))}${r.description ? " · " + esc(r.description) : ""}</span>${r.voice ? `<span class="v">🎙 voice sample</span>` : r.speaker ? `<span class="v">🎙 ${esc(r.speaker)}</span>` : ""}${r.kind === "character" ? `<span class="v" style="color:var(--muted)">🔄 ${(r.angles || []).filter((a) => a.status === "succeeded").length}/4 angles${(r.angles || []).some((a) => !["succeeded", "failed", "gone"].includes(a.status)) || r.angles_waiting ? " · drawing" : ""}</span>` : ""}</div>
       <span>⋮</span></div>`).join("") : `<div class="ed-note" style="padding:4px 6px">Characters, places and voices the film keeps coming back to. Shots that include them get them as references, so faces and voices stay consistent.</div>`;
   }
   $("refs").addEventListener("click", (e) => { const d = e.target.closest("[data-ref]"); if (d) refModal(refById(d.dataset.ref)); });
@@ -233,6 +233,8 @@
           </div>
         </div>
         <div class="ed-refopts" id="rf-opts"></div></div>
+      ${r && r.kind === "character" ? `<div class="ed-field">Turnaround — every angle, drawn from the main picture <div class="ed-turn" id="rf-turn"></div>
+        <div style="display:flex;gap:6px;margin-top:6px"><button class="ed-btn sm" type="button" id="rf-angles">↻ Redraw all angles</button><span class="ed-note" id="rf-turn-note"></span></div></div>` : ""}
       <input type="file" id="rf-picfile" accept="image/*" hidden>
       <div class="ed-row2" id="rf-voicerow" ${voiced(r?.kind || "character") ? "" : "hidden"}><label class="ed-field">Preset voice<select id="rf-speaker"><option value="">— none —</option>${S.speakers.map((s) => `<option value="${esc(s)}" ${r?.speaker === s ? "selected" : ""}>${esc(voiceLabel(s))}</option>`).join("")}</select></label>
       <label class="ed-field">…or a voice sample to clone<div class="ed-drop" id="rf-voice">${r?.voice ? "🎙 sample saved — click to replace" : "5–30 s of clear speech"}</div><input type="file" id="rf-voicefile" accept="audio/*" hidden></label></div>
@@ -258,6 +260,22 @@
       return r;
     }
     $("rf-kind").onchange = () => { $("rf-voicerow").hidden = !voiced($("rf-kind").value); };
+    const ANG = {three_quarter: "¾ view", side: "Side", back: "Back", face: "Face"};
+    function paintTurn() {
+      if (!$("rf-turn") || !r) return;
+      const cur = S.refs.find((x) => x.id === r.id) || r;
+      const by = Object.fromEntries((cur.angles || []).map((a) => [a.angle, a]));
+      $("rf-turn").innerHTML = `<div class="t main">${cur.image ? `<img src="${esc(cur.image)}" alt="">` : "—"}<span>Front</span></div>`
+        + Object.keys(ANG).map((k) => { const a = by[k];
+          return `<button type="button" class="t" data-angle="${k}" title="Redraw the ${ANG[k]}">${a && a.status === "succeeded" ? `<img src="${esc(a.url)}" alt="">` : a && a.status !== "failed" ? `<i class="spin"></i>` : cur.angles_waiting ? "⏳" : "—"}<span>${ANG[k]}</span></button>`; }).join("");
+      const pending = (cur.angles || []).filter((a) => !["succeeded", "failed", "cancelled", "gone"].includes(a.status)).length;
+      $("rf-turn-note").textContent = !cur.image ? "Set the main picture first; the angles follow automatically." : cur.angles_waiting ? "Waiting for the main picture to finish…" : pending ? `Drawing ${pending} angle(s)…` : "";
+    }
+    paintTurn();
+    const turnTimer = setInterval(async () => { if ($("modal").hidden || !$("rf-turn")) { clearInterval(turnTimer); return; } await load(); paintTurn(); }, 3000);
+    if ($("rf-angles")) $("rf-angles").onclick = async () => { try { await api(`/api/editor/${PID}/refs/${r.id}/angles`, {}); toast("Drawing every angle from the main picture"); await load(true); paintTurn(); } catch (e) { toast(e.message); } };
+    if ($("rf-turn")) $("rf-turn").addEventListener("click", async (e) => { const b = e.target.closest("[data-angle]"); if (!b) return;
+      try { await api(`/api/editor/${PID}/refs/${r.id}/angles`, {only: [b.dataset.angle]}); toast("Redrawing that angle"); await load(true); paintTurn(); } catch (err) { toast(err.message); } });
     $("rf-gen").onclick = async () => {
       const btn = $("rf-gen"); btn.disabled = true;
       try {

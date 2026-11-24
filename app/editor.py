@@ -566,6 +566,8 @@ def add_ref(project, kind: str, name: str, description: str = "", image_id: str 
            "voice_path, speaker, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
            (rid, pid, idx, kind, name.strip()[:80], description[:1500], image_id, voice_path,
             speaker or None, db.now()))
+    if image_id and kind == "character":
+        _want_angles(pid, rid)
     _touch(pid)
     return rid
 
@@ -592,6 +594,8 @@ def edit_ref(project, ref_id: str, user: auth.User | None = None, **f) -> None:
     if f.get("image_id"):
         images.owned_image(user, f["image_id"])
         sets["image_id"] = f["image_id"]
+        if f["image_id"] != row["image_id"] and (f.get("kind") or row["kind"]) == "character":
+            sets["angles"] = json.dumps({"_auto": True})
     if f.get("speaker") is not None:
         if f["speaker"] and f["speaker"] not in speech.SPEAKERS:
             raise HTTPException(400, f"speaker must be one of {', '.join(speech.SPEAKERS)}")
@@ -736,7 +740,36 @@ def render_when_ready(pid: str, user: auth.User, clip_id: str, shot_id: str) -> 
     db.set_params(pid, params)
 
 
+async def _run_angles() -> None:
+    from app import agent
+    for r in db.query("SELECT r.*, p.user_id AS owner FROM prod_refs r JOIN projects p ON "
+                      "p.id=r.project_id WHERE r.kind='character' AND r.angles LIKE '%_auto%'"):
+        if not r["image_id"]:
+            continue
+        st = db.one("SELECT status FROM images WHERE id=?", (r["image_id"],))
+        if st is None or st["status"] in ("failed", "cancelled"):
+            db.run("UPDATE prod_refs SET angles='{}' WHERE id=?", (r["id"],))
+            continue
+        if st["status"] != "succeeded":
+            try:
+                await images.refresh(r["image_id"])
+            except Exception:                                  # noqa: BLE001
+                pass
+            continue
+        user = agent.load_user(r["owner"])
+        project = db.one("SELECT * FROM projects WHERE id=?", (r["project_id"],))
+        if user is None or project is None:
+            continue
+        db.run("UPDATE prod_refs SET angles='{}' WHERE id=?", (r["id"],))
+        try:
+            await make_angles(project, user, r["id"])
+            log.info("turnaround queued for %s", r["name"])
+        except HTTPException as exc:
+            log.warning("no turnaround for %s: %s", r["name"], exc.detail)
+
+
 async def _run_pending() -> None:
+    await _run_angles()
     from app import agent
     for project in db.query("SELECT * FROM projects WHERE mode='storyboard' AND "
                             "params_json LIKE '%_render_after%'"):
@@ -886,16 +919,69 @@ def refresh_clips(pid: str) -> None:
 
 # --------------------------------------------------------------------------- generation
 
+# A character's turnaround, each drawn FROM its main picture so it stays the same
+# character (2026-11-24: "your character reference should generate all angle reference").
+ANGLES = {"three_quarter": "three-quarter view, turned 45 degrees",
+          "side": "side profile view, facing left",
+          "back": "back view",
+          "face": "EXTREME CLOSE-UP PORTRAIT: only the head fills the whole frame, no body or "
+                  "legs visible, face toward the camera, detailed eyes and expression"}
+
+
+def _angle_done(r) -> dict[str, str]:
+    """{angle: image_id} for the finished angle pictures of a reference."""
+    out = {}
+    for k, i in _jl(r["angles"], {}).items():
+        if i and _img_done(i):
+            out[k] = i
+    return out
+
+
+async def make_angles(project, user: auth.User, ref_id: str, only: list | None = None) -> dict:
+    """Queue the turnaround pictures (needs a finished main picture)."""
+    pid = project["id"]
+    r = _ref(pid, ref_id)
+    if not r["image_id"] or not _img_done(r["image_id"]):
+        raise HTTPException(400, f"{r['name']} needs its main picture first")
+    src = [images.source_from_image(user, r["image_id"])]
+    params = db.params_of(project)
+    angles = _jl(r["angles"], {})
+    for key in only or list(ANGLES):
+        if key == "face":
+            text = (f"{ANGLES[key]}. The same character as in picture 1 ({r['name']}): exactly "
+                    "the same face, colours and markings. Plain soft background.")
+        else:
+            text = (f"The same character as in picture 1: {r['name']}, {r['description']}. "
+                    f"{ANGLES[key]}. Exactly the same design, outfit, colours and proportions; "
+                    "plain soft background; character turnaround reference.")
+        angles[key] = await images.create(user, text[:1900], src,
+                                          orientation=params.get("orientation", "portrait"))
+    db.run("UPDATE prod_refs SET angles=? WHERE id=?", (json.dumps(angles), ref_id))
+    _touch(pid)
+    return angles
+
+
+def _want_angles(pid: str, ref_id: str) -> None:
+    """Mark a character for a turnaround once its main picture is ready (pending_loop)."""
+    db.run("UPDATE prod_refs SET angles=? WHERE id=? AND kind='character'",
+           (json.dumps({"_auto": True}), ref_id))
+
+
 def _ref_sources(user: auth.User, pid: str, ref_ids: list) -> list[tuple[str, bytes]]:
-    out = []
+    """Source pictures for a shot's picture: each reference's main picture, and a
+    character's three-quarter view while there is room (WIS takes 4)."""
+    main, extra = [], []
     for rid in ref_ids:
         r = db.one("SELECT * FROM prod_refs WHERE id=? AND project_id=?", (rid, pid))
-        if r and r["image_id"]:
+        if r and r["image_id"] and _img_done(r["image_id"]):
             try:
-                out.append(images.source_from_image(user, r["image_id"]))
+                main.append(images.source_from_image(user, r["image_id"]))
+                a = _angle_done(r).get("three_quarter")
+                if a:
+                    extra.append(images.source_from_image(user, a))
             except HTTPException:
                 pass
-    return out
+    return (main + extra)[:4]
 
 
 def _shot_context(pid: str, shot) -> str:
@@ -1034,12 +1120,17 @@ def perform_payload(project_id: str, shot, image_path: str | None, params: dict)
     pics: list[tuple[str, str]] = []           # (label, path)
     if image_path:
         pics.append(("the opening frame", image_path))
+    later = []
     for r in refs:
         if r["image_id"]:
             row = db.one("SELECT path FROM images WHERE id=?", (r["image_id"],))
             if row and row["path"] and Path(row["path"]).exists():
                 pics.append((r["name"], row["path"]))
-    pics = pics[:MAX_IMAGE_REFS]
+        for key, i in _angle_done(r).items():
+            row = db.one("SELECT path FROM images WHERE id=?", (i,))
+            if row and row["path"] and Path(row["path"]).exists():
+                later.append((f"{r['name']} ({key.replace('_', '-')})", row["path"]))
+    pics = (pics + later)[:MAX_IMAGE_REFS]
     start, length = timings(pid).get(shot["id"], (0.0, float(shot.get("seconds") or 5)))
     under = [c for c in db.query("SELECT * FROM prod_clips WHERE project_id=? AND status='ready' "
                                  "AND use_in_video=1", (pid,))
@@ -1570,6 +1661,12 @@ def state(project, base: str) -> dict:
                           "image": base + service.signed_path("image", r["image_id"], 86400)
                           if r["image_id"] and _img_done(r["image_id"]) else None,
                           "image_pending": bool(r["image_id"]) and not _img_done(r["image_id"]),
+                          "angles": [{"angle": k, "image_id": v,
+                                      "status": (db.one("SELECT status FROM images WHERE id=?", (v,)) or
+                                                 {"status": "gone"})["status"],
+                                      "url": base + service.signed_path("image", v, 86400)}
+                                     for k, v in _jl(r["angles"], {}).items() if isinstance(v, str)],
+                          "angles_waiting": "_auto" in _jl(r["angles"], {}),
                           "voice": f"/api/editor/{pid}/refs/{r['id']}/voice"
                           if r["voice_path"] else None})
     props = []
@@ -1809,6 +1906,7 @@ async def make_ref_picture(project, user: auth.User, ref_id: str, prompt: str = 
     image_id = await images.create(user, text[:1900], [], orientation=params.get("orientation", "portrait"),
                                    model=model)
     db.run("UPDATE prod_refs SET image_id=? WHERE id=?", (image_id, ref_id))
+    _want_angles(pid, ref_id)
     _touch(pid)
     return image_id
 
@@ -2063,14 +2161,15 @@ async def api_create(request: Request):
 
 
 async def _refresh_refs(pid: str) -> None:
-    for r in db.query("SELECT image_id FROM prod_refs WHERE project_id=? AND image_id IS NOT NULL",
-                      (pid,)):
-        row = db.one("SELECT status FROM images WHERE id=?", (r["image_id"],))
-        if row and row["status"] not in images.TERMINAL:
-            try:
-                await images.refresh(r["image_id"])
-            except Exception:                                  # noqa: BLE001
-                pass
+    for r in db.query("SELECT image_id, angles FROM prod_refs WHERE project_id=?", (pid,)):
+        ids = [r["image_id"]] + [v for k, v in _jl(r["angles"], {}).items() if isinstance(v, str)]
+        for i in [x for x in ids if x]:
+            row = db.one("SELECT status FROM images WHERE id=?", (i,))
+            if row and row["status"] not in images.TERMINAL:
+                try:
+                    await images.refresh(i)
+                except Exception:                              # noqa: BLE001
+                    pass
 
 
 async def refresh_pending(pid: str) -> None:
@@ -2273,6 +2372,16 @@ async def api_ref_generate(pid: str, rid: str, request: Request):
     ids = await ref_picture_options(project, user, rid, str(b.get("prompt") or ""),
                                     int(b.get("count") or 2), b.get("model"))
     return {"image_ids": ids, "prompt": str(b.get("prompt") or "") or ref_prompt(project, _ref(pid, rid))}
+
+
+@router.post("/api/editor/{pid}/refs/{rid}/angles")
+async def api_ref_angles(pid: str, rid: str, request: Request):
+    """{only?: [angle]} -- (re)draw a character's turnaround from its main picture."""
+    user = _user(request)
+    project = production(user, pid)
+    b = await _body(request)
+    only = [a for a in (b.get("only") or []) if a in ANGLES] or None
+    return {"angles": await make_angles(project, user, rid, only)}
 
 
 @router.post("/api/editor/{pid}/ref-pictures")

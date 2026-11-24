@@ -106,6 +106,13 @@ body:has(.ed) footer, body:has(.ed) .retention-note { display: none; }
 .ed-refopts .opt .pg { position: absolute; left: 6px; right: 6px; bottom: 6px; height: 4px; border-radius: 4px; background: rgba(255,255,255,.15); overflow: hidden; }
 .ed-refopts .opt .pg i { display: block; height: 100%; width: 35%; background: var(--gold); animation: ws-ind 1.4s ease-in-out infinite; }
 @media (max-width: 600px) { .ed-refpic { grid-template-columns: 1fr; } }
+.ed-turn { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; margin-top: 4px; }
+.ed-turn .t { position: relative; aspect-ratio: 9 / 14; border-radius: 8px; overflow: hidden; background: var(--panel-3); border: 1px solid var(--line); display: grid; place-items: center; color: var(--muted); padding: 0; font: inherit; cursor: pointer; }
+.ed-turn .t.main { cursor: default; border-color: var(--gold); }
+.ed-turn .t img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.ed-turn .t span { position: absolute; left: 0; right: 0; bottom: 0; background: linear-gradient(transparent, rgba(0,0,0,.75)); color: #fff; font-size: .64rem; padding: 8px 4px 3px; text-align: center; }
+.ed-turn .t .spin { width: 18px; height: 18px; border-radius: 50%; border: 2px solid var(--line); border-top-color: var(--gold); animation: ws-spin .9s linear infinite; }
+.ed-turn .t:not(.main):hover { border-color: var(--gold); }
 .ed-pick { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 6px; }
 
 /* story */
