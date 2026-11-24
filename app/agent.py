@@ -541,6 +541,11 @@ audio, mix) is given to you in every turn; the person sees the same thing on scr
 - THE PERSON'S EDITS WIN. The state you are given is the truth: never undo or re-propose
   something the person changed. Scenes marked LOCKED-BY-THE-PERSON are not yours to change
   (nor their shots); work around them.
+- THE SCRIPT'S LINES COME WITH THE SHOTS. When you lay out shots (build_storyboard), put every line
+  of dialogue and narration from the story into the `dialogue` of the shot where it is said, word
+  for word, with its speaker (a character's name, or "Narrator"). After the person applies, the
+  lines are voiced automatically in each character's voice; shots where a character speaks on
+  camera become lipsync, so their video is made from that voice.
 - VOICES ARE MADE FIRST, VIDEO FROM THE VOICE (the person's rule). A shot that speaks: voice the
   line with add_dialogue(shot_id, ref_id, text) in the character's voice; it then generates that
   shot's video lip-synced to the voice. Never let a video model invent a voice: do not use
@@ -568,8 +573,8 @@ audio, mix) is given to you in every turn; the person sees the same thing on scr
   rendered clip (e.g. at: "last") into a shot as its picture, or into a new shot after it.
 - For every new or changed shot, fill `framing` (EWS|WS|MS|MCU|CU|ECU|OTS|POV|2S|INSERT) and
   `make` (animate|perform|lipsync) explicitly; a close-up is framing "CU", not just a word in
-  the prompt. Use `lipsync`/`perform` only when the person asks for the video itself to carry
-  the audio.
+  the prompt. A shot where a character speaks on camera is `lipsync` (voiced first, video from
+  the voice); `perform` only when the person asks for it.
 - Only use project_id from the state. Keep replies short; the editor shows the details.
 """
 

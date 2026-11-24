@@ -502,7 +502,9 @@
     lanesEl.style.setProperty("--lanew", w + "px");
     TL.pps = w / Math.max(1, b - a);
     const x = (t) => (t - a) * TL.pps;
-    $("tl-time").textContent = `${fmt(a)} – ${fmt(b)}`;
+    const unvoiced = S.clips.filter((c) => c.status === "script" && !c.auto).length;
+    $("tl-time").innerHTML = `${fmt(a)} – ${fmt(b)}` + (unvoiced ? ` <button class="ed-btn sm gold" id="voice-all" type="button">🎙 Voice all ${unvoiced} line(s)</button>` : "");
+    if ($("voice-all")) $("voice-all").onclick = async () => { const d = await api(`/api/editor/${PID}/voice-all`, {}); toast(`Voicing ${d.queued} line(s) in the characters' voices`); load(true); };
     const step = [0.5, 1, 2, 5, 10, 15, 30, 60, 120].find((s) => s * TL.pps >= 46) || 300;
     let ticks = ""; for (let t = Math.ceil(a / step) * step; t <= b; t += step) ticks += `<span class="ed-tick" style="left:${x(t)}px">${fmt(t).replace(/\.0$/, "")}</span>`;
     const shotsIn = S.shots.filter((s) => s.start + s.seconds > a && s.start < b);
@@ -515,8 +517,8 @@
     };
     const blocks = (track) => S.clips.filter((c) => c.track === track && c.start_s < b && c.start_s + (c.duration_s || 3) > a).map((c) => {
       const d = c.duration_s || (c.status === "pending" ? 4 : 1);
-      return `<div class="ed-blk ${track} ${c.status} ${c.id === sel.clip ? "sel" : ""}" data-clip="${c.id}" style="left:${x(c.start_s)}px;width:${Math.max(8, d * TL.pps)}px" title="${esc(c.name)}${c.status === "failed" ? " — " + esc(c.error || "failed") : ""}">
-        <span>${c.status === "pending" ? "⏳ " : ""}${esc(c.name)}</span>${c.use_in_video ? `<span class="vid">🎬</span>` : ""}<span class="rs"></span></div>`;
+      return `<div class="ed-blk ${track} ${c.status} ${c.id === sel.clip ? "sel" : ""}" data-clip="${c.id}" style="left:${x(c.start_s)}px;width:${Math.max(8, d * TL.pps)}px" title="${c.status === "script" ? "Script line — not voiced yet" + (c.auto ? " (being voiced)" : "") + ": " : ""}${esc(c.name)}${c.error ? " — " + esc(c.error) : ""}">
+        <span>${c.status === "pending" ? "⏳ " : c.status === "script" ? (c.auto ? "⏳📝 " : "📝 ") : ""}${esc(c.name)}</span>${c.use_in_video ? `<span class="vid">🎬</span>` : ""}<span class="rs"></span></div>`;
     }).join("");
     const shotSound = shotsIn.filter((s) => s.make !== "animate").map((s) => `<div class="ed-blk shot ${s.id === sel.shot ? "on" : ""}" style="left:${x(s.start)}px;width:${s.seconds * TL.pps}px;opacity:.75" title="${s.make === "lipsync" ? "Lip-sync: the line is on the dialogue track, so this isn't mixed twice" : "Performance shot's own sound"}">${s.make === "lipsync" ? "👄 in dialogue" : "🎭 " + esc(s.title || "shot")}</div>`).join("");
     const keep = [$("tl-scroll").scrollLeft, $("tl-scroll").scrollTop];
@@ -765,7 +767,8 @@
   function clipInspector(c) {
     const ref = c.ref_id ? refById(c.ref_id) : null;
     return `<div class="ed-clipins"><div class="h"><i style="background:${TRACK_COLOR[c.track]}"></i><span style="flex:1">${esc(c.name)}</span><button class="ed-btn ghost sm" id="ci-close">✕</button></div>
-      ${c.status === "pending" ? `<div class="ed-note">⏳ Generating…</div>` : c.status === "failed" ? `<div class="ed-note" style="color:var(--bad)">${esc(c.error || "failed")}</div>` : c.url ? `<audio src="${esc(c.url)}" controls style="width:100%"></audio>` : ""}
+      ${c.status === "script" ? `<div class="ed-note">📝 Script line — ${c.auto ? "being voiced in the character's voice…" : "not voiced yet."}${c.error ? ` <span style="color:var(--bad)">${esc(c.error)}</span>` : ""}</div>${c.auto ? "" : `<button class="ed-btn sm gold" type="button" id="ci-voice">🎙 Voice it now</button>`}`
+        : c.status === "pending" ? `<div class="ed-note">⏳ Voicing…</div>` : c.status === "failed" ? `<div class="ed-note" style="color:var(--bad)">${esc(c.error || "failed")}</div>` : c.url ? `<audio src="${esc(c.url)}" controls style="width:100%"></audio>` : ""}
       ${ref ? `<div class="ed-note">Spoken by ${esc(ref.name)}${c.text ? `: “${esc(c.text)}”` : ""}</div>` : ""}
       <div class="ed-row2"><label class="ed-field">Start (s)<input data-c="start_s" type="number" step="0.1" min="0" value="${c.start_s}"></label><label class="ed-field">Length (s)<input data-c="duration_s" type="number" step="0.1" min="0.2" value="${c.duration_s ?? ""}"></label></div>
       <div class="ed-range"><span>Trim start</span><input type="range" data-c="trim_s" min="0" max="${Math.max(0.1, (c.source_s || 1) - 0.2)}" step="0.1" value="${c.trim_s}"><output>${c.trim_s.toFixed(1)} s</output></div>
@@ -851,6 +854,7 @@
     if ($("sc-more")) $("sc-more").onclick = () => sceneModal(sc);
     if ($("sc-ask")) $("sc-ask").onclick = () => { setTab("agent"); scope = "scene"; paintScope(); chatSend("Define the shots this scene should have."); };
     if ($("ci-close")) $("ci-close").onclick = () => { sel.clip = null; paint(); };
+    if ($("ci-voice")) $("ci-voice").onclick = async () => { try { await api(`/api/editor/${PID}/clips/${c.id}/voice`, {}); toast("Voicing the line"); load(true); } catch (e) { toast(e.message); } };
     pane.querySelectorAll("[data-c]").forEach((el) => {
       const k = el.dataset.c;
       el.addEventListener("input", () => { const o = el.nextElementSibling; if (o && o.tagName === "OUTPUT") o.textContent = k === "gain_db" ? `${el.value} dB` : `${(+el.value).toFixed(1)} s`; });

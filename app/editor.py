@@ -663,6 +663,17 @@ async def add_dialogue(project, user: auth.User, ref_id: str | None, text: str, 
     if not text:
         raise HTTPException(400, "what should they say?")
     ref = _ref(pid, ref_id) if ref_id else None
+    sid = await _speak(user, ref, text, instruct, language, speaker)
+    name = f"{ref['name']}: {text}" if ref else text
+    return _insert_clip(pid, "dialogue", name=name, source_kind="speech", source_id=sid,
+                        status="pending", start_s=start_s, use_in_video=use_in_video,
+                        ref_id=ref_id, text=text)
+
+
+async def _speak(user: auth.User, ref, text: str, instruct: str = "",
+                 language: str | None = None, speaker: str | None = None) -> str:
+    """Voice one line in a character's voice: their sample cloned, their preset, or a
+    Hindi-only preset cloned from its own clip for other languages. Returns the speech id."""
     reference = Path(ref["voice_path"]).read_bytes() if ref and ref["voice_path"] and \
         Path(ref["voice_path"]).exists() else None
     voice = speaker or (ref["speaker"] if ref else None)
@@ -674,13 +685,55 @@ async def add_dialogue(project, user: auth.User, ref_id: str | None, text: str, 
         clip, said = _preset_clip(voice)
         if clip:
             reference, reference_text = clip, said
+            # Clone it on VoxCPM2 (which made these voices), not Qwen: Qwen's cross-language
+            # clone of these clips drawled (9-14 s for an 8-word line); VoxCPM2 said it in
+            # ~2 s, word-perfect. A "Hindi" clone routes to VoxCPM2, which speaks whatever
+            # text it is given (the tag only picks the engine).
+            language = "Hindi"
     ids = await speech.create(user, text, speaker=None if reference else voice,
                               language=language, instruct=None if reference else (instruct or None),
                               reference=reference, reference_text=reference_text)
-    name = f"{ref['name']}: {text}" if ref else text
-    return _insert_clip(pid, "dialogue", name=name, source_kind="speech", source_id=ids[0],
-                        status="pending", start_s=start_s, use_in_video=use_in_video,
-                        ref_id=ref_id, text=text)
+    return ids[0]
+
+
+def add_script(project, shot_id: str, text: str, ref_id: str | None = None, instruct: str = "",
+               offset_s: float | None = None, auto: bool = True) -> str:
+    """A line of the script under a shot, not voiced yet: it shows on the dialogue track
+    and is voiced in the character's voice (automatically when `auto`)."""
+    pid = project["id"]
+    text = (text or "").strip()
+    if not text:
+        raise HTTPException(400, "the line is empty")
+    shot = _shot(pid, shot_id)
+    start, length = timings(pid).get(shot["id"], (0.0, 0.0))
+    if offset_s is None:
+        ends = [c["start_s"] + (c["duration_s"] or 0) for c in
+                db.query("SELECT start_s, duration_s FROM prod_clips WHERE project_id=? AND "
+                         "track='dialogue'", (pid,))
+                if start <= c["start_s"] < start + length]
+        at = max(ends) + 0.3 if ends else start + 0.3
+    else:
+        at = start + max(0.0, float(offset_s))
+    estimate = round(max(1.0, len(text.split()) / 2.6 + 0.4), 1)
+    ref = db.one("SELECT name FROM prod_refs WHERE id=?", (ref_id,)) if ref_id else None
+    cid = _insert_clip(pid, "dialogue", name=f"{ref['name']}: {text}" if ref else text,
+                       source_kind="speech", status="script", start_s=at, use_in_video=True,
+                       ref_id=ref_id, text=text, duration_s=estimate)
+    db.run("UPDATE prod_clips SET instruct=?, auto=? WHERE id=?",
+           (instruct[:300], 1 if auto else 0, cid))
+    return cid
+
+
+async def voice_script(project, user: auth.User, clip_id: str) -> None:
+    """Voice a script line now (its length becomes the real spoken length)."""
+    c = _clip(project["id"], clip_id)
+    if c["status"] != "script":
+        return
+    ref = db.one("SELECT * FROM prod_refs WHERE id=?", (c["ref_id"],)) if c["ref_id"] else None
+    sid = await _speak(user, ref, c["text"], c["instruct"] or "")
+    db.run("UPDATE prod_clips SET source_id=?, status='pending', duration_s=NULL, auto=0, error=NULL, "
+           "updated_at=? WHERE id=?", (sid, db.now(), clip_id))
+    _touch(project["id"])
 
 
 def _preset_clip(voice: str) -> tuple[bytes | None, str | None]:
@@ -768,8 +821,25 @@ async def _run_angles() -> None:
             log.warning("no turnaround for %s: %s", r["name"], exc.detail)
 
 
+async def _run_scripts() -> None:
+    from app import agent
+    for c in db.query("SELECT c.id, c.project_id, p.user_id AS owner FROM prod_clips c JOIN projects p "
+                      "ON p.id=c.project_id WHERE c.status='script' AND c.auto=1 "
+                      "ORDER BY c.project_id, c.start_s LIMIT 12"):
+        user = agent.load_user(c["owner"])
+        project = db.one("SELECT * FROM projects WHERE id=?", (c["project_id"],))
+        if user is None or project is None:
+            continue
+        try:
+            await voice_script(project, user, c["id"])
+        except HTTPException as exc:
+            # e.g. the hourly speech limit: leave it as a script, say why, stop trying.
+            db.run("UPDATE prod_clips SET auto=0, error=? WHERE id=?", (str(exc.detail)[:300], c["id"]))
+
+
 async def _run_pending() -> None:
     await _run_angles()
+    await _run_scripts()
     from app import agent
     for project in db.query("SELECT * FROM projects WHERE mode='storyboard' AND "
                             "params_json LIKE '%_render_after%'"):
@@ -899,6 +969,23 @@ def set_mix(project, **f) -> None:
     _touch(project["id"])
 
 
+def _fit_lipsync(pid: str, clip_id: str) -> None:
+    """A lip-sync shot grows to hold its voiced line (the video is made from that voice)."""
+    c = db.one("SELECT start_s, duration_s FROM prod_clips WHERE id=?", (clip_id,))
+    if c is None:
+        return
+    tm = timings(pid)
+    for sid, (st, ln) in tm.items():
+        if st <= c["start_s"] < st + ln:
+            shot = db.one("SELECT make, seconds FROM shots WHERE id=?", (sid,))
+            need = math.ceil(c["start_s"] + (c["duration_s"] or 0) - st + 0.3)
+            if shot and shot["make"] == "lipsync" and need > shot["seconds"]:
+                project = db.one("SELECT * FROM projects WHERE id=?", (pid,))
+                if not service.is_rendering(project):
+                    edit_shot(project, sid, seconds=min(cfg.LIPSYNC_MAX_SECONDS, need))
+            return
+
+
 def refresh_clips(pid: str) -> None:
     """Pending dialogue/music clips: pick up the file once the speech or song is ready."""
     for c in db.query("SELECT * FROM prod_clips WHERE project_id=? AND status='pending'", (pid,)):
@@ -912,6 +999,8 @@ def refresh_clips(pid: str) -> None:
             db.run("UPDATE prod_clips SET status='ready', path=?, source_s=?, duration_s=COALESCE("
                    "duration_s, ?), updated_at=? WHERE id=?",
                    (row["path"], secs, secs, db.now(), c["id"]))
+            if c["track"] == "dialogue":
+                _fit_lipsync(pid, c["id"])
         elif row["status"] in ("failed", "cancelled"):
             db.run("UPDATE prod_clips SET status='failed', error=?, updated_at=? WHERE id=?",
                    (row["error"] or row["status"], db.now(), c["id"]))
@@ -1041,13 +1130,33 @@ def render_shots(project, user: auth.User, shot_ids: list[str] | None = None):
     shots = ordered_shots(pid)
     if not shots:
         raise HTTPException(400, "add shots first")
-    want = shot_ids or [s["id"] for s in shots
+    want = list(shot_ids or []) or [s["id"] for s in shots
                         if s["status"] != "done" or not (s["clip_path"] and
                                                          Path(s["clip_path"]).exists())]
     if not want:
         raise HTTPException(400, "every shot already has a clip; pick the ones to redo")
     by_id = {s["id"]: s for s in shots}
     pos = {s["id"]: i for i, s in enumerate(shots)}
+    tm = timings(pid)
+    deferred = []
+    for sid in list(want):
+        s = by_id.get(sid)
+        if s is None or s["make"] != "lipsync" or _dialogue_under(pid, sid):
+            continue
+        st, ln = tm.get(sid, (0, 0))
+        waiting = [c for c in db.query("SELECT id, start_s FROM prod_clips WHERE project_id=? AND "
+                                       "track='dialogue' AND status IN ('script','pending')", (pid,))
+                   if st <= c["start_s"] < st + ln]
+        if waiting:
+            # Voice first, then the video: this shot renders once its line is voiced.
+            db.run("UPDATE prod_clips SET auto=1 WHERE id=? AND status='script'", (waiting[-1]["id"],))
+            render_when_ready(pid, user, waiting[-1]["id"], sid)
+            want.remove(sid)
+            deferred.append(sid)
+    if not want:
+        async def _nothing():
+            return 0
+        return _nothing()
     problems = []
     for sid in want:
         s = by_id.get(sid)
@@ -1413,7 +1522,8 @@ def propose(project, title: str, summary: str, changes: list, shot_id: str | Non
 
 
 OPS = {"set_story", "add_scene", "edit_scene", "delete_scene", "add_shot", "edit_shot",
-       "delete_shot", "edit_clip", "delete_clip", "set_mix", "add_ref", "edit_ref", "use_frame"}
+       "delete_shot", "edit_clip", "delete_clip", "set_mix", "add_ref", "edit_ref", "use_frame",
+       "add_line"}
 
 
 def _guess_op(c: dict) -> str | None:
@@ -1550,6 +1660,10 @@ def apply_changes(project, user: auth.User, changes: list, guard: bool = False) 
                 set_picture(project, user, rid(c["shot_id"]), c["image_id"])
         elif op == "delete_shot":
             delete_shot(project, rid(c.get("shot_id")))
+        elif op == "add_line":
+            add_script(project, rid(c.get("shot_id")), c.get("text", ""),
+                       rid(c.get("ref_id")) if c.get("ref_id") else None,
+                       c.get("instruct") or c.get("delivery") or "", c.get("offset_s"))
         elif op == "use_frame":
             r = use_frame(project, user, rid(c.get("from_shot_id")), c.get("at", "last"),
                           rid(c.get("to_shot_id")) if c.get("to_shot_id") else None,
@@ -1650,7 +1764,7 @@ def state(project, base: str) -> dict:
         clips.append({k: c[k] for k in ("id", "track", "name", "source_kind", "source_id",
                                         "status", "error", "start_s", "trim_s", "duration_s",
                                         "source_s", "gain_db", "fade_in", "fade_out", "ref_id",
-                                        "text")} |
+                                        "text", "instruct", "auto")} |
                      {"use_in_video": bool(c["use_in_video"]),
                       "url": f"/api/editor/{pid}/clips/{c['id']}/audio" if c["path"] else None})
     ref_views = []
@@ -1749,6 +1863,7 @@ def describe_for_agent(project_id: str, focus_shot: str | None = None) -> str:
         lines.append("Timeline audio:")
         for c in clips:
             lines.append(f"- clip_id={c['id']} {c['track']} @{c['start_s']:g}s "
+                         f"{'SCRIPT(not voiced yet) ' if c['status'] == 'script' else ''}"
                          f"{(c['duration_s'] or 0):g}s gain {c['gain_db']:g}dB "
                          f"{'USE-IN-VIDEO ' if c['use_in_video'] else ''}{c['status']} "
                          f"\"{c['name'][:80]}\"")
@@ -1846,10 +1961,29 @@ def storyboard_changes(project_id: str, args: dict) -> list:
                 continue
             refs = [names.get(str(n).lower(), n) for n in sh.get("refs") or sh.get("characters") or []] \
                 or cast
-            changes.append({"op": "add_shot", "key": f"s{si}_{hi}", "scene_id": key,
-                            **{k: sh[k] for k in ("title", "framing", "seconds", "prompt", "make",
-                                                  "start_from") if sh.get(k) is not None},
-                            "refs": [r for r in refs if r]})
+            lines = [d for d in (sh.get("dialogue") or sh.get("lines") or []) if isinstance(d, dict)
+                     and (d.get("text") or d.get("line"))]
+            shot = {"op": "add_shot", "key": f"s{si}_{hi}", "scene_id": key,
+                    **{k: sh[k] for k in ("title", "framing", "seconds", "prompt", "make",
+                                          "start_from") if sh.get(k) is not None},
+                    "refs": [r for r in refs if r]}
+            spoken = 0.0
+            for d in lines:
+                who = str(d.get("speaker") or d.get("character") or "")
+                spoken += len(str(d.get("text") or d.get("line")).split()) / 2.6 + 0.7
+            # A character speaking on camera: voice first, then the video from it.
+            on_camera = any(names.get(str(d.get("speaker") or d.get("character") or "").lower())
+                            in shot["refs"] for d in lines)
+            if lines and on_camera:
+                shot["make"] = "lipsync"     # voice first, video from the voice (the person's rule)
+            if lines and float(shot.get("seconds") or 0) < spoken:
+                shot["seconds"] = min(30 if shot.get("make") == "lipsync" else 11, round(spoken + 0.5))
+            changes.append(shot)
+            for d in lines:
+                who = str(d.get("speaker") or d.get("character") or "").lower()
+                changes.append({"op": "add_line", "shot_id": f"s{si}_{hi}",
+                                "ref_id": names.get(who), "text": d.get("text") or d.get("line"),
+                                "instruct": d.get("delivery") or d.get("instruct") or ""})
     return changes
 
 
@@ -2065,8 +2199,10 @@ AGENT_TOOLS = {
                      "description": "characters/places: {name, kind, description, speaker}"},
             "scenes": {"type": "array", "items": {"type": "object"}, "description":
                        "in order: {title, summary, refs:[the characters/places in the scene, by "
-                       "name], shots:[{title, framing, seconds, prompt, make, refs, "
-                       "start_from}]} (shots optional; they inherit the scene's refs)"},
+                       "name], shots:[{title, framing, seconds, prompt, make, refs, start_from, "
+                       "dialogue:[{speaker: character name or 'Narrator', text, delivery}]}]} "
+                       "(shots inherit the scene's refs; every line of the script goes in "
+                       "`dialogue` of the shot where it is said, word for word)"},
             "proposal_title": {"type": "string"}, "summary": {"type": "string"}}},
         "description": "Lay out a story (or a part of it) as scenes and shots in one go, in a "
                        "natural nested shape; it becomes one proposal the person applies. Use "
@@ -2474,6 +2610,23 @@ async def api_add_clip(pid: str, request: Request):
                            speech_id=b.get("speech_id"), music_id=b.get("music_id"),
                            start_s=start, use_in_video=bool(b.get("use_in_video", False)))
     return {"id": cid}
+
+
+@router.post("/api/editor/{pid}/clips/{cid}/voice")
+async def api_voice_one(pid: str, cid: str, request: Request):
+    user = _user(request)
+    await voice_script(production(user, pid), user, cid)
+    return {"ok": True}
+
+
+@router.post("/api/editor/{pid}/voice-all")
+async def api_voice_all(pid: str, request: Request):
+    """Queue every unvoiced script line (voiced in order by the pending loop)."""
+    user = _user(request)
+    production(user, pid)
+    n = db.one("SELECT COUNT(*) AS n FROM prod_clips WHERE project_id=? AND status='script'", (pid,))["n"]
+    db.run("UPDATE prod_clips SET auto=1, error=NULL WHERE project_id=? AND status='script'", (pid,))
+    return {"queued": n}
 
 
 @router.get("/api/editor/{pid}/clips/{cid}/audio")

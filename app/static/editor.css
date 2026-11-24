@@ -245,6 +245,7 @@ body:has(.ed) footer, body:has(.ed) .retention-note { display: none; }
 .ed-blk.pending { background-image: repeating-linear-gradient(45deg, rgba(0,0,0,.25) 0 6px, transparent 6px 12px); animation: ed-stripe 1s linear infinite; background-size: 17px 17px; }
 @keyframes ed-stripe { to { background-position: 17px 0; } }
 .ed-blk.failed { background: var(--bad); }
+.ed-blk.script { background: transparent; border: 1.5px dashed var(--dlg); color: var(--ink); font-weight: 500; }
 .ed-blk .vid { margin-left: 4px; font-size: .62rem; background: rgba(0,0,0,.35); color: #fff; padding: 0 4px; border-radius: 4px; }
 .ed-blk .rs { position: absolute; right: 0; top: 0; bottom: 0; width: 7px; cursor: ew-resize; }
 .ed-blk canvas { position: absolute; inset: 0; width: 100%; height: 100%; opacity: .45; pointer-events: none; }
