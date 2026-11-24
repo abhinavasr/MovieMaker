@@ -2154,8 +2154,11 @@ def perform_payload(project_id: str, shot, image_path: str | None, params: dict)
         ctx = _shot_context(pid, shot)
         default = ("Two people in the picture talk to each other, natural expressions."
                    if need == 2 else "The person in the picture talks or sings, natural expression.")
+        from app import promptsmith
         return {"model": cfg.TALK_MODEL, "client_request_id": shot["id"],
-                "prompt": " ".join(x for x in (shot.get("prompt") or default, ctx) if x)[:3900],
+                "prompt": (promptsmith.current(pid, db.one("SELECT * FROM shots WHERE id=?",
+                                                           (shot["id"],))).get("prompt")
+                           or " ".join(x for x in (shot.get("prompt") or default, ctx) if x))[:3900],
                 "width": int(params.get("width", 480)), "height": int(params.get("height", 864)),
                 "image": {"b64": wis.b64(Path(image_path).read_bytes()), "mime": "image/png"},
                 "reference_audio": [{"b64": wis.b64(p.read_bytes()), "mime": _audio_mime(p)}
@@ -2183,7 +2186,8 @@ def perform_payload(project_id: str, shot, image_path: str | None, params: dict)
         refs = [Path(image_path)] + [Path(p) for p in extra_paths if p and Path(p).exists()]
         out = {"model": cfg.RECAST_MODEL if shot["make"] == "recast" else cfg.RESTYLE_MODEL,
                "client_request_id": shot["id"], "width": w, "height": h, "length": frames,
-               "prompt": remake_prompt(pid, row, frames)[:3990],
+               "prompt": (__import__("app.promptsmith", fromlist=["current"]).current(pid, row)
+                          .get("prompt") or remake_prompt(pid, row, frames))[:3990],
                "reference_images": [{"b64": wis.b64(p.read_bytes()), "mime": "image/png"}
                                     for p in refs],
                "reference_videos": [{"b64": video, "mime": "video/mp4"}]}
@@ -2205,10 +2209,13 @@ def perform_payload(project_id: str, shot, image_path: str | None, params: dict)
         w, h = int(params.get("width", 480)), int(params.get("height", 864))
         secs = min(cfg.MOTION_MAX_SECONDS, int(shot.get("seconds") or 5))
         ctx = _shot_context(pid, shot)
+        from app import promptsmith
+        pol = promptsmith.current(pid, db.one("SELECT * FROM shots WHERE id=?", (shot["id"],)))
         return {"model": cfg.MOTION_MODEL, "client_request_id": shot["id"],
-                "prompt": " ".join(x for x in (shot.get("prompt") or "", ctx) if x)[:3900]
-                or "The person in the picture performs the movements.",
-                "motion_prompt": f"A reference video ({label}) of a person making these movements.",
+                "prompt": (pol.get("prompt") or " ".join(x for x in (shot.get("prompt") or "", ctx) if x)
+                           or "The person in the picture performs the movements.")[:3900],
+                "motion_prompt": pol.get("motion_prompt")
+                or f"A reference video ({label}) of a person making these movements.",
                 "seconds": secs, "width": w, "height": h,
                 "image": {"b64": wis.b64(Path(image_path).read_bytes()), "mime": "image/png"},
                 "reference_videos": [{"b64": _ref_video_b64(moves, w, h, secs),
@@ -2223,8 +2230,11 @@ def perform_payload(project_id: str, shot, image_path: str | None, params: dict)
         said = " ".join(f"\"{c['text']}\"" for c in lines if c["text"])[:600]
         default = (f"{shot.get('title') or 'The character'}: speaks the line {said}, natural "
                    "expression, subtle head and body movement, steady camera.")
+        from app import promptsmith
         return {"model": cfg.LIPSYNC_MODEL,
-                "prompt": " ".join(x for x in (shot.get("prompt") or default, ctx) if x)[:3900],
+                "prompt": (promptsmith.current(pid, db.one("SELECT * FROM shots WHERE id=?",
+                                                           (shot["id"],))).get("prompt")
+                           or " ".join(x for x in (shot.get("prompt") or default, ctx) if x))[:3900],
                 "seconds": min(cfg.LIPSYNC_MAX_SECONDS, int(shot.get("seconds") or 5)),
                 "width": int(params.get("width", 480)), "height": int(params.get("height", 864)),
                 "client_request_id": shot["id"],
@@ -2292,7 +2302,10 @@ def perform_payload(project_id: str, shot, image_path: str | None, params: dict)
                      "rhythm and camera movement as in it, for the whole clip. Do not copy its "
                      "person, clothes or room.")
     ctx = _shot_context(pid, shot)
-    prompt = " ".join([shot.get("prompt") or "", *lines, ctx]).strip()
+    from app import promptsmith
+    pol = promptsmith.current(pid, db.one("SELECT * FROM shots WHERE id=?", (shot["id"],)))
+    prompt = (" ".join([pol["prompt"], *lines]) if pol.get("prompt")
+              else " ".join([shot.get("prompt") or "", *lines, ctx])).strip()
     payload = {
         "model": cfg.SINGLE_MODEL, "prompt": prompt[:3900],
         "seconds": min(cfg.SINGLE_MAX_SECONDS, int(shot.get("seconds") or 5)),
@@ -2854,6 +2867,7 @@ def state(project, base: str) -> dict:
         "mix": _mix(project), "duration": sum(s["seconds"] for s in shot_views),
         "proposals": props, "export": export_view, "ai": ai_activity(project),
         "agent_applies": bool(params.get("agent_applies")),
+        "planner": cfg.PLANNER_MODEL,
         "video_refs": bool(params.get("video_refs")),
         "thread_id": thread["id"] if thread else None,
         "speakers": sorted(speech.SPEAKERS), "framings": list(FRAMINGS),

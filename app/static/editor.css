@@ -456,3 +456,7 @@ body:has(.ed) footer, body:has(.ed) .retention-note { display: none; }
 
 .ed-drawwith { display: inline-flex; align-items: center; gap: 6px; }
 .ed-drawwith select, #rf-model { font: inherit; font-size: .76rem; background: var(--panel-2); color: var(--ink); border: 1px solid var(--line); border-radius: 7px; padding: 4px 6px; max-width: 190px; }
+
+.ed-polish { margin: -2px 0 10px; font-size: .78rem; }
+.ed-polish summary { cursor: pointer; color: var(--muted); }
+.ed-polish pre { white-space: pre-wrap; word-break: break-word; max-height: 260px; overflow: auto; background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; padding: 8px; font-size: .72rem; margin: 6px 0 4px; }

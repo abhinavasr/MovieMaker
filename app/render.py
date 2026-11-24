@@ -239,9 +239,10 @@ async def _render_shot(project_id: str, shot, assets: dict, params: dict,
         from app import editor
         payload = editor.perform_payload(project_id, shot, image_path, params)
         return await _submit_shot(project_id, shot, payload, report)
+    from app import promptsmith
     payload = {
         "model": cfg.STORYBOARD_MODEL,
-        "prompt": shot["prompt"],
+        "prompt": promptsmith.current(project_id, shot).get("prompt") or shot["prompt"],
         "seconds": int(shot["seconds"] or cfg.DEFAULT_SHOT_SECONDS),
         "width": int(params.get("width", 480)),
         "height": int(params.get("height", 864)),
@@ -313,6 +314,20 @@ async def _render_storyboard(project_id: str, project, report) -> tuple[Path, bo
 
     only = _only.pop(project_id, None)
     partial = bool(params.get("_partial"))
+    # The local 27B writes the prompts of the shots about to be made, in one GPU turn
+    # before any video model loads (promptsmith).
+    to_make = [s["id"] for s in ordered
+               if only is None or s["id"] in only
+               or not (s.get("clip_path") and Path(s["clip_path"]).exists())]
+    if partial and only is not None:
+        to_make = [i for i in to_make if i in only]
+    if to_make and cfg.PROMPT_POLISH:
+        from app import promptsmith
+        await promptsmith.polish_shots(project_id, to_make, report)
+        fresh = {r["id"]: r["opts"] for r in db.query(
+            "SELECT id, opts FROM shots WHERE project_id=?", (project_id,))}
+        for s in ordered:
+            s["opts"] = fresh.get(s["id"], s.get("opts"))
     clips: list[Path] = []
     total = len(ordered)
     missing = 0

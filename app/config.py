@@ -119,6 +119,8 @@ class Config:
     RECAST_MODEL = _s("STUDIO_RECAST_MODEL", "viggle-remake-swap")
     RESTYLE_MODEL = _s("STUDIO_RESTYLE_MODEL", "viggle-remake-edit")
     REMAKE_MAX_SECONDS = 14
+    # The local planner model rewrites every shot's video prompt before a render.
+    PROMPT_POLISH = _s("STUDIO_PROMPT_POLISH", "1") not in ("0", "false", "off")
     LIPSYNC_MAX_SECONDS = _i("STUDIO_LIPSYNC_MAX_SECONDS", 30)   # measured: 30 s at 480x864 in 335 s
     # Per user, per rolling hour. The box has one GPU and a clip is ~2m15s of
     # it, so this is a real resource, not a formality.
