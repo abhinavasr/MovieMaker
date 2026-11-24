@@ -55,7 +55,8 @@ async def lifespan(app: FastAPI):
     gpuqueue.register("voice_jobs", voices.run)
     gpu_task = asyncio.create_task(gpuqueue.worker())
     asyncio.create_task(_reap_loop())
-    agent_tasks = [asyncio.create_task(agent.worker()), asyncio.create_task(agent.monitor())]
+    agent_tasks = [asyncio.create_task(agent.worker()), asyncio.create_task(agent.monitor()),
+                   asyncio.create_task(editor.pending_loop())]
     log.info("story studio up; upstream %s", cfg.WIS_BASE_URL)
     yield
     render.stop()

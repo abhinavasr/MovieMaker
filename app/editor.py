@@ -270,9 +270,11 @@ def edit_scene(project, scene_id: str, title: str | None = None, summary: str | 
         pos = max(0, min(len(scenes), int(position)))
         order = [s["id"] for s in scenes]
         order.insert(pos, scene_id)
+        before = timings(pid)
         for i, s in enumerate(order):
             db.run("UPDATE prod_scenes SET idx=? WHERE id=?", (i, s))
         _renumber(pid)
+        _follow_shots(pid, before)
     _touch(pid)
 
 
@@ -280,6 +282,7 @@ def delete_scene(project, scene_id: str) -> None:
     pid = project["id"]
     _not_rendering(project)
     _scene(pid, scene_id)
+    before = timings(pid)
     for s in db.query("SELECT id FROM shots WHERE scene_id=?", (scene_id,)):
         _delete_shot_row(pid, s["id"])
     db.run("DELETE FROM prod_scenes WHERE id=?", (scene_id,))
@@ -287,6 +290,7 @@ def delete_scene(project, scene_id: str) -> None:
     if not scenes_of(pid):
         _new_scene(pid, "Scene 1", "", 0)
     _renumber(pid)
+    _follow_shots(pid, before)
     _touch(pid)
 
 
@@ -305,6 +309,7 @@ def add_shot(project, scene_id: str, title: str = "", prompt: str = "", seconds=
     base = in_scene[pos]["idx"] - 0.5 if pos < len(in_scene) else \
         (in_scene[-1]["idx"] + 0.5 if in_scene else 10 ** 5)
     shot_id = db.new_id("sht")
+    before = timings(pid)
     params = db.params_of(project)
     make = make if make in MAKES else "animate"
     secs = _clamp(make, seconds if seconds is not None else
@@ -315,6 +320,7 @@ def add_shot(project, scene_id: str, title: str = "", prompt: str = "", seconds=
             framing if framing in FRAMINGS else "", json.dumps(_valid_refs(pid, refs or [])),
             make if make in MAKES else "animate", start_from if start_from in START_FROM else ""))
     _renumber(pid)
+    _follow_shots(pid, before)
     if image_id and user is not None:
         set_picture(project, user, shot_id, image_id)
     _touch(pid)
@@ -334,6 +340,22 @@ def _clamp(make: str, seconds) -> int:
     return max(1, min(cap_seconds(make), v))
 
 
+def _follow_shots(pid: str, before: dict[str, tuple[float, float]]) -> None:
+    """Dialogue belongs to the shot it is spoken over: when shots move, grow, shrink, or
+    others are inserted or removed, each line moves with its shot. Music and ambience
+    are laid across scenes and stay where they were put."""
+    after = timings(pid)
+    for c in db.query("SELECT id, start_s FROM prod_clips WHERE project_id=? AND track='dialogue'",
+                      (pid,)):
+        owner = next((sid for sid, (st, ln) in before.items() if st <= c["start_s"] < st + ln), None)
+        if owner is None or owner not in after:
+            continue
+        delta = after[owner][0] - before[owner][0]
+        if abs(delta) > 1e-6:
+            db.run("UPDATE prod_clips SET start_s=?, updated_at=? WHERE id=?",
+                   (round(max(0.0, c["start_s"] + delta), 3), db.now(), c["id"]))
+
+
 def _valid_refs(pid: str, refs: list) -> list:
     have = {r["id"] for r in db.query("SELECT id FROM prod_refs WHERE project_id=?", (pid,))}
     return [r for r in refs if r in have][:MAX_IMAGE_REFS]
@@ -342,6 +364,7 @@ def _valid_refs(pid: str, refs: list) -> list:
 def edit_shot(project, shot_id: str, **fields) -> None:
     pid = project["id"]
     shot = _shot(pid, shot_id)
+    before = timings(pid)
     sets: dict = {}
     if fields.get("title") is not None:
         sets["title"] = str(fields["title"])[:80]
@@ -376,6 +399,8 @@ def edit_shot(project, shot_id: str, **fields) -> None:
         cols = ", ".join(f"{k}=?" for k in sets)
         db.run(f"UPDATE shots SET {cols} WHERE id=?", (*sets.values(), shot_id))
         _renumber(pid)
+        if "idx" in sets or "seconds" in sets or "scene_id" in sets:
+            _follow_shots(pid, before)
         _touch(pid)
 
 
@@ -389,8 +414,10 @@ def _delete_shot_row(pid: str, shot_id: str) -> None:
 def delete_shot(project, shot_id: str) -> None:
     _not_rendering(project)
     _shot(project["id"], shot_id)
+    before = timings(project["id"])
     _delete_shot_row(project["id"], shot_id)
     _renumber(project["id"])
+    _follow_shots(project["id"], before)
     _touch(project["id"])
 
 
@@ -662,6 +689,63 @@ async def add_music(project, user: auth.User, description: str, start_s: float =
                         text=lyrics)
 
 
+def render_when_ready(pid: str, user: auth.User, clip_id: str, shot_id: str) -> None:
+    """Render a shot once the dialogue line under it is ready. Saved in the project's
+    params (not a bare asyncio task: an unreferenced task can be garbage-collected, and a
+    restart would lose it); `pending_loop` carries it out."""
+    project = db.one("SELECT * FROM projects WHERE id=?", (pid,))
+    params = db.params_of(project)
+    waits = [w for w in params.get("_render_after") or [] if w.get("shot") != shot_id]
+    waits.append({"shot": shot_id, "clip": clip_id, "user": user.id, "at": db.now()})
+    params["_render_after"] = waits
+    db.set_params(pid, params)
+
+
+async def _run_pending() -> None:
+    from app import agent
+    for project in db.query("SELECT * FROM projects WHERE mode='storyboard' AND "
+                            "params_json LIKE '%_render_after%'"):
+        params = db.params_of(project)
+        waits = params.get("_render_after") or []
+        if not waits:
+            continue
+        refresh_clips(project["id"])
+        keep = []
+        for w in waits:
+            c = db.one("SELECT status FROM prod_clips WHERE id=?", (w["clip"],))
+            shot = db.one("SELECT id FROM shots WHERE id=?", (w["shot"],))
+            if c is None or shot is None or c["status"] == "failed" or \
+                    db.now() - w.get("at", 0) > 6 * 3600:
+                continue                                   # gone or hopeless: drop it
+            if c["status"] != "ready" or service.is_rendering(
+                    db.one("SELECT * FROM projects WHERE id=?", (project["id"],))):
+                keep.append(w)
+                continue
+            user = agent.load_user(w["user"])
+            if user is None:
+                continue
+            try:
+                await render_shots(db.one("SELECT * FROM projects WHERE id=?", (project["id"],)),
+                                   user, [w["shot"]])
+                log.info("rendering %s now that its line is ready", w["shot"])
+            except HTTPException as exc:
+                log.warning("could not render %s after its line: %s", w["shot"], exc.detail)
+        p2 = db.params_of(db.one("SELECT * FROM projects WHERE id=?", (project["id"],)))
+        p2["_render_after"] = keep
+        db.set_params(project["id"], p2)
+
+
+async def pending_loop() -> None:
+    while True:
+        try:
+            await _run_pending()
+        except asyncio.CancelledError:
+            raise
+        except Exception:                                  # noqa: BLE001
+            log.exception("editor pending loop survived an error")
+        await asyncio.sleep(15)
+
+
 def add_existing(project, user: auth.User, track: str, *, speech_id: str | None = None,
                  music_id: str | None = None, start_s: float = 0.0,
                  use_in_video: bool = False) -> str:
@@ -861,7 +945,7 @@ def render_shots(project, user: auth.User, shot_ids: list[str] | None = None):
                                 "render both")
         elif not s["asset_id"]:
             problems.append(f"{label} has no picture")
-        if not (s["prompt"] or "").strip():
+        if not (s["prompt"] or "").strip() and s["make"] != "lipsync":
             problems.append(f"{label} has no prompt (what moves, how the camera moves)")
         cap = cap_seconds(s["make"])
         if int(s["seconds"] or 0) > cap:
@@ -897,8 +981,11 @@ def perform_payload(project_id: str, shot, image_path: str | None, params: dict)
                                "use-in-video dialogue line under it")
         start, length = timings(pid).get(shot["id"], (0.0, float(shot.get("seconds") or 5)))
         ctx = _shot_context(pid, shot)
+        said = " ".join(f"\"{c['text']}\"" for c in lines if c["text"])[:600]
+        default = (f"{shot.get('title') or 'The character'}: speaks the line {said}, natural "
+                   "expression, subtle head and body movement, steady camera.")
         return {"model": cfg.LIPSYNC_MODEL,
-                "prompt": " ".join(x for x in (shot.get("prompt") or "", ctx) if x)[:3900],
+                "prompt": " ".join(x for x in (shot.get("prompt") or default, ctx) if x)[:3900],
                 "seconds": min(cfg.LIPSYNC_MAX_SECONDS, int(shot.get("seconds") or 5)),
                 "width": int(params.get("width", 480)), "height": int(params.get("height", 864)),
                 "client_request_id": shot["id"],
@@ -1896,6 +1983,16 @@ async def api_add_clip(pid: str, request: Request):
         cid = await add_dialogue(project, user, b.get("ref_id"), str(b.get("text") or ""), start,
                                  str(b.get("instruct") or ""), b.get("language"),
                                  bool(b.get("use_in_video", True)), b.get("speaker"))
+        lip = b.get("lipsync_shot")
+        if lip:
+            shot = _shot(pid, str(lip))
+            fields = {"make": "lipsync"}
+            st, ln = timings(pid).get(shot["id"], (0, 0))
+            if not shot["asset_id"] and shot["start_from"] != "prev_last":
+                raise HTTPException(400, "the shot needs a picture to lip-sync")
+            edit_shot(db.one("SELECT * FROM projects WHERE id=?", (pid,)), shot["id"], **fields)
+            render_when_ready(pid, user, cid, shot["id"])
+            return {"id": cid, "lipsync": shot["id"], "rendering": "when the line is ready"}
     elif kind in ("music", "ambience"):
         cid = await add_music(project, user, str(b.get("description") or ""), start,
                               b.get("duration"), kind, bool(b.get("instrumental", True)),

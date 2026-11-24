@@ -204,11 +204,20 @@
     const mk = `<span class="ed-badge">${{animate: "🎞", perform: "🎭", lipsync: "👄"}[sh.make]} ${MAKE[sh.make][0]}${sh.framing ? " · " + sh.framing : ""} · ${sh.seconds}s</span>`;
     const state = sh.status === "done" ? "clip ready" : sh.status === "stale" ? "changed since rendered" : sh.status === "failed" ? "failed" : sh.clip ? "" : "not rendered";
     if (sh.clip && Player.mode !== "stage-img") {
-      st.innerHTML = `<div class="ed-frame" id="frame"><video id="stage-v" src="${esc(sh.clip)}" playsinline preload="auto" ${Player.playing ? "" : "controls"}></video></div>${mk}<span class="ed-badge r">${esc(state)}</span>`;
+      const snd = soundUnder(sh);
+      st.innerHTML = `<div class="ed-frame" id="frame"><video id="stage-v" src="${esc(sh.clip)}" playsinline preload="auto" muted></video></div>${mk}<span class="ed-badge r">${esc(state)}</span>`
+        + (Player.playing ? "" : `<button class="ed-bigplay" id="bigplay" type="button" aria-label="Play with sound">▶</button>`)
+        + (snd.tracks.length ? `<span class="ed-sound">🔊 ${esc(snd.tracks.join(" · "))}</span>` : `<span class="ed-sound none">🔇 No sound in this shot <button type="button" id="give-sound">Give it sound</button></span>`);
       fitFrame();
+      if ($("bigplay")) $("bigplay").onclick = () => { if ($("prange").value === "film") $("prange").value = "shot"; Player.play(); };
+      if ($("give-sound")) $("give-sound").onclick = () => { setTab("shot"); $("pane-shot").scrollTop = 0; document.querySelector(".ed-silent")?.scrollIntoView({block: "start"}); };
     } else if (sh.picture) {
-      st.innerHTML = `<div class="ed-frame" id="frame"><img id="stage-i" src="${esc(sh.picture)}" alt="" class="${Player.playing ? "kb" : ""}"></div>${mk}<span class="ed-badge r">${esc(state)}</span>`;
+      const snd = soundUnder(sh);
+      st.innerHTML = `<div class="ed-frame" id="frame"><img id="stage-i" src="${esc(sh.picture)}" alt="" class="${Player.playing ? "kb" : ""}"></div>${mk}<span class="ed-badge r">${esc(state)}</span>`
+        + (snd.tracks.length || sh.make !== "animate" ? (snd.tracks.length ? `<span class="ed-sound">🔊 ${esc(snd.tracks.join(" · "))}</span>` : "")
+           : `<span class="ed-sound none">🔇 No sound in this shot <button type="button" id="give-sound">Give it sound</button></span>`);
       fitFrame();
+      if ($("give-sound")) $("give-sound").onclick = () => { setTab("shot"); $("pane-shot").scrollTop = 0; };
     } else if (sh.start_from === "prev_last") {
       const prev = S.shots[S.shots.findIndex((x) => x.id === sh.id) - 1];
       st.innerHTML = `<div class="empty"><b>⛓ Opens on the last frame of the previous shot</b><span>Taken from “${esc(prev?.title || "the previous shot")}” when this shot renders, so the two flow as one take.</span>
@@ -270,6 +279,12 @@
     });
     document.querySelectorAll("#fr-which button").forEach((b) => b.onclick = () => document.querySelectorAll("#fr-which button").forEach((x) => x.classList.toggle("on", x === b)));
   };
+  function soundUnder(sh) {
+    const on = S.clips.filter((c) => c.status !== "failed" && c.start_s < sh.start + sh.seconds && c.start_s + (c.duration_s || 3) > sh.start && !S.mix[c.track].mute);
+    const tracks = [...new Set(on.map((c) => TRACK_NAME[c.track]))];
+    if (sh.make === "perform" && sh.status === "done" && !S.mix.shot.mute) tracks.push("its own sound");
+    return {tracks, lines: on.filter((c) => c.track === "dialogue")};
+  }
   function uploadPicture(shotId) {
     const inp = document.createElement("input"); inp.type = "file"; inp.accept = "image/*";
     inp.onchange = async () => { const fd = new FormData(); fd.append("file", inp.files[0]);
@@ -279,7 +294,7 @@
 
   function paintStrip() {
     const shots = sceneShots(sel.scene);
-    $("strip").innerHTML = shots.map((s, i) => `<div class="ed-card ${s.id === sel.shot ? "on" : ""}" data-shot="${s.id}" draggable="true">
+    $("strip").innerHTML = shots.map((s, i) => `<div class="ed-card ${s.id === sel.shot ? "on" : ""}" data-shot="${s.id}" draggable="true" title="Drag to reorder, or onto a scene on the left to move it there">
       ${s.start_from === "prev_last" ? `<span class="chain" title="Opens on the previous shot's last frame">⛓ continues</span>` : ""}
       <div class="th">${s.picture ? `<img src="${esc(s.picture)}" alt="" loading="lazy">` : s.start_from === "prev_last" ? "⛓ continues" : "no picture"}</div>
       <span class="mk">${{animate: "🎞", perform: "🎭", lipsync: "👄"}[s.make]} ${s.seconds}s</span>
@@ -289,7 +304,28 @@
     $("add-shot").onclick = addShot;
   }
   $("strip").addEventListener("click", (e) => { const d = e.target.closest("[data-shot]"); if (d) selectShot(d.dataset.shot); });
+  let draggingShot = null;
+  $("strip").addEventListener("dragstart", (e) => { const d = e.target.closest("[data-shot]"); if (!d) return; draggingShot = d.dataset.shot; d.classList.add("dragging"); e.dataTransfer.setData("text/plain", draggingShot); });
+  $("strip").addEventListener("dragend", () => { draggingShot = null; document.querySelectorAll(".dragging, .drop-into").forEach((x) => x.classList.remove("dragging", "drop-into")); });
+  $("scenes").addEventListener("dragover", (e) => { if (!draggingShot) return; const d = e.target.closest("[data-scene]"); if (!d) return; e.preventDefault(); e.stopPropagation();
+    document.querySelectorAll(".drop-into").forEach((x) => x.classList.remove("drop-into")); d.classList.add("drop-into"); });
+  $("scenes").addEventListener("drop", (e) => { if (!draggingShot) return; const d = e.target.closest("[data-scene]"); if (!d) return; e.preventDefault(); e.stopImmediatePropagation();
+    const id = draggingShot, sc = sceneById(d.dataset.scene); draggingShot = null; document.querySelectorAll(".drop-into").forEach((x) => x.classList.remove("drop-into"));
+    moveShot(id, sc.id, sc.shots.filter((x) => x !== id).length, `Moved to “${sc.title}”`); }, true);
   dragList($("strip"), "[data-shot]", (id, toIndex) => change([{op: "edit_shot", shot_id: id, scene_id: sel.scene, position: toIndex}], "Shot moved"));
+  async function moveShot(id, sceneId, position, msg) {
+    try { await change([{op: "edit_shot", shot_id: id, scene_id: sceneId, position}], msg || "Shot moved"); selectShot(id); }
+    catch { /* change() already toasted the reason (e.g. rendering) */ }
+  }
+  function nudge(id, d) {
+    const sh = shotById(id); if (!sh) return;
+    const inScene = sceneShots(sh.scene_id); const i = inScene.findIndex((s) => s.id === id);
+    if (i + d >= 0 && i + d < inScene.length) return moveShot(id, sh.scene_id, i + d, d < 0 ? "Moved earlier" : "Moved later");
+    // past the scene's edge: into the neighbouring scene
+    const si = S.scenes.findIndex((s) => s.id === sh.scene_id), ns = S.scenes[si + d];
+    if (!ns) { toast(d < 0 ? "Already the first shot" : "Already the last shot"); return; }
+    return moveShot(id, ns.id, d < 0 ? ns.shots.length : 0, `Moved to “${ns.title}”`);
+  }
   async function addShot() {
     if (!sel.scene) return;
     const after = sceneShots(sel.scene).findIndex((s) => s.id === sel.shot);
@@ -348,7 +384,7 @@
     const shotSound = shotsIn.filter((s) => s.make !== "animate").map((s) => `<div class="ed-blk shot ${s.id === sel.shot ? "on" : ""}" style="left:${x(s.start)}px;width:${s.seconds * TL.pps}px;opacity:.75" title="${s.make === "lipsync" ? "Lip-sync: the line is on the dialogue track, so this isn't mixed twice" : "Performance shot's own sound"}">${s.make === "lipsync" ? "👄 in dialogue" : "🎭 " + esc(s.title || "shot")}</div>`).join("");
     const keep = [$("tl-scroll").scrollLeft, $("tl-scroll").scrollTop];
     lanesEl.innerHTML = `<div></div><div class="ed-lane ruler" id="ruler">${ticks}</div>
-      <div class="ed-lh"><span class="nm">🎞 Shots</span></div><div class="ed-lane shots">${shotsIn.map((s) => `<div class="ed-blk shot ${s.id === sel.shot ? "on" : ""} ${s.scene_id !== sel.scene && view !== "timeline" ? "other" : ""}" data-tshot="${s.id}" style="left:${x(s.start)}px;width:${s.seconds * TL.pps - 2}px">${esc(s.framing || "")} ${esc(s.title || "shot " + s.n)}</div>`).join("")}</div>
+      <div class="ed-lh"><span class="nm">🎞 Shots</span></div><div class="ed-lane shots">${shotsIn.map((s) => `<div class="ed-blk shot ${s.id === sel.shot ? "on" : ""} ${s.scene_id !== sel.scene && view !== "timeline" ? "other" : ""}" data-tshot="${s.id}" title="Drag to move this shot" style="cursor:grab;left:${x(s.start)}px;width:${s.seconds * TL.pps - 2}px">${esc(s.framing || "")} ${esc(s.title || "shot " + s.n)}</div>`).join("")}</div>
       ${["dialogue", "ambience", "music"].map((t) => lh(t) + `<div class="ed-lane" data-lane="${t}">${blocks(t)}</div>`).join("")}
       ${S.shots.some((s) => s.make !== "animate") ? lh("shot") + `<div class="ed-lane" style="cursor:default">${shotSound}</div>` : ""}
       <div class="ed-head" id="head" style="left:${TL.off + x(Player.t)}px"></div>`;
@@ -404,7 +440,26 @@
     const t = TL.a + (e.clientX - e.target.closest(".ed-lane, .ed-lh, div").getBoundingClientRect().left) / TL.pps;
     if (e.target.closest("[data-mute]")) { const tr = e.target.closest("[data-mute]").dataset.mute;
       api(`/api/editor/${PID}/settings`, {mix: {[tr]: {mute: !S.mix[tr].mute}}}).then(() => load(true)); return; }
-    const shotEl = e.target.closest("[data-tshot]"); if (shotEl) { selectShot(shotEl.dataset.tshot); return; }
+    const shotEl = e.target.closest("[data-tshot]");
+    if (shotEl) {
+      const id = shotEl.dataset.tshot; if (id !== sel.shot) selectShot(id);
+      const el = $("lanes").querySelector(`[data-tshot="${id}"]`); if (!el) return;
+      const x0 = e.clientX, left0 = parseFloat(el.style.left); let moved = false, mark = null;
+      el.setPointerCapture(e.pointerId);
+      const mv = (ev) => { const dx = ev.clientX - x0; if (Math.abs(dx) < 4 && !moved) return; moved = true; el.classList.add("dragging"); el.style.left = (left0 + dx) + "px";
+        const t = TL.a + (left0 + dx + el.offsetWidth / 2) / TL.pps; const tgt = S.shots.filter((s) => s.id !== id).find((s) => t < s.start + s.seconds / 2);
+        const at = tgt ? tgt.start : S.duration; if (!mark) { mark = document.createElement("div"); mark.className = "ed-tl-drop"; el.parentElement.appendChild(mark); }
+        mark.style.left = (at - TL.a) * TL.pps + "px"; };
+      const up = async (ev) => { el.removeEventListener("pointermove", mv); el.removeEventListener("pointerup", up); mark?.remove();
+        if (!moved) return;
+        const t = TL.a + (left0 + ev.clientX - x0 + el.offsetWidth / 2) / TL.pps;
+        const others = S.shots.filter((s) => s.id !== id); const before = others.find((s) => t < s.start + s.seconds / 2);
+        if (before) { const sc = sceneById(before.scene_id); await moveShot(id, sc.id, sc.shots.filter((x) => x !== id).indexOf(before.id)); }
+        else { const last = others[others.length - 1]; const sc = sceneById(last ? last.scene_id : sel.scene); await moveShot(id, sc.id, sc.shots.filter((x) => x !== id).length); }
+      };
+      el.addEventListener("pointermove", mv); el.addEventListener("pointerup", up);
+      return;
+    }
     if (e.target.closest("#ruler")) { const r = $("ruler").getBoundingClientRect(); Player.seek(TL.a + (e.clientX - r.left) / TL.pps); return; }
     const blk = e.target.closest("[data-clip]");
     if (blk) {
@@ -515,8 +570,20 @@
       <div class="th">${r.image ? `<img src="${esc(r.image)}" alt="">` : ({voice: "🎙", location: "🏛"}[r.kind] || "👤")}</div><span>${esc(r.name)}</span><button aria-label="toggle">${sh.refs.includes(r.id) ? "✕" : "＋"}</button></div>`).join("");
     const lines = S.clips.filter((c) => c.track === "dialogue" && c.start_s < sh.start + sh.seconds && c.start_s + (c.duration_s || 0) > sh.start);
     const gen = (key, icon, label, small) => `<button type="button" data-gen="${key}"><span class="i">${icon}</span><span>${label}</span><span class="a">${genOpen === key ? "⌄" : "›"}</span>${small ? `<small>${small}</small>` : ""}</button>` + (genOpen === key ? genForm(key, sh) : "");
-    return `<div class="ed-group">
-      <label class="ed-field">Title<input data-f="title" value="${esc(sh.title)}" maxlength="80" placeholder="Name this shot"></label></div>
+    const snd = soundUnder(sh);
+    const silent = !snd.tracks.length && sh.make === "animate";
+    const silentCard = silent ? `<div class="ed-silent"><div class="h">🔇 This shot has no sound</div>
+      <div class="ed-note">Animate shots make picture only. Sound comes from the timeline, or from a shot that makes its own.</div>
+      <div class="opts">
+        <button type="button" data-sound="line"><span>🎙</span>Speak a line<small>voice it, lip-sync the shot to it, render when ready</small></button>
+        <button type="button" data-sound="perform"><span>🎭</span>Let it make its own sound<small>Performance: the video model generates sound with the picture</small></button>
+        <button type="button" data-sound="music"><span>🎵</span>Music or ambience<small>score or a soundscape under this scene</small></button>
+      </div></div>` : "";
+    const inScene = sceneShots(sh.scene_id), idx = inScene.findIndex((x) => x.id === sh.id);
+    const moveRow = `<div class="ed-move"><label class="ed-field">Scene<select id="mv-scene">${S.scenes.map((sc, i) => `<option value="${sc.id}" ${sc.id === sh.scene_id ? "selected" : ""}>${i + 1}. ${esc(sc.title || "Untitled scene")}</option>`).join("")}</select></label>
+      <button class="ed-btn icon" id="mv-up" type="button" title="Move earlier (Alt+←)" aria-label="Move earlier">◀</button><span class="ed-note" style="padding-bottom:9px;white-space:nowrap">${idx + 1} of ${inScene.length}</span><button class="ed-btn icon" id="mv-down" type="button" title="Move later (Alt+→)" aria-label="Move later">▶</button></div>`;
+    return silentCard + `<div class="ed-group">
+      <label class="ed-field">Title<input data-f="title" value="${esc(sh.title)}" maxlength="80" placeholder="Name this shot"></label></div>${moveRow}
       <div class="ed-row2">
         <label class="ed-field">Framing<select data-f="framing">${S.framings.map((f) => `<option value="${f}" ${f === sh.framing ? "selected" : ""}>${esc(f ? f + " · " + FRAMING[f] : "—")}</option>`).join("")}</select></label>
         <label class="ed-field">Seconds (max ${cap})<input data-f="seconds" type="number" min="1" max="${cap}" value="${sh.seconds}"></label></div>
@@ -549,6 +616,7 @@
       return `<div class="ed-genform"><label class="ed-field">Who<select id="g-ref">${sp.map((r) => `<option value="${r.id}">${esc(r.name)}</option>`).join("")}<option value="">Narrator / default voice</option></select></label>
       <label class="ed-field">Line<textarea id="g-text" rows="3"></textarea></label><label class="ed-field">Delivery<input id="g-inst" placeholder="trembling, quiet"></label>
       <label class="ed-switch"><input type="checkbox" id="g-vid" checked> Use in video</label>
+      ${sh.picture || sh.start_from === "prev_last" ? `<label class="ed-switch"><input type="checkbox" id="g-lip" ${sh.make === "perform" ? "" : "checked"}> Lip-sync this shot to the line — renders when the voice is ready</label>` : ""}
       <div class="acts"><button class="ed-btn gold" data-go="voice">Speak it at ${fmt(sh.start + 0.3)}</button></div></div>`; }
     const mus = key === "music";
     const [a, b] = sceneSpan(sh.scene_id);
@@ -625,8 +693,17 @@
     pane.querySelectorAll("[data-make]").forEach((b) => b.onclick = () => change([{op: "edit_shot", shot_id: sh.id, make: b.dataset.make}], `${MAKE[b.dataset.make][0]} shot`));
     pane.querySelectorAll("[data-tref]").forEach((b) => b.onclick = () => { const id = b.dataset.tref; const refs = sh.refs.includes(id) ? sh.refs.filter((x) => x !== id) : [...sh.refs, id]; change([{op: "edit_shot", shot_id: sh.id, refs}]); });
     pane.querySelectorAll("[data-gen]").forEach((b) => b.onclick = () => { genOpen = genOpen === b.dataset.gen ? null : b.dataset.gen; paintInspector(); });
+    pane.querySelectorAll("[data-sound]").forEach((b) => b.onclick = async () => {
+      const k = b.dataset.sound;
+      if (k === "perform") { await change([{op: "edit_shot", shot_id: sh.id, make: "perform"}], "Performance shot — render it to hear its sound"); genOpen = "video"; paintInspector(); return; }
+      genOpen = k === "line" ? "voice" : "music"; paintInspector();
+      setTimeout(() => { const f = $("pane-shot").querySelector(".ed-genform"); f?.scrollIntoView({block: "center"}); $("g-text")?.focus(); }, 50);
+    });
     pane.querySelectorAll("[data-go]").forEach((b) => b.onclick = () => runGen(b.dataset.go, sh, b));
     if ($("ins-upload")) $("ins-upload").onclick = () => uploadPicture(sh.id);
+    if ($("mv-up")) $("mv-up").onclick = () => nudge(sh.id, -1);
+    if ($("mv-down")) $("mv-down").onclick = () => nudge(sh.id, 1);
+    if ($("mv-scene")) $("mv-scene").onchange = () => { const sc = sceneById($("mv-scene").value); moveShot(sh.id, sc.id, sc.shots.filter((x) => x !== sh.id).length, `Moved to “${sc.title}”`); };
     if ($("ins-ask")) $("ins-ask").onclick = () => { scope = "shot"; paintScope(); setTab("agent"); $("text").focus(); };
     if ($("ins-addref")) $("ins-addref").onclick = (e) => { e.preventDefault(); refModal(null); };
     if ($("sc-add")) $("sc-add").onclick = addShot;
@@ -663,7 +740,9 @@
       else if (what === "video") { await api(`/api/editor/${PID}/render`, {shot_ids: [sh.id]}); toast("Rendering this shot"); }
       else if (what === "video-scene") { await api(`/api/editor/${PID}/render`, {shot_ids: sceneShots(sh.scene_id).map((s) => s.id)}); toast("Rendering the scene"); }
       else if (what === "voice") { const text = $("g-text").value.trim(); if (!text) { toast("Write the line"); btn.disabled = false; return; }
-        await api(`/api/editor/${PID}/clips`, {kind: "dialogue", ref_id: $("g-ref").value || null, text, instruct: $("g-inst").value, start_s: sh.start + 0.3, use_in_video: $("g-vid").checked}); toast("Speaking… it lands on the dialogue lane"); }
+        const lip = $("g-lip")?.checked;
+        await api(`/api/editor/${PID}/clips`, {kind: "dialogue", ref_id: $("g-ref").value || null, text, instruct: $("g-inst").value, start_s: sh.start + 0.3, use_in_video: lip || $("g-vid").checked, lipsync_shot: lip ? sh.id : null});
+        toast(lip ? "Speaking the line — the shot re-renders lip-synced as soon as the voice is ready" : "Speaking… it lands on the dialogue lane"); }
       else { const d = $("g-text").value.trim(); if (!d) { toast("Describe it"); btn.disabled = false; return; }
         await api(`/api/editor/${PID}/clips`, {kind: what === "music" ? "music" : "ambience", description: d, start_s: sceneSpan(sh.scene_id)[0], duration: +$("g-dur").value, use_in_video: $("g-vid").checked}); toast("Generating… it lands on the lane when ready"); }
       genOpen = null; load(true);
@@ -696,6 +775,7 @@
     if (e.key === "Escape") { $("modal").hidden = true; $("pop").hidden = true; ED.classList.remove("left-open"); }
     if (e.target.closest("input, textarea, select")) return;
     if (e.key === " ") { e.preventDefault(); Player.toggle(); }
+    if (e.altKey && sel.shot && (e.key === "ArrowRight" || e.key === "ArrowLeft")) { e.preventDefault(); nudge(sel.shot, e.key === "ArrowRight" ? 1 : -1); return; }
     if (e.key === "ArrowRight") stepShot(1); if (e.key === "ArrowLeft") stepShot(-1);
   });
 
@@ -742,7 +822,7 @@
         if (sh.scene_id !== sel.scene || sh.id !== sel.shot) { sel.shot = sh.id; sel.scene = sh.scene_id; paintCrumbs(); paintStrip(); if (view === "timeline" || true) paintTimeline(); }
         this.mode = sh.clip ? "" : "stage-img"; paintStage(sh);
         this.video = $("stage-v");
-        if (this.video) { this.video.currentTime = this.t - sh.start; this.video.muted = sh.make !== "perform" || S.mix.shot.mute; this.video.volume = Math.min(1, amp(S.mix.shot.gain_db)); this.video.play().catch(() => {}); }
+        if (this.video) { this.video.currentTime = this.t - sh.start; this.video.muted = sh.make !== "perform" || S.mix.shot.mute; this.video.removeAttribute("controls"); this.video.volume = Math.min(1, amp(S.mix.shot.gain_db)); this.video.play().catch(() => {}); }
       }
       if (this.video && sh && sh.clip && Math.abs(this.video.currentTime - (this.t - sh.start)) > 0.35) this.video.currentTime = this.t - sh.start;
       const dlgOn = S.clips.some((c) => c.track === "dialogue" && c.status === "ready" && this.t >= c.start_s && this.t < c.start_s + (c.duration_s || 0));
