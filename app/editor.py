@@ -52,7 +52,7 @@ router = APIRouter()
 TRACKS = ("dialogue", "ambience", "music")
 REF_KINDS = ("character", "location", "prop", "style", "voice")
 FRAMINGS = ("", "EWS", "WS", "MS", "MCU", "CU", "ECU", "OTS", "POV", "2S", "INSERT")
-MAKES = ("animate", "perform", "lipsync")
+MAKES = ("animate", "perform", "lipsync", "motion")
 DEFAULT_MIX = {"dialogue": {"gain_db": 0.0, "mute": False},
                "ambience": {"gain_db": -6.0, "mute": False},
                "music": {"gain_db": -8.0, "mute": False},
@@ -345,7 +345,8 @@ def add_shot(project, scene_id: str, title: str = "", prompt: str = "", seconds=
 
 
 def cap_seconds(make: str) -> int:
-    return {"perform": cfg.SINGLE_MAX_SECONDS, "lipsync": cfg.LIPSYNC_MAX_SECONDS}.get(
+    return {"perform": cfg.SINGLE_MAX_SECONDS, "lipsync": cfg.LIPSYNC_MAX_SECONDS,
+            "motion": cfg.MOTION_MAX_SECONDS}.get(
         make, cfg.STORYBOARD_MAX_SECONDS)
 
 
@@ -1704,6 +1705,9 @@ def add_ref_video(project, sid: str, from_shot: str | None = None,
     items = _jl(shot["ref_videos"], [])
     if len(items) >= MAX_REF_VIDEOS:
         raise HTTPException(409, f"a shot takes at most {MAX_REF_VIDEOS} reference videos")
+    if shot["make"] == "motion" and items:
+        raise HTTPException(409, "a “Copy motion” shot copies one video; remove "
+                                 "the current one first")
     if from_shot:
         src = db.one("SELECT id, clip_path FROM shots WHERE id=? AND project_id=?", (from_shot, pid))
         if src is None or src["id"] == sid:
@@ -1730,8 +1734,8 @@ def add_ref_video(project, sid: str, from_shot: str | None = None,
         raise HTTPException(400, "choose a shot's clip or upload a video")
     items.append(item)
     sets = {"ref_videos": json.dumps(items)}
-    if shot["make"] != "perform":
-        sets["make"] = "perform"           # only the reference model reads videos
+    if shot["make"] not in ("perform", "motion"):
+        sets["make"] = "perform"           # only these models read videos
     if shot["status"] == "done":
         sets["status"] = "stale"
     db.run(f"UPDATE shots SET {', '.join(k + '=?' for k in sets)} WHERE id=?",
@@ -1757,6 +1761,26 @@ def remove_ref_video(project, sid: str, index: int) -> None:
 def perform_payload(project_id: str, shot, image_path: str | None, params: dict) -> dict:
     """The WIS request for a performance or lip-sync shot (called by app/render.py)."""
     pid = project_id
+    if shot.get("make") == "motion":
+        # Wan Animate 2: the shot picture (who, and where) performs the first reference
+        # video's movements, frame for frame (2026-11-24: "girl dancing like the man in
+        # the video" -- the reference model barely copied the dance).
+        vids = _ref_video_items(pid, shot)
+        if not image_path or not vids:
+            raise RuntimeError(f"{shot.get('title') or 'this shot'} copies a video's motion: it "
+                               "needs a picture and a reference video")
+        label, moves = vids[0]
+        w, h = int(params.get("width", 480)), int(params.get("height", 864))
+        secs = min(cfg.MOTION_MAX_SECONDS, int(shot.get("seconds") or 5))
+        ctx = _shot_context(pid, shot)
+        return {"model": cfg.MOTION_MODEL, "client_request_id": shot["id"],
+                "prompt": " ".join(x for x in (shot.get("prompt") or "", ctx) if x)[:3900]
+                or "The person in the picture performs the movements.",
+                "motion_prompt": f"A reference video ({label}) of a person making these movements.",
+                "seconds": secs, "width": w, "height": h,
+                "image": {"b64": wis.b64(Path(image_path).read_bytes()), "mime": "image/png"},
+                "reference_videos": [{"b64": _ref_video_b64(moves, w, h, secs),
+                                      "mime": "video/mp4"}]}
     if shot.get("make") == "lipsync":
         lines = _dialogue_under(pid, shot["id"])
         if not image_path or not lines:
@@ -2837,7 +2861,8 @@ AGENT_TOOLS = {
                         "is the first frame) | perform (ref2v: picture + reference pictures + "
                         "use-in-video audio under the shot; makes its own sound) | lipsync "
                         "(Wan S2V: the picture speaks/sings the use-in-video dialogue line "
-                        "under the shot, mouth in sync)."}}},
+                        "under the shot, mouth in sync) | motion (Wan Animate 2: the person in the "
+                        "picture makes exactly the movements of the shot's one reference video)."}}},
         "description": "Edit the production (story, scenes, shots, references, audio clips, "
                        "mix). The person reviews and applies the proposal unless they let you "
                        "apply directly. Use it for any change to the story structure or mix."},
