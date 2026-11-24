@@ -52,7 +52,10 @@ router = APIRouter()
 TRACKS = ("dialogue", "ambience", "music")
 REF_KINDS = ("character", "location", "prop", "style", "voice")
 FRAMINGS = ("", "EWS", "WS", "MS", "MCU", "CU", "ECU", "OTS", "POV", "2S", "INSERT")
-MAKES = ("animate", "perform", "lipsync", "motion")
+MAKES = ("animate", "perform", "lipsync", "motion", "talk2", "longtalk", "recast", "restyle")
+TALK_MAKES = ("talk2", "longtalk")
+REMAKE_MAKES = ("recast", "restyle")
+REMAKE_PIN = 12          # the source frame the painted picture is drawn from
 DEFAULT_MIX = {"dialogue": {"gain_db": 0.0, "mute": False},
                "ambience": {"gain_db": -6.0, "mute": False},
                "music": {"gain_db": -8.0, "mute": False},
@@ -346,7 +349,9 @@ def add_shot(project, scene_id: str, title: str = "", prompt: str = "", seconds=
 
 def cap_seconds(make: str) -> int:
     return {"perform": cfg.SINGLE_MAX_SECONDS, "lipsync": cfg.LIPSYNC_MAX_SECONDS,
-            "motion": cfg.MOTION_MAX_SECONDS}.get(
+            "motion": cfg.MOTION_MAX_SECONDS, "talk2": cfg.TALK_MAX_SECONDS,
+            "longtalk": cfg.TALK_MAX_SECONDS, "recast": cfg.REMAKE_MAX_SECONDS,
+            "restyle": cfg.REMAKE_MAX_SECONDS}.get(
         make, cfg.STORYBOARD_MAX_SECONDS)
 
 
@@ -355,7 +360,7 @@ def _clamp(make: str, seconds) -> int:
         v = int(round(float(seconds)))
     except (TypeError, ValueError):
         v = cfg.DEFAULT_SHOT_SECONDS
-    return max(1, min(cap_seconds(make), v))
+    return max(4 if make in REMAKE_MAKES else 1, min(cap_seconds(make), v))
 
 
 def _follow_shots(pid: str, before: dict[str, tuple[float, float]]) -> None:
@@ -400,7 +405,10 @@ def edit_shot(project, shot_id: str, **fields) -> None:
     if fields.get("start_from") is not None and fields["start_from"] in START_FROM:
         sets["start_from"] = fields["start_from"]
         sets["cont_checked"] = 1              # decided (by the person or the planner): final
-    changes_clip = any(k in sets for k in ("prompt", "seconds", "make", "refs", "start_from"))
+    if isinstance(fields.get("opts"), dict):
+        sets["opts"] = json.dumps(_clean_opts(pid, {**_jl(shot["opts"], {}), **fields["opts"]}))
+    changes_clip = any(k in sets for k in ("prompt", "seconds", "make", "refs", "start_from",
+                                            "opts"))
     if changes_clip and shot["status"] == "done":
         sets["status"] = "stale"      # the clip no longer matches; render it again
     if fields.get("scene_id") is not None or fields.get("position") is not None:
@@ -1248,6 +1256,8 @@ async def picture_options(project, user: auth.User, shot_id: str, prompt: str = 
     pid = project["id"]
     shot = _shot(pid, shot_id)
     count = max(1, min(4, int(count or 2)))
+    if shot["make"] in REMAKE_MAKES and not prompt.strip():
+        return await remake_picture_options(project, user, shot, count)
     framing = {"EWS": "extreme wide shot", "WS": "wide shot", "MS": "medium shot",
                "MCU": "medium close-up", "CU": "close-up", "ECU": "extreme close-up",
                "OTS": "over-the-shoulder shot", "POV": "point-of-view shot",
@@ -1616,7 +1626,7 @@ def render_shots(project, user: auth.User, shot_ids: list[str] | None = None):
                                 "render both")
         elif not s["asset_id"]:
             problems.append(f"{label} has no picture")
-        if not (s["prompt"] or "").strip() and s["make"] != "lipsync":
+        if not (s["prompt"] or "").strip() and s["make"] not in ("lipsync",) + TALK_MAKES + REMAKE_MAKES:
             problems.append(f"{label} has no prompt (what moves, how the camera moves)")
         cap = cap_seconds(s["make"])
         if int(s["seconds"] or 0) > cap:
@@ -1640,6 +1650,276 @@ def _dialogue_under(pid: str, shot_id: str) -> list:
                                 "AND status='ready' AND use_in_video=1 ORDER BY start_s", (pid,))
             if c["path"] and c["start_s"] < start + length and
             c["start_s"] + (c["duration_s"] or 0) > start]
+
+
+# ------------------------------------------------------------ talk + remake shots
+# 2026-11-24, "We should use different models for different use cases":
+#   talk2    two people in the picture talk, each with their own voice (InfiniteTalk)
+#   longtalk one person talks or sings for longer, up to a minute (InfiniteTalk)
+#   recast   the people in a video are recast as our characters (Viggle Remake swap)
+#   restyle  a video's look is changed: outfits, weather, setting, style (Viggle edit)
+# opts: {"speakers": [{"clip": cid, "ref": rid}], "layout": "left_right"|"right_left",
+#        "cast": [{"ref": rid, "who": "the man in the grey jacket"}], "change": "..."}
+# A speaker's voice is always a clip on the timeline (an upload is added to the
+# Dialogue lane first), so every voice can be seen and mixed, and the shot's own audio
+# is never mixed on top of it (as with lip-sync).
+
+def _audio_mime(p: Path) -> str:
+    return {".mp3": "audio/mpeg", ".flac": "audio/flac", ".ogg": "audio/ogg",
+            ".m4a": "audio/mp4"}.get(p.suffix.lower(), "audio/wav")
+
+
+def _clean_opts(pid: str, o: dict) -> dict:
+    out = {}
+    sp = []
+    for s in (o.get("speakers") or [])[:2]:
+        if not isinstance(s, dict):
+            continue
+        clip = s.get("clip") if s.get("clip") and db.one(
+            "SELECT 1 FROM prod_clips WHERE id=? AND project_id=?", (s.get("clip"), pid)) else None
+        ref = s.get("ref") if s.get("ref") and db.one(
+            "SELECT 1 FROM prod_refs WHERE id=? AND project_id=?", (s.get("ref"), pid)) else None
+        sp.append({"clip": clip, "ref": ref})
+    if sp:
+        out["speakers"] = sp
+    if o.get("layout") in ("left_right", "right_left"):
+        out["layout"] = o["layout"]
+    cast = []
+    for c in (o.get("cast") or [])[:3]:
+        if isinstance(c, dict) and c.get("ref") and db.one(
+                "SELECT 1 FROM prod_refs WHERE id=? AND project_id=?", (c["ref"], pid)):
+            cast.append({"ref": c["ref"], "who": str(c.get("who") or "")[:200]})
+    if cast:
+        out["cast"] = cast
+    if o.get("change"):
+        out["change"] = str(o["change"])[:800]
+    return out
+
+
+def _speaker_audio(pid: str, shot) -> list[Path]:
+    paths = []
+    for s in _jl(shot["opts"], {}).get("speakers") or []:
+        row = db.one("SELECT path, status FROM prod_clips WHERE id=? AND project_id=?",
+                     (s.get("clip"), pid)) if s.get("clip") else None
+        if row and row["status"] == "ready" and row["path"] and Path(row["path"]).exists():
+            paths.append(Path(row["path"]))
+    return paths
+
+
+def _sync_talk_seconds(pid: str, shot_id: str) -> None:
+    """A talk shot lasts as long as its voices (one after the other)."""
+    shot = _shot(pid, shot_id)
+    if shot["make"] not in TALK_MAKES:
+        return
+    total = sum(_probe_seconds(str(p)) or 0 for p in _speaker_audio(pid, shot))
+    if total:
+        db.run("UPDATE shots SET seconds=? WHERE id=?",
+               (max(1, min(cfg.TALK_MAX_SECONDS, int(round(total + 0.3)))), shot_id))
+
+
+def set_speaker_audio(project, shot_id: str, index: int, name: str, raw: bytes) -> dict:
+    """An uploaded voice for speaker `index`: it goes on the Dialogue lane at its place
+    in the shot (speaker 2 after speaker 1), then the shot uses that clip."""
+    pid = project["id"]
+    shot = _shot(pid, shot_id)
+    if shot["make"] not in TALK_MAKES:
+        raise HTTPException(400, "voices are for “two people talk” and “talk or sing at length” shots")
+    opts = _jl(shot["opts"], {})
+    sp = (opts.get("speakers") or []) + [{}] * 2
+    start = timings(pid).get(shot_id, (0.0, 0.0))[0]
+    if index == 1:
+        first = _speaker_audio(pid, shot)[:1]
+        start += (_probe_seconds(str(first[0])) or 0.0) if first else 0.0
+    cid = add_upload(project, "dialogue", name, raw, start)
+    sp[index] = {**(sp[index] or {}), "clip": cid}
+    opts["speakers"] = sp[:2 if shot["make"] == "talk2" else 1]
+    db.run("UPDATE shots SET opts=?, status=CASE WHEN status='done' THEN 'stale' ELSE status END "
+           "WHERE id=?", (json.dumps(_clean_opts(pid, opts)), shot_id))
+    _sync_talk_seconds(pid, shot_id)
+    _touch(pid)
+    return {"ok": True, "clip_id": cid}
+
+
+def _identity_pictures(r) -> list[tuple[str, str]]:
+    """(label, image_id) that show who a character is, best first: a face close-up (their
+    own, else the drawn one), their own photos, then the main picture. 2026-11-24: a
+    recast drawn from the main picture alone came out as a stranger; adding the face
+    close-up to the painted frame and to the remake's references fixed it."""
+    done = _angle_done(r)
+    mine, _ = _marks(_jl(r["angles"], {}))
+    out: list[tuple[str, str]] = []
+    if "face" in done:
+        out.append((f"a close-up photo of {r['name']}'s face", done["face"]))
+    for i in _own_photos(r):
+        if i not in [x[1] for x in out]:
+            out.append((f"a photo of {r['name']}", i))
+    if r["image_id"] and _img_done(r["image_id"]) and r["image_id"] not in [x[1] for x in out]:
+        out.append((f"a photo of {r['name']}", r["image_id"]))
+    return out
+
+
+def _recast_extras(pid: str, shot, limit: int = 3) -> list[tuple[int, str, str]]:
+    """(subject number, label, image path) for the remake's extra references: each cast
+    member's identity pictures, taken in turns, up to `limit` (Viggle takes 4 pictures,
+    the painted frame being the first)."""
+    lists = []
+    for n, c in enumerate(_jl(shot["opts"], {}).get("cast") or [], start=1):
+        r = db.one("SELECT * FROM prod_refs WHERE id=? AND project_id=?", (c["ref"], pid))
+        if r:
+            lists.append([(n, label, i) for label, i in _identity_pictures(r)])
+    out = []
+    for k in range(max((len(x) for x in lists), default=0)):
+        for lst in lists:
+            if k < len(lst) and len(out) < limit:
+                n, label, i = lst[k]
+                row = db.one("SELECT path FROM images WHERE id=?", (i,))
+                if row and row["path"] and Path(row["path"]).exists():
+                    out.append((n, label, row["path"]))
+    return out
+
+
+def _canvas(params: dict) -> tuple[int, int]:
+    """Viggle's own canvas (short edge 480), in the production's orientation."""
+    w, h = int(params.get("width", 480)), int(params.get("height", 864))
+    return (832, 480) if w >= h else (480, 832)
+
+
+def _remake_source(path: Path, w: int, h: int, frames: int, out: Path) -> None:
+    """The source on the canvas: 24 fps, cover-cropped, looped to cover `frames`, sound kept."""
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-stream_loop", "-1", "-i", str(path),
+                    "-t", f"{frames / 24 + 0.3:.2f}", "-vf",
+                    f"fps=24,scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h}",
+                    "-c:v", "libx264", "-crf", "18", "-preset", "veryfast", "-pix_fmt", "yuv420p",
+                    "-c:a", "aac", "-b:a", "160k", str(out)], check=True, timeout=600)
+
+
+def _remake_frames(seconds) -> int:
+    n = round((float(seconds or 5) * 24 - 5) / 17)
+    return max(90, min(345, 17 * max(5, n) + 5))
+
+
+def remake_prompt(pid: str, shot, frames: int) -> str:
+    """MiniMax-H3's six-section prompt for a recast or restyle shot, written from the
+    shot's options (Viggle's PROMPTING.md: describe the TARGET video, not an instruction;
+    say what changes in retention_analysis)."""
+    opts = _jl(shot["opts"], {})
+    end = f"00:{frames / 24:06.3f}"
+    what = (shot["prompt"] or "").strip()
+    if shot["make"] == "recast":
+        cast = []
+        for i, c in enumerate(opts.get("cast") or []):
+            r = db.one("SELECT name, description FROM prod_refs WHERE id=?", (c["ref"],))
+            if r:
+                cast.append((i + 1, r["name"], (r["description"] or "").strip(),
+                             c.get("who") or "a person"))
+        subjects = "\n".join(
+            f"<Subject {n}> is {name} in <Picture 1>{': ' + desc if desc else ''}. "
+            f"{name} replaces {who} in <Video 1>." for n, name, desc, who in cast)
+        names = ", ".join(f"{who} becomes <Subject {n}>, {name}" for n, name, _, who in cast)
+        keep = "; ".join(f"<Subject {n}> (appears in [Shot 1]): fully_preserved - {name}'s face, "
+                         f"hair and clothes stay identical in every frame, exactly as in <Picture 1>."
+                         for n, name, _, _ in cast)
+        none_of = " ".join(f"{who} never appears." for _, _, _, who in cast)
+        extras = _recast_extras(pid, shot)
+        pics = "".join(f"\n<Picture {k + 2}> is {label} (<Subject {n}>)."
+                       for k, (n, label, _) in enumerate(extras))
+        pics_keep = "".join(f"\n<Picture {k + 2}> (appears in [Shot 1]): reference - <Subject {n}>'s "
+                            f"face and look exactly as in this {'close-up' if 'close-up' in label else 'photo'}."
+                            for k, (n, label, _) in enumerate(extras))
+        return f"""subject_definitions:
+<Video 1> is the source video for the editing task.
+<Picture 1> is a frame of the target video, from [Shot 1].{pics}
+{subjects}
+
+summary:
+[video editing + character replacement] The target video is an edited version of <Video 1> in which {names}, each looking exactly as in <Picture 1>, doing exactly the same actions. Everything else is unchanged. The shot, the camera, the motion, the timing and the actions of <Video 1> are kept.
+
+retention_analysis:
+<Video 1> (source video editing): fully_preserved - the framing, the camera movement, the place, the light and the motion and timing of every action are copied frame for frame.
+<Picture 1> (appears in [Shot 1]): reference - a frame of the target video; the replaced people's clothes and poses are taken from it.{pics_keep}
+{keep}
+
+detailed_description:
+The target video is a realistic scene, exactly as <Video 1> but recast.
+[Shot 1] From 00:00.000 to {end}, {what or 'everything happens exactly as in <Video 1>, with the same actions and timing'}. At 00:00.500 the scene matches <Picture 1>.
+In every frame, from the first to the last, the recast people look exactly as in <Picture 1>: {none_of} Only these people change, and everything else stays as in <Video 1>.
+
+overall_soundscape:
+The soundtrack of <Video 1>, unchanged.
+
+non_diegetic_music:
+N/A"""
+    change = (opts.get("change") or what or "the look changes").strip()
+    return f"""subject_definitions:
+<Video 1> is the source video for the target video edit.
+<Picture 1> is a frame of the target video, exactly as the target video shows it at that moment.
+<Subject 1> is what changes in <Video 1>: {change}
+
+summary:
+[video editing] The target video is an edited version of <Video 1>: {change}. The framing, the camera movement, the people's motion and the timing are exactly as in <Video 1>.
+
+retention_analysis:
+<Video 1> (source video editing): fully_preserved - the framing, the camera movement and the motion and timing of every action are copied frame for frame.
+<Picture 1> (target keyframe): fully_preserved - the target video passes through this exact frame.
+<Subject 1> (appears in [Shot 1]): changed - {change}, in every frame.
+
+detailed_description:
+The target video shows <Video 1> with this change: {change}.
+[Shot 1] From 00:00.000 to {end}, everything moves exactly as in <Video 1>{', ' + what if what and what != change else ''}. At 00:00.500 the scene matches <Picture 1>.
+
+overall_soundscape:
+The soundtrack of <Video 1>, unchanged.
+
+non_diegetic_music:
+N/A"""
+
+
+async def remake_picture_options(project, user: auth.User, shot, count: int) -> list[str]:
+    """The painted frame: frame 12 of the source on the canvas, redrawn with the cast
+    (recast) or the change (restyle). It becomes the shot's picture, and the remake
+    pins it at that frame."""
+    pid = project["id"]
+    vids = _ref_video_items(pid, shot)
+    if not vids:
+        raise HTTPException(400, "add the video to remake under “The video to remake” first")
+    w, h = _canvas(db.params_of(project))
+    opts = _jl(shot["opts"], {})
+    with tempfile.TemporaryDirectory() as tmp:
+        src, frame = Path(tmp) / "src.mp4", Path(tmp) / "frame.png"
+        _remake_source(vids[0][1], w, h, REMAKE_PIN + 30, src)
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(src), "-vf",
+                        f"select=eq(n\\,{REMAKE_PIN})", "-frames:v", "1", str(frame)],
+                       check=True, timeout=120)
+        frame_id = _import_picture(user, "source-frame.png", frame.read_bytes())
+    sources = [images.source_from_image(user, frame_id)]
+    if shot["make"] == "recast":
+        parts = []
+        cast = [(c, db.one("SELECT * FROM prod_refs WHERE id=?", (c["ref"],)))
+                for c in (opts.get("cast") or [])[:3]]
+        cast = [(c, r) for c, r in cast if r and _identity_pictures(r)]
+        room = 3 // max(1, len(cast))           # 4 sources: the frame + these
+        for c, r in cast:
+            nums = []
+            for _, i in _identity_pictures(r)[:room]:
+                sources.append(images.source_from_image(user, i))
+                nums.append(str(len(sources)))
+            parts.append(f"{c.get('who') or 'a person'} is replaced by {r['name']}: exactly the "
+                         f"same face (face shape, eyes, nose, smile, skin, glasses and hair) as "
+                         f"in picture{'s' if len(nums) > 1 else ''} {' and '.join(nums)}")
+        if not parts:
+            raise HTTPException(400, "say who each character replaces (and give them a picture)")
+        text = ("The same photo as picture 1: same place, same poses and body positions, same "
+                "camera angle and framing, but " + "; ".join(parts) + ". Photorealistic.")
+    else:
+        if not (opts.get("change") or "").strip():
+            raise HTTPException(400, "say what changes in the video")
+        text = (f"The same photo as picture 1: same framing, same people in the same poses, "
+                f"but {opts['change']}.")
+    ids = []
+    for _ in range(max(1, min(4, count))):
+        ids.append(await images.create(user, text[:1900], sources, orientation="landscape"
+                                       if w > h else "portrait"))
+    return ids
 
 
 # ------------------------------------------------------------ reference videos
@@ -1668,7 +1948,7 @@ def _ref_video_items(pid: str, shot) -> list[tuple[str, Path]]:
     return out
 
 
-def _probe_seconds(path: Path) -> float:
+def _probe_media_seconds(path: Path) -> float:
     res = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
                           "format=duration", "-of", "csv=p=0", str(path)],
                          capture_output=True, text=True, timeout=60)
@@ -1705,7 +1985,7 @@ def add_ref_video(project, sid: str, from_shot: str | None = None,
     items = _jl(shot["ref_videos"], [])
     if len(items) >= MAX_REF_VIDEOS:
         raise HTTPException(409, f"a shot takes at most {MAX_REF_VIDEOS} reference videos")
-    if shot["make"] == "motion" and items:
+    if shot["make"] in ("motion", "recast", "restyle") and items:
         raise HTTPException(409, "a “Copy a dance or movement” shot copies one video; remove "
                                  "the current one first")
     if from_shot:
@@ -1726,7 +2006,7 @@ def add_ref_video(project, sid: str, from_shot: str | None = None,
         dest.mkdir(parents=True, exist_ok=True)
         path = dest / f"{db.new_id('rv')}{ext}"
         path.write_bytes(raw)
-        if _probe_seconds(path) <= 0.2:
+        if _probe_media_seconds(path) <= 0.2:
             path.unlink(missing_ok=True)
             raise HTTPException(400, "that file is not a video this studio can read")
         item = {"path": str(path), "name": Path(name).name[:80]}
@@ -1734,7 +2014,7 @@ def add_ref_video(project, sid: str, from_shot: str | None = None,
         raise HTTPException(400, "choose a shot's clip or upload a video")
     items.append(item)
     sets = {"ref_videos": json.dumps(items)}
-    if shot["make"] not in ("perform", "motion"):
+    if shot["make"] not in ("perform", "motion", "recast", "restyle"):
         sets["make"] = "perform"           # only these models read videos
     if shot["status"] == "done":
         sets["status"] = "stale"
@@ -1761,6 +2041,46 @@ def remove_ref_video(project, sid: str, index: int) -> None:
 def perform_payload(project_id: str, shot, image_path: str | None, params: dict) -> dict:
     """The WIS request for a performance or lip-sync shot (called by app/render.py)."""
     pid = project_id
+    if shot.get("make") in TALK_MAKES:
+        voices = _speaker_audio(pid, db.one("SELECT * FROM shots WHERE id=?", (shot["id"],)))
+        need = 2 if shot["make"] == "talk2" else 1
+        if not image_path or len(voices) < need:
+            raise RuntimeError(f"{shot.get('title') or 'this shot'} needs a picture and "
+                               f"{'both voices' if need == 2 else 'its voice or song'}")
+        opts = _jl(shot.get("opts"), {})
+        ctx = _shot_context(pid, shot)
+        default = ("Two people in the picture talk to each other, natural expressions."
+                   if need == 2 else "The person in the picture talks or sings, natural expression.")
+        return {"model": cfg.TALK_MODEL, "client_request_id": shot["id"],
+                "prompt": " ".join(x for x in (shot.get("prompt") or default, ctx) if x)[:3900],
+                "width": int(params.get("width", 480)), "height": int(params.get("height", 864)),
+                "image": {"b64": wis.b64(Path(image_path).read_bytes()), "mime": "image/png"},
+                "reference_audio": [{"b64": wis.b64(p.read_bytes()), "mime": _audio_mime(p)}
+                                    for p in voices[:need]],
+                **({"speaker_layout": opts.get("layout", "left_right")} if need == 2 else {})}
+    if shot.get("make") in REMAKE_MAKES:
+        vids = _ref_video_items(pid, shot)
+        if not image_path or not vids:
+            raise RuntimeError(f"{shot.get('title') or 'this shot'} needs the video to remake and "
+                               "its painted picture (🖼 Pictures)")
+        w, h = _canvas(params)
+        frames = _remake_frames(shot.get("seconds"))
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "src.mp4"
+            _remake_source(vids[0][1], w, h, frames, src)
+            video = wis.b64(src.read_bytes())
+        row = db.one("SELECT * FROM shots WHERE id=?", (shot["id"],))
+        extras = _recast_extras(pid, row) if shot["make"] == "recast" else []
+        refs = [Path(image_path)] + [Path(p) for _, _, p in extras]
+        out = {"model": cfg.RECAST_MODEL if shot["make"] == "recast" else cfg.RESTYLE_MODEL,
+               "client_request_id": shot["id"], "width": w, "height": h, "length": frames,
+               "prompt": remake_prompt(pid, row, frames)[:3990],
+               "reference_images": [{"b64": wis.b64(p.read_bytes()), "mime": "image/png"}
+                                    for p in refs],
+               "reference_videos": [{"b64": video, "mime": "video/mp4"}]}
+        if not extras:
+            out["pins"] = [REMAKE_PIN]  # Viggle: pin every picture or none
+        return out
     if shot.get("make") == "motion":
         # Wan Animate 2: the shot picture (who, and where) performs the first reference
         # video's movements, frame for frame (2026-11-24: "girl dancing like the man in
@@ -1980,7 +2300,8 @@ def _mix_film(project) -> Path:
     t = 0.0
     for i, s in enumerate(shots):
         # Lip-sync shots carry the dialogue line, which is already on its track.
-        if has_clip[i] and s["make"] == "perform" and not mix["shot"]["mute"] and \
+        if has_clip[i] and (s["make"] in REMAKE_MAKES or
+                            (s["make"] == "perform" and not mix["shot"]["mute"])) and \
                 _has_audio(s["clip_path"]):
             lab = f"sa{i}"
             filters.append(f"[{i}:a]atrim=duration={s['seconds']},asetpts=PTS-STARTPTS,"
@@ -2252,7 +2573,7 @@ def apply_changes(project, user: auth.User, changes: list, guard: bool = False) 
                 c.get("start_from", ""))
         elif op == "edit_shot":
             fields = {k: c.get(k) for k in ("title", "prompt", "seconds", "framing", "refs",
-                                            "make", "position", "start_from") if k in c}
+                                            "make", "position", "start_from", "opts") if k in c}
             if "scene_id" in c:
                 fields["scene_id"] = rid(c["scene_id"])
             if fields.get("refs") is not None:
@@ -2358,6 +2679,7 @@ def state(project, base: str) -> dict:
             "prompt": s["prompt"], "seconds": secs, "start": start, "framing": s["framing"],
             "make": s["make"] or "animate", "refs": _jl(s["refs"], []), "status": s["status"],
             "start_from": s["start_from"] or "",
+            "opts": _jl(s["opts"], {}),
             "ref_videos": [{"i": i, "label": lbl} for i, (lbl, _) in
                            enumerate(_ref_video_items(pid, s))],
             "auto": next((j["stage"] for j in params.get("_auto_shots") or [] if j["shot"] == s["id"]), None),
@@ -3110,6 +3432,19 @@ async def api_add_ref_video(pid: str, sid: str, request: Request):
         return add_ref_video(project, sid, upload=(getattr(up, "filename", "video.mp4"),
                                                    await up.read()))
     return add_ref_video(project, sid, from_shot=str((await _body(request)).get("from_shot") or ""))
+
+
+@router.post("/api/editor/{pid}/shots/{sid}/speaker-audio")
+async def api_speaker_audio(pid: str, sid: str, request: Request):
+    """multipart: file, index (0 = speaker 1 / the singer, 1 = speaker 2)."""
+    user = _user(request)
+    project = production(user, pid)
+    form = await request.form()
+    up = form.get("file")
+    if up is None or not hasattr(up, "read"):
+        raise HTTPException(400, "no file")
+    return set_speaker_audio(project, sid, 1 if str(form.get("index")) == "1" else 0,
+                             getattr(up, "filename", "voice.wav"), await up.read())
 
 
 @router.post("/api/editor/{pid}/shots/{sid}/ref-videos/{index}/delete")

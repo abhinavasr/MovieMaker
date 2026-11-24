@@ -638,11 +638,15 @@ audio, mix) is given to you in every turn; the person sees the same thing on scr
   last frame (taken when it renders: render the two together); `use_frame` puts any frame of a
   rendered clip (e.g. at: "last") into a shot as its picture, or into a new shot after it.
 - For every new or changed shot, fill `framing` (EWS|WS|MS|MCU|CU|ECU|OTS|POV|2S|INSERT) and
-  `make` (animate|perform|lipsync|motion) explicitly; a close-up is framing "CU", not just a
+  `make` (animate|perform|lipsync|motion|longtalk|talk2|recast|restyle) explicitly; a close-up is framing "CU", not just a
   word in the prompt. A shot where a character speaks on camera is `lipsync` (voiced first,
   video from the voice); `perform` only when the person asks for it. `motion` = the person in
   the shot's picture copies a reference video's movements exactly (a dance, a gesture): set
-  make "motion" and add the video with add_reference_video.
+  make "motion" and add the video with add_reference_video. `longtalk` = one person talks or
+  sings for up to a minute; `talk2` = two people in the picture talk (shot opts.speakers: a
+  timeline clip each); `recast` = characters replace the people in a video (opts.cast:
+  [{ref, who}]); `restyle` = change a video's look (opts.change). Their settings go in the
+  edit_shot `opts` object.
 - Only use project_id from the state. Keep replies short; the editor shows the details.
 """
 

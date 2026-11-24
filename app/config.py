@@ -112,6 +112,13 @@ class Config:
     # "Copy a video's motion" shots: the shot picture performs the reference video's moves.
     MOTION_MODEL = _s("STUDIO_MOTION_MODEL", "wan-animate-2")
     MOTION_MAX_SECONDS = 15
+    # Two people talk / talk or sing at length: InfiniteTalk (one picture + 1-2 voices).
+    TALK_MODEL = _s("STUDIO_TALK_MODEL", "infinitetalk")
+    TALK_MAX_SECONDS = 60
+    # Recast the people in a video / change its look: Viggle Remake (swap / edit).
+    RECAST_MODEL = _s("STUDIO_RECAST_MODEL", "viggle-remake-swap")
+    RESTYLE_MODEL = _s("STUDIO_RESTYLE_MODEL", "viggle-remake-edit")
+    REMAKE_MAX_SECONDS = 14
     LIPSYNC_MAX_SECONDS = _i("STUDIO_LIPSYNC_MAX_SECONDS", 30)   # measured: 30 s at 480x864 in 335 s
     # Per user, per rolling hour. The box has one GPU and a clip is ~2m15s of
     # it, so this is a real resource, not a formality.

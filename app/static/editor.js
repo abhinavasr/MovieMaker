@@ -16,11 +16,17 @@
     {make: "animate", icon: "🎞", title: "Bring the picture to life", what: "Camera moves and gentle action, starting exactly on the shot's picture. Silent; sound comes from the timeline.", model: "MiniMax H3 image-to-video"},
     {make: "perform", icon: "🧩", title: "Keep characters true to their references", what: "The video also sees the characters' and places' pictures, so faces and places stay consistent; the opening may shift a little. Its own sound is muted.", needs: "characters or places in the shot", model: "MiniMax H3 reference-to-video"},
     {make: "lipsync", icon: "👄", title: "Someone speaks or sings a line", what: "The line is voiced first in their voice; the video is made from that voice, mouth in sync.", needs: "a dialogue line under the shot", model: "Wan2.2-S2V"},
+    {make: "longtalk", icon: "🎤", title: "Talk or sing for longer", what: "One person talks or sings a long line or a whole song, mouth in sync, for up to a minute. The voice stays on the timeline.", needs: "the voice or song: a clip on the timeline, or upload it", model: "InfiniteTalk"},
+    {make: "talk2", icon: "🗣", title: "Two people talk to each other", what: "Two people in the picture talk, each in their own voice: speaker 1 first, then speaker 2.", needs: "a picture with both people, and each one's voice (a line on the timeline, or upload it)", model: "InfiniteTalk (two speakers)"},
     {make: "motion", icon: "🕺", title: "Copy a dance or movement from a video", what: "The person in the picture makes exactly the movements of a video you add, frame for frame. One person; silent.", needs: "the video to copy", model: "Wan Animate 2"},
+    {make: "recast", icon: "🔁", title: "Recast the people in a video", what: "Your characters replace the people in a video — one or several — keeping the video's motion, camera, place and sound. The shot's picture is a frame of the video redrawn with them (🖼 Pictures).", needs: "the video, and who each character replaces", model: "Viggle Remake"},
+    {make: "restyle", icon: "🎨", title: "Change a video's look", what: "Change outfits, objects, weather, light, setting or style; the motion, camera and sound stay. The shot's picture is a frame of the video with the change (🖼 Pictures).", needs: "the video, and what changes", model: "Viggle Remake (edit)"},
   ];
   const ICON = Object.fromEntries(USES.map((u) => [u.make, u.icon]));
   const MAKE = {animate: ["Bring to life", USES[0].what], perform: ["With references", USES[1].what],
-    lipsync: ["Speaks / sings", USES[2].what], motion: ["Copies motion", USES[3].what]};
+    lipsync: ["Speaks / sings", USES[2].what], longtalk: ["Talks / sings long", USES[3].what],
+    talk2: ["Two people talk", USES[4].what], motion: ["Copies motion", USES[5].what],
+    recast: ["Recast", USES[6].what], restyle: ["New look", USES[7].what]};
   const FRAMING = {"": "—", EWS: "Extreme wide", WS: "Wide", MS: "Medium", MCU: "Medium close-up", CU: "Close-up", ECU: "Extreme close-up", OTS: "Over the shoulder", POV: "Point of view", "2S": "Two-shot", INSERT: "Insert"};
 
   let S = null, sig = "", view = "storyboard", tab = "shot", scope = "shot";
@@ -792,6 +798,44 @@
       <div class="ed-group"><button class="ed-btn gold" id="sc-add">＋ Add a shot</button> <button class="ed-btn" id="sc-ask">✨ Plan the shots with the agent</button> <button class="ed-btn" id="sc-more">✎ Assets & lock</button></div>`;
   }
 
+  // The settings a use case needs, right under the picker.
+  function useOptions(sh) {
+    const o = sh.opts || {};
+    const audioClips = S.clips.filter((c) => ["dialogue", "music"].includes(c.track) && c.status === "ready");
+    const voiceRow = (i, label) => { const cur = (o.speakers || [])[i] || {};
+      return `<div class="ed-voice"><span class="l">${label}</span><select data-voice="${i}" aria-label="${label}"><option value="">— choose a line or song —</option>${audioClips.map((c) => `<option value="${c.id}" ${cur.clip === c.id ? "selected" : ""}>${c.track === "music" ? "🎵" : "🎙"} ${esc(c.name || c.text || "clip")}${c.duration_s ? ` · ${c.duration_s.toFixed(1)}s` : ""}</option>`).join("")}</select><button class="ed-btn sm" type="button" data-voiceup="${i}">⤒ Upload</button></div>`; };
+    if (sh.make === "talk2") return `<div class="ed-group ed-opts"><h3>The two voices</h3>
+      ${voiceRow(0, (o.layout === "right_left" ? "Right" : "Left") + " person · speaks first")}${voiceRow(1, (o.layout === "right_left" ? "Left" : "Right") + " person · answers")}
+      <label class="ed-check"><input type="checkbox" id="opt-layout" ${o.layout === "right_left" ? "checked" : ""}> The person on the right speaks first</label>
+      <div class="ed-note">An uploaded voice goes on the Dialogue lane under this shot, so you can see and mix it. The shot lasts as long as both voices.</div></div>`;
+    if (sh.make === "longtalk") return `<div class="ed-group ed-opts"><h3>The voice or song</h3>${voiceRow(0, "Voice")}
+      <div class="ed-note">Up to 60 s. An uploaded file goes on the Dialogue lane under this shot. The shot lasts as long as the voice.</div></div>`;
+    if (sh.make === "recast") { const chars = S.refs.filter((r) => r.kind === "character");
+      const cast = Object.fromEntries((o.cast || []).map((c) => [c.ref, c.who]));
+      return `<div class="ed-group ed-opts"><h3>Who replaces whom</h3>${chars.length ? chars.map((r) => `<label class="ed-cast"><span>${esc(r.name)} replaces</span><input data-cast="${r.id}" value="${esc(cast[r.id] || "")}" placeholder="e.g. the man in the grey jacket"></label>`).join("") : `<div class="ed-note">Add your characters under References first.</div>`}
+        <div class="ed-note">Up to 3 people. Leave a line empty to leave that character out. Their face close-up and own photos keep the face right.</div></div>`; }
+    if (sh.make === "restyle") return `<div class="ed-group ed-opts"><h3>What changes</h3><textarea id="opt-change" rows="3" placeholder="e.g. it is a rainy night with neon lights; everyone wears winter coats">${esc(o.change || "")}</textarea></div>`;
+    return "";
+  }
+  function bindUseOptions(sh, pane) {
+    const setOpts = (opts, msg) => change([{op: "edit_shot", shot_id: sh.id, opts}], msg);
+    pane.querySelectorAll("[data-voice]").forEach((sel) => sel.onchange = () => {
+      const sp = [...((sh.opts || {}).speakers || [])]; while (sp.length < 2) sp.push({});
+      sp[+sel.dataset.voice] = {...sp[+sel.dataset.voice], clip: sel.value || null};
+      setOpts({speakers: sh.make === "talk2" ? sp : sp.slice(0, 1)}, "Voice set");
+    });
+    pane.querySelectorAll("[data-voiceup]").forEach((b) => b.onclick = () => { const inp = document.createElement("input"); inp.type = "file"; inp.accept = "audio/*";
+      inp.onchange = async () => { if (!inp.files[0]) return; const fd = new FormData(); fd.append("file", inp.files[0]); fd.append("index", b.dataset.voiceup); toast("Uploading the voice…");
+        try { await api(`/api/editor/${PID}/shots/${sh.id}/speaker-audio`, fd); toast("Voice added — it's on the Dialogue lane under this shot"); load(true); } catch (e) { toast(e.message); } };
+      inp.click(); });
+    if ($("opt-layout")) $("opt-layout").onchange = () => setOpts({layout: $("opt-layout").checked ? "right_left" : "left_right"}, "Speaking order set");
+    pane.querySelectorAll("[data-cast]").forEach((inp) => inp.onchange = () => {
+      const cast = [...pane.querySelectorAll("[data-cast]")].filter((x) => x.value.trim()).map((x) => ({ref: x.dataset.cast, who: x.value.trim()}));
+      setOpts({cast}, "Cast set");
+    });
+    if ($("opt-change")) $("opt-change").onchange = () => setOpts({change: $("opt-change").value.trim()}, "Change set");
+  }
+
   function shotInspector(sh) {
     const cap = S.limits[sh.make];
     const refChips = S.refs.map((r) => `<div class="ed-chip ${sh.refs.includes(r.id) ? "" : "off"}" data-tref="${r.id}" title="${sh.refs.includes(r.id) ? "In this shot — click to remove" : "Click to add to this shot"}">
@@ -812,7 +856,7 @@
       <button class="ed-btn icon" id="mv-up" type="button" title="Move earlier (Alt+←)" aria-label="Move earlier">◀</button><span class="ed-note" style="padding-bottom:9px;white-space:nowrap">${idx + 1} of ${inScene.length}</span><button class="ed-btn icon" id="mv-down" type="button" title="Move later (Alt+→)" aria-label="Move later">▶</button></div>`;
     const picker = `<div class="ed-group"><h3>What happens in this shot?</h3><div class="ed-uses" role="radiogroup" aria-label="What happens in this shot">${USES.map((u) => `<button type="button" role="radio" aria-checked="${sh.make === u.make}" data-make="${u.make}" class="ed-use ${sh.make === u.make ? "on" : ""}"><span class="i">${u.icon}</span><span class="b"><b>${u.title}</b><small>${u.what}</small><small class="m">${u.needs ? "Needs " + u.needs + " · " : ""}${u.model}</small></span></button>`).join("")}</div>
         <div class="ed-note" style="margin-top:6px">${sh.make === "motion" ? (sh.ref_videos.length ? `<b>Copies ${esc(sh.ref_videos[0].label)}.</b>` : ` <b style='color:var(--warn)'>Add the video to copy under “Reference videos” below.</b>`) : ""}${sh.make === "perform" ? ` <b>${(sh.refs.length ? sh.refs.length + " reference(s) in this shot" : "No references in this shot")}</b>, plus its scene's.` : ""}${sh.make === "lipsync" ? (lines.length ? ` Under it: ${lines.map((l) => esc(l.name)).join("; ")}${lines.some((l) => !l.use_in_video) ? " (some not marked “use in video”)" : ""}.` : " <b style='color:var(--warn)'>No dialogue under this shot yet</b> — click the Dialogue lane under it.") : ""}</div></div>`;
-    return picker + silentCard + `<div class="ed-group">
+    return picker + useOptions(sh) + silentCard + `<div class="ed-group">
       <label class="ed-field">Title<input data-f="title" value="${esc(sh.title)}" maxlength="80" placeholder="Name this shot"></label></div>${moveRow}
       <div class="ed-row2">
         <label class="ed-field">Framing<select data-f="framing">${S.framings.map((f) => `<option value="${f}" ${f === sh.framing ? "selected" : ""}>${esc(f ? f + " · " + FRAMING[f] : "—")}</option>`).join("")}</select></label>
@@ -823,10 +867,10 @@
       <label class="ed-field">Prompt — what moves, how the camera moves<textarea data-f="prompt" rows="4" placeholder="What moves, and how the camera moves…">${esc(sh.prompt)}</textarea></label>
       <div class="ed-group"><h3>References <span class="c ed-note">${sh.refs.length} in this shot</span></h3>
         ${S.refs.length ? `<div class="ed-chips">${refChips}</div>` : `<div class="ed-note">No references yet. <a href="#" id="ins-addref" style="color:var(--gold)">Add a character or place</a> so it stays consistent across shots.</div>`}</div>
-      ${sh.make === "lipsync" ? "" : `<div class="ed-group"><h3>${sh.make === "motion" ? "The video to copy" : "Reference videos"} <span class="c ed-note">${sh.ref_videos.length} of ${sh.make === "motion" ? 1 : 3}</span></h3>
+      ${["lipsync", "talk2", "longtalk"].includes(sh.make) ? "" : `<div class="ed-group"><h3>${sh.make === "motion" ? "The video to copy" : ["recast", "restyle"].includes(sh.make) ? "The video to remake" : "Reference videos"} <span class="c ed-note">${sh.ref_videos.length} of ${["motion", "recast", "restyle"].includes(sh.make) ? 1 : 3}</span></h3>
         ${sh.ref_videos.length ? `<div class="ed-rvids">${sh.ref_videos.map((v) => `<div class="ed-rvid"><span>🎞 &lt;Video ${v.i + 1}&gt; ${esc(v.label)}</span><button type="button" data-rvdel="${v.i}" aria-label="Remove">✕</button></div>`).join("")}</div>` : ""}
-        ${sh.ref_videos.length < (sh.make === "motion" ? 1 : 3) ? `<div class="ed-rvadd"><select id="rv-shot" aria-label="Use a shot's clip"><option value="">＋ A shot's clip…</option>${S.shots.filter((x) => x.clip && x.id !== sh.id && !sh.ref_videos.some((v) => v.label.includes("“" + (x.title || "shot " + x.n) + "”"))).map((x) => `<option value="${x.id}">${x.n}. ${esc(x.title || "Shot " + x.n)}</option>`).join("")}</select><button class="ed-btn sm" id="rv-upload" type="button">⤒ Upload video</button></div>` : ""}
-        <div class="ed-note">${sh.make === "motion" ? "The person in the shot's picture makes these exact movements. Up to 15 s is used; a shorter video loops." : "A loose guide for motion and camera. For an exact copy of a dance or gesture, choose “🕺 Copy a dance or movement from a video” at the top. Up to 15 s is used."}</div></div>`}
+        ${sh.ref_videos.length < (["motion", "recast", "restyle"].includes(sh.make) ? 1 : 3) ? `<div class="ed-rvadd"><select id="rv-shot" aria-label="Use a shot's clip"><option value="">＋ A shot's clip…</option>${S.shots.filter((x) => x.clip && x.id !== sh.id && !sh.ref_videos.some((v) => v.label.includes("“" + (x.title || "shot " + x.n) + "”"))).map((x) => `<option value="${x.id}">${x.n}. ${esc(x.title || "Shot " + x.n)}</option>`).join("")}</select><button class="ed-btn sm" id="rv-upload" type="button">⤒ Upload video</button></div>` : ""}
+        <div class="ed-note">${["recast", "restyle"].includes(sh.make) ? "Its motion, camera, timing and sound are kept. 4–14 s is used; a shorter video loops." : sh.make === "motion" ? "The person in the shot's picture makes these exact movements. Up to 15 s is used; a shorter video loops." : "A loose guide for motion and camera. For an exact copy of a dance or gesture, choose “🕺 Copy a dance or movement from a video” at the top. Up to 15 s is used."}</div></div>`}
       <div class="ed-group"><h3>Generate</h3><div class="ed-gen">
         ${gen("image", "🖼", "Image", sh.picture ? "new picture options (keeps the references)" : "this shot has no picture yet")}
         ${gen("video", "🎬", "Video", sh.status === "done" ? "clip ready — render again" : sh.status === "stale" ? "changed since rendered" : "render this shot's clip")}
@@ -923,6 +967,7 @@
       el.addEventListener("blur", () => { if (saveT) { clearTimeout(saveT); saveT = null; const v = el.dataset.f === "seconds" ? +el.value : el.value; if (String(sh[el.dataset.f]) !== String(v)) change([{op: "edit_shot", shot_id: sh.id, [el.dataset.f]: v}]); } });
     });
     pane.querySelectorAll("[data-scene-f]").forEach((el) => el.addEventListener("change", () => change([{op: "edit_scene", scene_id: sc.id, [el.dataset.sceneF]: el.value}], "Saved")));
+    bindUseOptions(sh, pane);
     pane.querySelectorAll("[data-make]").forEach((b) => b.onclick = () => change([{op: "edit_shot", shot_id: sh.id, make: b.dataset.make}], `${MAKE[b.dataset.make][0]} shot`));
     pane.querySelectorAll("[data-tref]").forEach((b) => b.onclick = () => { const id = b.dataset.tref; const refs = sh.refs.includes(id) ? sh.refs.filter((x) => x !== id) : [...sh.refs, id]; change([{op: "edit_shot", shot_id: sh.id, refs}]); });
     pane.querySelectorAll("[data-gen]").forEach((b) => b.onclick = () => { genOpen = genOpen === b.dataset.gen ? null : b.dataset.gen; paintInspector(); });

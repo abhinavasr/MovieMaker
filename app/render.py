@@ -194,7 +194,7 @@ async def _render_shot(project_id: str, shot, assets: dict, params: dict,
                        report) -> Path:
     """One clip. Returns the file it was written to."""
     image_path = assets.get(shot["asset_id"])
-    if shot.get("make") in ("perform", "lipsync", "motion"):
+    if shot.get("make") in ("perform", "lipsync", "motion", "talk2", "longtalk", "recast", "restyle"):
         from app import editor
         payload = editor.perform_payload(project_id, shot, image_path, params)
         return await _submit_shot(project_id, shot, payload, report)
