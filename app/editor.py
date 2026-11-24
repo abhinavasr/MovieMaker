@@ -1935,7 +1935,7 @@ def state(project, base: str) -> dict:
         "message": project["message"], "error": project["error"],
         "scenes": scenes, "shots": shot_views, "refs": ref_views, "clips": clips,
         "mix": _mix(project), "duration": sum(s["seconds"] for s in shot_views),
-        "proposals": props, "export": export_view,
+        "proposals": props, "export": export_view, "ai": ai_activity(project),
         "agent_applies": bool(params.get("agent_applies")),
         "thread_id": thread["id"] if thread else None,
         "speakers": sorted(speech.SPEAKERS), "framings": list(FRAMINGS),
@@ -2875,7 +2875,114 @@ async def api_delete_production(pid: str, request: Request):
     return {"ok": True}
 
 
+def _pending_images(pid: str) -> list[str]:
+    """Pictures this production is waiting for: shot pictures being made, picture
+    options, references' main pictures and their views."""
+    ids = set()
+    project = db.one("SELECT params_json FROM projects WHERE id=?", (pid,))
+    params = json.loads(project["params_json"] or "{}") if project else {}
+    for j in params.get("_auto_shots") or []:
+        if j.get("image"):
+            ids.add(j["image"])
+    for p in db.query("SELECT options FROM proposals WHERE project_id=? AND status='open'", (pid,)):
+        ids.update(_jl(p["options"], []))
+    for r in db.query("SELECT image_id, angles FROM prod_refs WHERE project_id=?", (pid,)):
+        ids.update([r["image_id"]] + [v for v in _jl(r["angles"], {}).values() if isinstance(v, str)])
+    out = []
+    for i in ids:
+        row = db.one("SELECT status FROM images WHERE id=?", (i,)) if i else None
+        if row and row["status"] not in images.TERMINAL:
+            out.append(i)
+    return out
+
+
+def ai_activity(project) -> dict:
+    """What is running for this production right now (for the Stop button)."""
+    pid = project["id"]
+    params = db.params_of(project)
+    thread = db.one("SELECT status FROM agent_threads WHERE project_id=? ORDER BY created_at LIMIT 1",
+                    (pid,))
+    voicing = db.one("SELECT COUNT(*) AS n FROM prod_clips WHERE project_id=? AND (status='pending' "
+                     "OR (status='script' AND auto=1))", (pid,))["n"]
+    return {"rendering": project["status"] in ("running", "queued"),
+            "render_message": project["message"] if project["status"] in ("running", "queued") else "",
+            "pictures": len(_pending_images(pid)),
+            "shots_waiting": len(params.get("_auto_shots") or []) + len(params.get("_render_after") or []),
+            "voicing": voicing,
+            "agent": thread["status"] if thread and thread["status"] in
+            ("queued", "planning", "executing", "watching") else None,
+            "exporting": (params.get("_export") or {}).get("status") == "running"}
+
+
+async def stop_all(project, user: auth.User) -> dict:
+    """Stop every AI operation for this production. Finished work is kept."""
+    from app import agent
+    pid = project["id"]
+    done = {}
+    # the agent first, so it does not start anything new meanwhile
+    for t in db.query("SELECT id, status FROM agent_threads WHERE project_id=? AND status IN "
+                      "('queued','planning','executing','watching')", (pid,)):
+        agent.stop(t["id"])
+        done["agent"] = True
+    params = db.params_of(project)
+    done["shots_waiting"] = len(params.get("_auto_shots") or []) + len(params.get("_render_after") or [])
+    params["_auto_shots"], params["_render_after"] = [], []
+    db.set_params(pid, params)
+    for r in db.query("SELECT id FROM prod_refs WHERE project_id=? AND angles LIKE '%_auto%'", (pid,)):
+        db.run("UPDATE prod_refs SET angles='{}' WHERE id=?", (r["id"],))
+    # pictures: cancel in WIS too, so they stop using the card
+    pics = _pending_images(pid)
+    for i in pics:
+        row = db.one("SELECT wis_job_id FROM images WHERE id=?", (i,))
+        if row and row["wis_job_id"]:
+            try:
+                await wis.cancel_job(row["wis_job_id"], route="images")
+            except Exception:                                  # noqa: BLE001
+                pass
+        db.run("UPDATE images SET status='cancelled', error='stopped by you', updated_at=? WHERE id=?",
+               (db.now(), i))
+    done["pictures"] = len(pics)
+    # voicing: queued lines go back to being script lines (voice them later)
+    n_voice = 0
+    for c in db.query("SELECT id, source_id FROM prod_clips WHERE project_id=? AND status='pending' "
+                      "AND source_kind='speech'", (pid,)):
+        row = db.one("SELECT status FROM speech WHERE id=?", (c["source_id"],))
+        if row and row["status"] == "queued":
+            db.run("UPDATE speech SET status='failed', error='stopped by you', updated_at=? WHERE id=?",
+                   (db.now(), c["source_id"]))
+            db.run("UPDATE prod_clips SET status='script', source_id=NULL, auto=0, duration_s=NULL "
+                   "WHERE id=?", (c["id"],))
+            n_voice += 1
+    for c in db.query("SELECT id, source_id FROM prod_clips WHERE project_id=? AND status='pending' "
+                      "AND source_kind='music'", (pid,)):
+        row = db.one("SELECT status FROM music WHERE id=?", (c["source_id"],))
+        if row and row["status"] == "queued":
+            db.run("UPDATE music SET status='failed', error='stopped by you', updated_at=? WHERE id=?",
+                   (db.now(), c["source_id"]))
+            db.run("UPDATE prod_clips SET status='failed', error='stopped by you' WHERE id=?", (c["id"],))
+            n_voice += 1
+    n_voice += db.one("SELECT COUNT(*) AS n FROM prod_clips WHERE project_id=? AND status='script' "
+                      "AND auto=1", (pid,))["n"]
+    db.run("UPDATE prod_clips SET auto=0 WHERE project_id=? AND status='script'", (pid,))
+    done["voicing"] = n_voice
+    # the render, including its job in WIS
+    project = db.one("SELECT * FROM projects WHERE id=?", (pid,))
+    if service.is_rendering(project):
+        render.request_cancel(pid)
+        db.run("UPDATE shots SET status='pending' WHERE project_id=? AND status='running'", (pid,))
+        done["render"] = True
+    log.info("stop-all on %s by %s: %s", pid, user.username, done)
+    _touch(pid)
+    return done
+
+
 _thread_locks: dict[str, asyncio.Lock] = {}
+
+
+@router.post("/api/editor/{pid}/stop-all")
+async def api_stop_all(pid: str, request: Request):
+    user = _user(request)
+    return await stop_all(production(user, pid), user)
 
 
 @router.post("/api/editor/{pid}/agent")

@@ -51,7 +51,7 @@
       if (!sel.shot) sel.shot = sceneShots(sel.scene)[0]?.id || null;
       if (sel.clip && !clipById(sel.clip)) sel.clip = null;
       if (changed || force) paint();
-      else { paintRender(); if (S.proposals.some((p) => p.options.some((o) => !["succeeded", "failed", "gone"].includes(o.status)))) { if (!Player.playing && view !== "assets") paintStage(); if (!typing()) paintInspector(); } }
+      else { paintRender(); paintStopAI(); if (S.proposals.some((p) => p.options.some((o) => !["succeeded", "failed", "gone"].includes(o.status)))) { if (!Player.playing && view !== "assets") paintStage(); if (!typing()) paintInspector(); } }
     } catch (e) { console.warn(e); }
     const busy = S && (["running", "queued"].includes(S.status) || S.shots.some((s) => s.auto) || S.clips.some((c) => c.status === "pending" || (c.status === "script" && c.auto)) || S.export.status === "running" || S.proposals.some((p) => p.options.some((o) => !["succeeded", "failed", "gone"].includes(o.status))));
     timer = setTimeout(load, busy ? 2000 : 6000);
@@ -60,7 +60,7 @@
   function paint() {
     if (document.activeElement !== $("ptitle")) $("ptitle").value = S.title;
     if (document.activeElement !== $("aspect")) $("aspect").value = S.aspect;
-    paintStory(); paintScenes(); paintRefs(); paintRender();
+    paintStory(); paintScenes(); paintRefs(); paintRender(); paintStopAI();
     if (view === "assets") paintAssets();
     else { paintCrumbs(); if (!Player.playing) paintStage(); paintStrip(); }
     paintTimeline();
@@ -91,8 +91,9 @@
     const box = $("render-state");
     const done = S.shots.filter((s) => s.status === "done").length;
     if (["running", "queued"].includes(S.status)) {
-      box.innerHTML = `<span class="bar"><i style="width:${S.progress}%"></i></span><span title="${esc(S.message)}">${esc(S.status === "queued" ? "waiting for the GPU" : S.message || "rendering")}</span><button class="ed-btn sm ghost" id="cancel-render" type="button">Cancel</button>`;
-      $("cancel-render").onclick = async () => { await api(`/api/editor/${PID}/cancel`, {}); toast("Cancelling"); load(true); };
+      // One Stop button (top bar) stops this render and every other AI job; no separate
+      // render-only Cancel, which left pictures and voicing running.
+      box.innerHTML = `<span class="bar"><i style="width:${S.progress}%"></i></span><span title="${esc(S.message)}">${esc(S.status === "queued" ? "waiting for the GPU" : S.message || "rendering")}</span>`;
     } else box.innerHTML = S.shots.length ? `<span>${done}/${S.shots.length} shots rendered</span>` : "";
     $("render-missing").disabled = !S.shots.length || ["running", "queued"].includes(S.status) || done === S.shots.length;
     const ex = S.export;
@@ -111,6 +112,34 @@
     } catch (e) { toast(e.message); }
   }
   $("render-missing").onclick = () => renderShots(null, "the missing shots");
+  function aiSummary() {
+    const a = S.ai || {}, parts = [];
+    if (a.rendering) parts.push(`rendering (${a.render_message || "queued"})`);
+    if (a.pictures) parts.push(`${a.pictures} picture(s) being made`);
+    if (a.shots_waiting) parts.push(`${a.shots_waiting} shot(s) waiting to render`);
+    if (a.voicing) parts.push(`${a.voicing} line(s) being voiced`);
+    if (a.agent) parts.push(`the agent (${a.agent})`);
+    return parts;
+  }
+  function paintStopAI() {
+    const parts = aiSummary();
+    $("stop-ai").hidden = !parts.length;
+    $("stop-ai").title = parts.length ? "Stop: " + parts.join(" · ") : "";
+  }
+  $("stop-ai").onclick = () => {
+    const parts = aiSummary();
+    modal(`<h2>Stop all AI work in “${esc(S.title)}”?</h2>
+      <ul style="margin:0;padding-left:18px;font-size:.9rem">${parts.map((p) => `<li>${esc(p)}</li>`).join("")}</ul>
+      <p class="ed-note" style="font-size:.84rem">Stops it all now, including the GPU jobs. Finished pictures, clips and voices are kept; lines not yet voiced stay as script lines to voice later.</p>
+      <div class="acts"><button class="ed-btn ghost" data-act="close">Keep going</button><button class="ed-btn danger" data-act="stop">■ Stop everything</button></div>`,
+      async (act) => {
+        if (act !== "stop") return true;
+        try { const d = await api(`/api/editor/${PID}/stop-all`, {});
+          toast("Stopped" + [d.render && " the render", d.pictures && ` ${d.pictures} picture(s)`, d.voicing && ` ${d.voicing} line(s)`, d.agent && " the agent"].filter(Boolean).join(",")); load(true);
+        } catch (e) { toast(e.message); }
+        return true;
+      });
+  };
   $("export").onclick = () => openExport();
   $("del-prod").onclick = () => modal(`<h2>Delete “${esc(S.title)}”?</h2>
       <p style="font-size:.88rem">This deletes the whole production: ${S.scenes.length} scene(s), ${S.shots.length} shot(s) and their clips, the timeline audio, references, proposals, the exported film and the conversation with the assistant. It can't be undone.</p>
