@@ -333,6 +333,8 @@ def add_shot(project, scene_id: str, title: str = "", prompt: str = "", seconds=
            (shot_id, pid, base, (title or "")[:80], prompt or "", secs, scene_id,
             framing if framing in FRAMINGS else "", json.dumps(_valid_refs(pid, refs or [])),
             make if make in MAKES else "animate", start_from if start_from in START_FROM else ""))
+    if start_from in START_FROM and start_from:
+        db.run("UPDATE shots SET cont_checked=1 WHERE id=?", (shot_id,))
     _renumber(pid)
     _follow_shots(pid, before)
     if image_id and user is not None:
@@ -395,6 +397,7 @@ def edit_shot(project, shot_id: str, **fields) -> None:
         sets["refs"] = json.dumps(_valid_refs(pid, list(fields["refs"])))
     if fields.get("start_from") is not None and fields["start_from"] in START_FROM:
         sets["start_from"] = fields["start_from"]
+        sets["cont_checked"] = 1              # decided (by the person or the planner): final
     changes_clip = any(k in sets for k in ("prompt", "seconds", "make", "refs", "start_from"))
     if changes_clip and shot["status"] == "done":
         sets["status"] = "stale"      # the clip no longer matches; render it again
@@ -1141,6 +1144,60 @@ async def picture_options(project, user: auth.User, shot_id: str, prompt: str = 
     return ids
 
 
+CONTINUITY_RULES = """You are a film editor. For each shot after the first, decide whether it is
+ONE CONTINUOUS TAKE with the shot before it: the camera keeps rolling and the new shot starts
+exactly where the previous one ended (same place, same moment, the action carries straight on,
+so its first frame should be the previous shot's last frame). A cut to another angle, framing,
+character, place or moment is NOT continuous. Most shots are cuts; say continuous only when the
+story clearly flows on without a cut. Answer JSON only."""
+
+
+async def check_continuity(pid: str, scene_id: str) -> dict:
+    """Decide (on the CPU model) which shots of a scene continue the previous shot.
+    Shots the person or the planner already decided keep their choice."""
+    from app import agent
+    shots = [s for s in ordered_shots(pid) if s["scene_id"] == scene_id]
+    todo = [i for i, s in enumerate(shots) if i > 0 and not s["cont_checked"]]
+    if shots and not shots[0]["cont_checked"]:
+        db.run("UPDATE shots SET cont_checked=1, start_from='' WHERE id=?", (shots[0]["id"],))
+    if not todo:
+        return {}
+    scene = _scene(pid, scene_id)
+    lines = [f"{i + 1}. [{s['framing'] or '?'} {s['seconds']}s] {s['title']}: {(s['prompt'] or '')[:300]}"
+             for i, s in enumerate(shots)]
+    ask = (f"Scene: {scene['title']} — {scene['summary'][:600]}\nShots in order:\n" +
+           "\n".join(lines) + "\n\nFor shots " + ", ".join(str(i + 1) for i in todo) +
+           " answer {\"shots\": [{\"n\": <number>, \"continuous\": true|false, \"why\": \"...\"}]}")
+    decided = {}
+    try:
+        res = await agent._ollama("/api/chat", {
+            "model": cfg.EXECUTOR_MODEL, "stream": False, "think": False, "keep_alive": "2m",
+            "format": {"type": "object", "properties": {"shots": {"type": "array", "items": {
+                "type": "object", "properties": {"n": {"type": "integer"},
+                                                 "continuous": {"type": "boolean"},
+                                                 "why": {"type": "string"}},
+                "required": ["n", "continuous"]}}}, "required": ["shots"]},
+            "messages": [{"role": "system", "content": CONTINUITY_RULES},
+                         {"role": "user", "content": ask}],
+            "options": {"num_gpu": 0, "num_thread": cfg.EXECUTOR_THREADS, "num_ctx": 8192,
+                        "temperature": 0.1}}, timeout=300)
+        for d in (agent._parse_json((res.get("message") or {}).get("content", "")) or {}).get("shots", []):
+            n = int(d.get("n", 0)) - 1
+            if n in todo:
+                decided[shots[n]["id"]] = bool(d.get("continuous"))
+    except Exception as exc:                                   # noqa: BLE001
+        log.warning("continuity check for %s failed (%s); treating shots as cuts", scene_id, exc)
+    for i in todo:
+        sid = shots[i]["id"]
+        cont = decided.get(sid, False)
+        db.run("UPDATE shots SET cont_checked=1, start_from=? WHERE id=?",
+               ("prev_last" if cont else "", sid))
+    log.info("continuity %s: %s", scene["title"], {shots[i]["title"]: decided.get(shots[i]["id"], False)
+                                                   for i in todo})
+    _touch(pid)
+    return decided
+
+
 def prepare_render(project, user: auth.User, shot_ids: list[str] | None) -> tuple[list, list]:
     """Split a render request: shots that can render now, and shots without a picture.
     The latter go through the pipeline first (their references' pictures, then a picture
@@ -1152,11 +1209,18 @@ def prepare_render(project, user: auth.User, shot_ids: list[str] | None) -> tupl
                                                                      Path(s["clip_path"]).exists())]
     by_id = {s["id"]: s for s in shots}
     now, later = [], []
+    unchecked_scenes = {by_id[sid]["scene_id"] for sid in want if sid in by_id
+                        and not by_id[sid]["cont_checked"]}
     for sid in want:
         s = by_id.get(sid)
         if s is None:
             continue
-        (later if not s["asset_id"] and s["start_from"] != "prev_last" else now).append(sid)
+        # Continuity first: a shot in a scene not yet checked waits for the check; a
+        # shot without a picture (that is not continuous) waits for its picture.
+        if s["scene_id"] in unchecked_scenes or (not s["asset_id"] and s["start_from"] != "prev_last"):
+            later.append(sid)
+        else:
+            now.append(sid)
     # A continuous shot after a shot that waits for its picture has to wait with it.
     for sid in list(now):
         s = by_id[sid]
@@ -1167,7 +1231,7 @@ def prepare_render(project, user: auth.User, shot_ids: list[str] | None) -> tupl
     if later:
         params = db.params_of(project)
         jobs = [j for j in params.get("_auto_shots") or [] if j["shot"] not in later]
-        jobs += [{"shot": sid, "user": user.id, "stage": "refs", "at": db.now()} for sid in later]
+        jobs += [{"shot": sid, "user": user.id, "stage": "continuity", "at": db.now()} for sid in later]
         params["_auto_shots"] = jobs
         db.set_params(pid, params)
     return now, later
@@ -1183,6 +1247,7 @@ async def _run_auto_shots() -> None:
         if not jobs:
             continue
         keep, to_render = [], {}
+        checked: set = set()
         for j in jobs:
             shot = db.one("SELECT * FROM shots WHERE id=?", (j["shot"],))
             user = agent.load_user(j["user"])
@@ -1190,6 +1255,14 @@ async def _run_auto_shots() -> None:
                 continue
             proj = db.one("SELECT * FROM projects WHERE id=?", (pid,))
             try:
+                if j["stage"] == "continuity":
+                    if not shot["cont_checked"] and shot["scene_id"] not in checked:
+                        checked.add(shot["scene_id"])
+                        await check_continuity(pid, shot["scene_id"])
+                    shot = db.one("SELECT * FROM shots WHERE id=?", (j["shot"],))
+                    if shot["cont_checked"]:
+                        j["stage"] = "render" if shot["start_from"] == "prev_last" or \
+                            shot["asset_id"] else "refs"
                 if j["stage"] == "refs":
                     waiting = False
                     for rid in _jl(shot["refs"], []):
@@ -1225,6 +1298,35 @@ async def _run_auto_shots() -> None:
                 log.warning("auto shot %s: %s", j["shot"], exc.detail)
                 continue
             keep.append(j)
+        # A continuous shot renders with (or after) the shot it continues: hold it while
+        # that one is still waiting for its picture or its continuity check.
+        waiting = {j["shot"] for j in keep}
+        order = [s["id"] for s in ordered_shots(pid)]
+        for uid in list(to_render):
+            for sid in list(to_render[uid]):
+                row = db.one("SELECT start_from FROM shots WHERE id=?", (sid,))
+                i = order.index(sid) if sid in order else 0
+                prev = order[i - 1] if i > 0 else None
+                if row and row["start_from"] == "prev_last" and prev in waiting:
+                    to_render[uid].remove(sid)
+                    keep.append({"shot": sid, "user": uid, "stage": "render", "at": db.now()})
+                    waiting.add(sid)
+            # ...and if the shot it continues has no clip and is not in this batch, it
+            # renders first, in the same pass.
+            for sid in list(to_render[uid]):
+                row = db.one("SELECT start_from FROM shots WHERE id=?", (sid,))
+                i = order.index(sid) if sid in order else 0
+                while row and row["start_from"] == "prev_last" and i > 0:
+                    prev = db.one("SELECT id, clip_path, start_from FROM shots WHERE id=?",
+                                  (order[i - 1],))
+                    if prev is None or prev["id"] in to_render[uid] or \
+                            (prev["clip_path"] and Path(prev["clip_path"]).exists()):
+                        break
+                    to_render[uid].append(prev["id"])
+                    row, i = prev, i - 1
+            to_render[uid].sort(key=lambda x: order.index(x) if x in order else 0)
+            if not to_render[uid]:
+                del to_render[uid]
         proj = db.one("SELECT * FROM projects WHERE id=?", (pid,))
         for uid, ids in to_render.items():
             if service.is_rendering(proj):
@@ -2092,6 +2194,8 @@ def storyboard_changes(project_id: str, args: dict) -> list:
                     **{k: sh[k] for k in ("title", "framing", "seconds", "prompt", "make",
                                           "start_from") if sh.get(k) is not None},
                     "refs": [r for r in refs if r]}
+            if sh.get("continues") is not None and hi > 0:
+                shot["start_from"] = "prev_last" if sh.get("continues") else ""
             spoken = 0.0
             for d in lines:
                 who = str(d.get("speaker") or d.get("character") or "")
@@ -2359,7 +2463,8 @@ AGENT_TOOLS = {
                      "description": "characters/places: {name, kind, description, speaker}"},
             "scenes": {"type": "array", "items": {"type": "object"}, "description":
                        "in order: {title, summary, refs:[the characters/places in the scene, by "
-                       "name], shots:[{title, framing, seconds, prompt, make, refs, start_from, "
+                       "name], shots:[{title, framing, seconds, prompt, make, refs, "
+                       "continues (true when it is one continuous take with the shot before), "
                        "dialogue:[{speaker: character name or 'Narrator', text, delivery}]}]} "
                        "(shots inherit the scene's refs; every line of the script goes in "
                        "`dialogue` of the shot where it is said, word for word)"},

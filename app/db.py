@@ -430,7 +430,8 @@ def _migrate(conn) -> None:
               "shots": {"title": "TEXT NOT NULL DEFAULT ''", "scene_id": "TEXT",
                         "framing": "TEXT NOT NULL DEFAULT ''", "refs": "TEXT NOT NULL DEFAULT '[]'",
                         "make": "TEXT NOT NULL DEFAULT 'animate'",
-                        "start_from": "TEXT NOT NULL DEFAULT ''"},
+                        "start_from": "TEXT NOT NULL DEFAULT ''",
+                        "cont_checked": "INTEGER NOT NULL DEFAULT 0"},
               "speech": {"reference_text": "TEXT", "message": "TEXT",
                          "attempts": "INTEGER NOT NULL DEFAULT 0", "params": "TEXT"}}
     for table, columns in wanted.items():

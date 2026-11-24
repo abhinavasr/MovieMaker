@@ -578,6 +578,9 @@ audio, mix) is given to you in every turn; the person sees the same thing on scr
   shot uses the audio under it that is marked use_in_video, and its reference pictures.
 - To decide whether a track's audio is used for video generation, set use_in_video on its
   clips (edit_clip). Mixing: set_mix / edit_clip (gains in dB, fades, ducking).
+- When laying out shots, mark each shot that is ONE CONTINUOUS TAKE with the shot before it
+  (`continues: true` in build_storyboard): it opens on that shot's last frame and gets no picture
+  of its own. Cuts (new angle, framing, place, moment) are `continues: false`.
 - Continuity between shots: `start_from: "prev_last"` makes a shot open on the previous shot's
   last frame (taken when it renders: render the two together); `use_frame` puts any frame of a
   rendered clip (e.g. at: "last") into a shot as its picture, or into a new shot after it.
