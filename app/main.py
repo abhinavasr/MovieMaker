@@ -36,6 +36,10 @@ templates = Jinja2Templates(directory=str(BASE / "templates"))
 templates.env.globals["keep_a_copy"] = service.keep_a_copy_note
 
 
+from app.main_assets import ASSET_V  # noqa: E402
+templates.env.globals["asset_v"] = ASSET_V
+
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):

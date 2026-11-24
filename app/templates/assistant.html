@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}Assistant · Story Studio{% endblock %}
 {% block body %}
-<link rel="stylesheet" href="/static/agent.css">
+<link rel="stylesheet" href="/static/agent.css?v={{ asset_v }}">
 <div class="ws" id="ws">
   <!-- conversations -->
   <aside class="ws-rail ws-pane" id="rail" aria-label="Conversations">
@@ -110,7 +110,7 @@
 {% endblock %}
 
 {% block scripts %}
-<script src="/static/agent-chat.js"></script>
+<script src="/static/agent-chat.js?v={{ asset_v }}"></script>
 <script>
 AgentChat.mount({page: true});
 </script>

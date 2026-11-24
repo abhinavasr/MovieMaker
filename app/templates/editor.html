@@ -1,8 +1,8 @@
 {% extends "base.html" %}
 {% block title %}{{ project.title }} · Editor · Story Studio{% endblock %}
 {% block body %}
-<link rel="stylesheet" href="/static/agent.css">
-<link rel="stylesheet" href="/static/editor.css">
+<link rel="stylesheet" href="/static/agent.css?v={{ asset_v }}">
+<link rel="stylesheet" href="/static/editor.css?v={{ asset_v }}">
 <div class="ed" id="ed" data-pid="{{ project.id }}">
   <div class="ed-top">
     <button class="ed-btn ghost icon ed-only-narrow" id="open-left" type="button" aria-label="Scenes and references">☰</button>
@@ -105,6 +105,6 @@
 <div class="ed-toast" id="toast" hidden></div>
 {% endblock %}
 {% block scripts %}
-<script src="/static/agent-chat.js"></script>
-<script src="/static/editor.js"></script>
+<script src="/static/agent-chat.js?v={{ asset_v }}"></script>
+<script src="/static/editor.js?v={{ asset_v }}"></script>
 {% endblock %}

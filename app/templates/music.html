@@ -205,7 +205,7 @@
 {% endblock %}
 
 {% block scripts %}
-<script src="/static/media.js"></script>
+<script src="/static/media.js?v={{ asset_v }}"></script>
 <script>
 const projects = {{ projects | tojson }};
 const form = document.getElementById('music-form');
