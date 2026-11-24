@@ -24,6 +24,9 @@ services:
       - ./music-training:/training
       # The API spec served at /dev (read-only; rebuilt with docs/build_spec.py).
       - ./docs:/srv/docs:ro
+      # The Hindi preset voices' sample clips: a character with a Hindi-only voice speaks
+      # other languages by cloning that voice (app/editor.py add_dialogue).
+      - ./tts-models/voxcpm/presets:/srv/presets:ro
     ports:
       # Host-local only. The public front door is the tunnel below, so nothing
       # here needs to listen on the LAN.

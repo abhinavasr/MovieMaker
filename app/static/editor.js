@@ -213,6 +213,8 @@
   };
   $("open-left").onclick = () => ED.classList.toggle("left-open");
 
+  const HINDI = new Set(["Meera", "Anaya", "Arjun", "Vikram"]), BURMESE = new Set(["Thiri", "Nandar", "Kyaw", "U_Ba"]);
+  const voiceLabel = (s) => HINDI.has(s) ? `${s} — Hindi-native (other languages: her/his voice, cloned)` : BURMESE.has(s) ? `${s} — Burmese only` : s === "Vagdhenu" ? `${s} — Sanskrit chant` : s;
   function refModal(r) {
     const kinds = ["character", "location", "prop", "style", "voice"];
     let pickedImage = null, polling = null;
@@ -232,7 +234,7 @@
         </div>
         <div class="ed-refopts" id="rf-opts"></div></div>
       <input type="file" id="rf-picfile" accept="image/*" hidden>
-      <div class="ed-row2" id="rf-voicerow" ${voiced(r?.kind || "character") ? "" : "hidden"}><label class="ed-field">Preset voice<select id="rf-speaker"><option value="">— none —</option>${S.speakers.map((s) => `<option ${r?.speaker === s ? "selected" : ""}>${esc(s)}</option>`).join("")}</select></label>
+      <div class="ed-row2" id="rf-voicerow" ${voiced(r?.kind || "character") ? "" : "hidden"}><label class="ed-field">Preset voice<select id="rf-speaker"><option value="">— none —</option>${S.speakers.map((s) => `<option value="${esc(s)}" ${r?.speaker === s ? "selected" : ""}>${esc(voiceLabel(s))}</option>`).join("")}</select></label>
       <label class="ed-field">…or a voice sample to clone<div class="ed-drop" id="rf-voice">${r?.voice ? "🎙 sample saved — click to replace" : "5–30 s of clear speech"}</div><input type="file" id="rf-voicefile" accept="audio/*" hidden></label></div>
       ${r?.voice ? `<audio src="${esc(r.voice)}" controls style="width:100%"></audio>` : ""}
       <div class="acts">${r ? `<button class="ed-btn danger" data-act="delete" style="margin-right:auto">Delete</button>` : ""}<button class="ed-btn ghost" data-act="close">Cancel</button><button class="ed-btn gold" data-act="save">Save</button></div>`,
@@ -694,6 +696,7 @@
       <div class="opts">
         <button type="button" data-sound="line"><span>🎙</span>Give it a voice<small>the line is voiced first, then the video is generated lip-synced to it</small></button>
         <button type="button" data-sound="music"><span>🎵</span>Music or ambience<small>score or a soundscape under this scene, mixed in</small></button>
+        <button type="button" data-sound="model"><span>🎭</span>Let the video make its own sound<small>the video model invents the sound with the picture — not the character's voice</small></button>
       </div></div>` : "";
     const inScene = sceneShots(sh.scene_id), idx = inScene.findIndex((x) => x.id === sh.id);
     const moveRow = `<div class="ed-move"><label class="ed-field">Scene<select id="mv-scene">${S.scenes.map((sc, i) => `<option value="${sc.id}" ${sc.id === sh.scene_id ? "selected" : ""}>${i + 1}. ${esc(sc.title || "Untitled scene")}</option>`).join("")}</select></label>
@@ -811,6 +814,11 @@
     pane.querySelectorAll("[data-gen]").forEach((b) => b.onclick = () => { genOpen = genOpen === b.dataset.gen ? null : b.dataset.gen; paintInspector(); });
     pane.querySelectorAll("[data-sound]").forEach((b) => b.onclick = async () => {
       const k = b.dataset.sound;
+      if (k === "model") {
+        if (!confirm("The video model will invent this shot's sound (it won't be the character's own voice). Switch this shot to Performance and turn its sound on in the mix?")) return;
+        await change([{op: "edit_shot", shot_id: sh.id, make: "perform"}, {op: "set_mix", shot: {mute: false}}], "Performance shot — its own sound is on; render it to hear it");
+        genOpen = "video"; paintInspector(); return;
+      }
       genOpen = k === "line" ? "voice" : "music"; paintInspector();
       setTimeout(() => { const f = $("pane-shot").querySelector(".ed-genform"); f?.scrollIntoView({block: "center"}); $("g-text")?.focus(); }, 50);
     });

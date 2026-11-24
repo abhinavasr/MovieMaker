@@ -662,13 +662,34 @@ async def add_dialogue(project, user: auth.User, ref_id: str | None, text: str, 
     reference = Path(ref["voice_path"]).read_bytes() if ref and ref["voice_path"] and \
         Path(ref["voice_path"]).exists() else None
     voice = speaker or (ref["speaker"] if ref else None)
+    reference_text = None
+    if not reference and voice in speech.HINDI_SPEAKERS and not speech._has_hindi(text) and \
+            (language or "").lower() not in ("hindi", "hi"):
+        # A Hindi-only preset speaking another language: clone that preset's own clip, so the
+        # character keeps the same voice (2026-11-24: Pip = Anaya speaking English).
+        clip, said = _preset_clip(voice)
+        if clip:
+            reference, reference_text = clip, said
     ids = await speech.create(user, text, speaker=None if reference else voice,
-                              language=language, instruct=instruct or None,
-                              reference=reference)
+                              language=language, instruct=None if reference else (instruct or None),
+                              reference=reference, reference_text=reference_text)
     name = f"{ref['name']}: {text}" if ref else text
     return _insert_clip(pid, "dialogue", name=name, source_kind="speech", source_id=ids[0],
                         status="pending", start_s=start_s, use_in_video=use_in_video,
                         ref_id=ref_id, text=text)
+
+
+def _preset_clip(voice: str) -> tuple[bytes | None, str | None]:
+    base = Path("/srv/presets")
+    wav = base / f"{voice}.wav"
+    if not wav.exists():
+        return None, None
+    try:
+        meta = json.loads((base / "presets.json").read_text())
+    except (OSError, ValueError):
+        meta = {}
+    said = (meta.get("transcripts") or {}).get(voice) or meta.get("transcript")
+    return wav.read_bytes(), said
 
 
 async def add_music(project, user: auth.User, description: str, start_s: float = 0.0,
