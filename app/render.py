@@ -269,6 +269,7 @@ async def _render_storyboard(project_id: str, project, report) -> tuple[Path, bo
     clips: list[Path] = []
     total = len(ordered)
     missing = 0
+    prev_clip: Path | None = None       # the clip of the shot just before this one
     for i, shot in enumerate(ordered):
         _check_cancelled(project_id)
         kept = shot.get("clip_path")
@@ -276,10 +277,24 @@ async def _render_storyboard(project_id: str, project, report) -> tuple[Path, bo
             # Not asked for, and its clip is still on disk: two minutes of GPU
             # that do not need spending again.
             clips.append(Path(kept))
+            prev_clip = Path(kept)
             continue
         if partial and only is not None and shot["id"] not in only:
             missing += 1           # rendered later, when someone asks for it
+            prev_clip = None
             continue
+        if shot.get("start_from") == "prev_last":
+            # A continuous shot opens on the previous shot's final frame, taken
+            # now, so it follows whatever that shot became in this same render.
+            if prev_clip is None:
+                raise RuntimeError(f"{shot.get('title') or f'shot {i + 1}'} starts from the "
+                                   "previous shot's last frame, but that shot has no clip yet")
+            from app import editor
+            aid, apath = editor.chain_picture(project_id, shot["id"], prev_clip)
+            shot["asset_id"] = aid
+            assets[aid] = apath
+            if i > 0:
+                ordered[i - 1]["next_asset_id"] = aid
 
         async def report_shot(pct, msg, _i=i):
             # Shot progress mapped into the whole project's bar, so the number
@@ -288,6 +303,7 @@ async def _render_storyboard(project_id: str, project, report) -> tuple[Path, bo
 
         await report_shot(0, "submitting")
         clips.append(await _render_shot(project_id, shot, assets, params, report_shot))
+        prev_clip = clips[-1]
 
     _check_cancelled(project_id)
     if partial and missing:

@@ -188,7 +188,7 @@
   function paintStage(at) {
     const sh = at || shotById(sel.shot);
     const st = $("stage");
-    if (!sh) { st.innerHTML = `<div class="empty"><b>This scene has no shots yet</b>Add one below, or ask the agent to break the scene into shots.<br><br><button class="ed-btn gold" id="stage-add">＋ Add a shot</button> <button class="ed-btn" id="stage-ask">✨ Ask the agent</button></div>`;
+    if (!sh) { $("frametools").hidden = true; st.innerHTML = `<div class="empty"><b>This scene has no shots yet</b>Add one below, or ask the agent to break the scene into shots.<br><br><button class="ed-btn gold" id="stage-add">＋ Add a shot</button> <button class="ed-btn" id="stage-ask">✨ Ask the agent</button></div>`;
       $("stage-add").onclick = addShot; $("stage-ask").onclick = () => { setTab("agent"); scope = "story"; paintScope(); chatSend(`Break the scene "${sceneById(sel.scene)?.title}" into shots with framing, length and prompts.`); }; return; }
     if (preview && preview.shot === sh.id) {
       st.innerHTML = `<div class="ed-frame" id="frame"><img src="${esc(preview.url)}" alt="picture option"></div><span class="ed-badge">✦ Option ${preview.n} of ${preview.of} — preview</span>
@@ -209,6 +209,11 @@
     } else if (sh.picture) {
       st.innerHTML = `<div class="ed-frame" id="frame"><img id="stage-i" src="${esc(sh.picture)}" alt="" class="${Player.playing ? "kb" : ""}"></div>${mk}<span class="ed-badge r">${esc(state)}</span>`;
       fitFrame();
+    } else if (sh.start_from === "prev_last") {
+      const prev = S.shots[S.shots.findIndex((x) => x.id === sh.id) - 1];
+      st.innerHTML = `<div class="empty"><b>⛓ Opens on the last frame of the previous shot</b><span>Taken from “${esc(prev?.title || "the previous shot")}” when this shot renders, so the two flow as one take.</span>
+        <div class="row"><button class="ed-btn gold" id="stage-chain-render">▶ Render both</button></div></div>${mk}`;
+      $("stage-chain-render").onclick = async () => { try { await api(`/api/editor/${PID}/render`, {shot_ids: [prev?.id, sh.id].filter(Boolean)}); toast("Rendering both shots"); load(true); } catch (e) { toast(e.message); } };
     } else if (making) {
       const n = making.options.length, done = making.options.filter((o) => o.status === "succeeded").length;
       st.innerHTML = `<div class="gen"><span class="spin"></span><b>Making ${n} picture option${n === 1 ? "" : "s"}…</b><span class="ed-note">${done} of ${n} ready · ${Math.max(0, Math.round(S.now - making.created_at))} s · they appear in the panel on the right</span></div>${mk}`;
@@ -218,6 +223,7 @@
       $("stage-gen").onclick = () => { setTab("shot"); genOpen = "image"; paintInspector(); $("pane-shot").scrollTop = 0; setTimeout(() => $("g-prompt")?.focus(), 50); };
       $("stage-up").onclick = () => uploadPicture(sh.id);
     }
+    $("frametools").hidden = !(sh.clip && !preview);
     if (busy) st.insertAdjacentHTML("beforeend", `<div class="busy">⏳ ${esc(S.message || "rendering")}</div>`);
     if (sh.status === "failed" && sh.error) st.insertAdjacentHTML("beforeend", `<span class="ed-badge" style="top:auto;bottom:10px;color:var(--bad);max-width:90%">${esc(sh.error)}</span>`);
   }
@@ -236,6 +242,34 @@
       toast(r.rerender ? `Now ${v}. Rendered clips were made for the old shape and are marked to render again.` : `Now ${v}` + (v === "2.39:1" ? " — rendered 16:9, cropped to scope on export" : ""));
       load(true); } catch (e) { toast(e.message); }
   };
+  const curVideoTime = () => { const v = $("stage-v"); return v ? v.currentTime : 0; };
+  async function useFrame(at, to) {
+    const sh = shotById(sel.shot); if (!sh) return;
+    try {
+      const r = await api(`/api/editor/${PID}/shots/${sh.id}/frame`, {at, to});
+      toast(at === "last" ? "Last frame is now the next shot's picture" : `Frame at ${(+at).toFixed(2)} s used`);
+      await load(true); if (to !== "this") selectShot(r.shot_id);
+    } catch (e) { toast(e.message); }
+  }
+  $("fr-last").onclick = () => useFrame("last", "next");
+  $("fr-pick").onclick = () => {
+    const v = $("stage-v"); if (v) v.pause();
+    const t = curVideoTime(), sh = shotById(sel.shot);
+    const next = S.shots[S.shots.findIndex((x) => x.id === sh.id) + 1];
+    modal(`<h2>Use a frame of “${esc(sh.title || "this shot")}”</h2>
+      <div class="ed-seg" id="fr-which"><button type="button" class="on" data-w="now">The frame showing now · ${t.toFixed(2)} s</button><button type="button" data-w="last">The last frame</button></div>
+      <div class="ed-note">Scrub the video under the stage to pick a moment; the frame is taken from the rendered clip at full size.</div>
+      <div class="acts" style="justify-content:stretch;display:grid;grid-template-columns:1fr 1fr 1fr">
+        <button class="ed-btn ${next ? "gold" : ""}" data-act="next" ${next ? "" : "disabled"} title="${next ? esc(next.title || "next shot") : "there is no next shot"}">As the next shot's picture</button>
+        <button class="ed-btn ${next ? "" : "gold"}" data-act="new">As a new shot after this</button>
+        <button class="ed-btn" data-act="this">As this shot's picture</button></div>
+      <div class="acts"><button class="ed-btn ghost" data-act="close">Cancel</button></div>`, async (act) => {
+      if (act === "close") return true;
+      const which = document.querySelector("#fr-which .on")?.dataset.w;
+      await useFrame(which === "last" ? "last" : t, act); return true;
+    });
+    document.querySelectorAll("#fr-which button").forEach((b) => b.onclick = () => document.querySelectorAll("#fr-which button").forEach((x) => x.classList.toggle("on", x === b)));
+  };
   function uploadPicture(shotId) {
     const inp = document.createElement("input"); inp.type = "file"; inp.accept = "image/*";
     inp.onchange = async () => { const fd = new FormData(); fd.append("file", inp.files[0]);
@@ -246,7 +280,8 @@
   function paintStrip() {
     const shots = sceneShots(sel.scene);
     $("strip").innerHTML = shots.map((s, i) => `<div class="ed-card ${s.id === sel.shot ? "on" : ""}" data-shot="${s.id}" draggable="true">
-      <div class="th">${s.picture ? `<img src="${esc(s.picture)}" alt="" loading="lazy">` : "no picture"}</div>
+      ${s.start_from === "prev_last" ? `<span class="chain" title="Opens on the previous shot's last frame">⛓ continues</span>` : ""}
+      <div class="th">${s.picture ? `<img src="${esc(s.picture)}" alt="" loading="lazy">` : s.start_from === "prev_last" ? "⛓ continues" : "no picture"}</div>
       <span class="mk">${{animate: "🎞", perform: "🎭", lipsync: "👄"}[s.make]} ${s.seconds}s</span>
       ${(() => { const b = {done: "● clip", running: "⏳ rendering", failed: "failed", stale: "changed"}[s.status] || (s.status === "pending" && ["running", "queued"].includes(S.status) ? "queued" : ""); return b ? `<span class="st ${esc(s.status)}">${b}</span>` : ""; })()}
       <div class="m"><b>Shot ${String(i + 1).padStart(2, "0")}</b><span class="f">${esc(s.framing)}</span><span>${esc(s.title || s.prompt || "untitled")}</span></div></div>`).join("")
@@ -485,6 +520,9 @@
       <div class="ed-row2">
         <label class="ed-field">Framing<select data-f="framing">${S.framings.map((f) => `<option value="${f}" ${f === sh.framing ? "selected" : ""}>${esc(f ? f + " · " + FRAMING[f] : "—")}</option>`).join("")}</select></label>
         <label class="ed-field">Seconds (max ${cap})<input data-f="seconds" type="number" min="1" max="${cap}" value="${sh.seconds}"></label></div>
+      <label class="ed-field">Opening picture<select data-f="start_from">
+        <option value="" ${sh.start_from ? "" : "selected"}>Its own picture</option>
+        <option value="prev_last" ${sh.start_from === "prev_last" ? "selected" : ""} ${S.shots[0]?.id === sh.id ? "disabled" : ""}>Last frame of the previous shot (continuous)</option></select></label>
       <div class="ed-group"><div class="ed-seg" role="radiogroup" aria-label="How the clip is made">${Object.keys(MAKE).map((m) => `<button type="button" data-make="${m}" class="${sh.make === m ? "on" : ""}">${{animate: "🎞", perform: "🎭", lipsync: "👄"}[m]} ${MAKE[m][0]}</button>`).join("")}</div>
         <div class="ed-note" style="margin-top:5px">${MAKE[sh.make][1]}${sh.make !== "animate" ? (lines.length ? ` Under it: ${lines.map((l) => esc(l.name)).join("; ")}${lines.some((l) => !l.use_in_video) ? " (some not marked “use in video”)" : ""}.` : " <b style='color:var(--warn)'>No dialogue under this shot yet</b> — click the Dialogue lane under it.") : ""}</div></div>
       <label class="ed-field">Prompt — what moves, how the camera moves<textarea data-f="prompt" rows="4" placeholder="What moves, and how the camera moves…">${esc(sh.prompt)}</textarea></label>
@@ -505,7 +543,7 @@
       <div class="ed-row2"><label class="ed-field">Options<select id="g-count"><option>1</option><option selected>2</option><option>3</option><option>4</option></select></label>
       <label class="ed-field">Model<select id="g-model"><option value="">FLUX.2 klein (default)</option><option value="qwen-image-2.1-turbo">Qwen-Image turbo</option><option value="qwen-image-2.1">Qwen-Image</option></select></label></div>
       <div class="acts"><button class="ed-btn gold" data-go="image">Generate options</button></div><div class="ed-note">Uses this shot's references as source pictures. You pick one under Proposed changes.</div></div>`;
-    if (key === "video") return `<div class="ed-genform"><div class="ed-note">${MAKE[sh.make][0]} · ${sh.seconds} s · about ${Math.ceil(sh.seconds / 5 * 2)} min of GPU. ${!sh.picture ? "<b style='color:var(--warn)'>Needs a picture first.</b>" : ""} ${!sh.prompt ? "<b style='color:var(--warn)'>Needs a prompt.</b>" : ""}</div>
+    if (key === "video") return `<div class="ed-genform"><div class="ed-note">${MAKE[sh.make][0]} · ${sh.seconds} s · about ${Math.ceil(sh.seconds / 5 * 2)} min of GPU. ${!sh.picture && sh.start_from !== "prev_last" ? "<b style='color:var(--warn)'>Needs a picture first.</b>" : sh.start_from === "prev_last" ? "Opens on the previous shot's last frame." : ""} ${!sh.prompt ? "<b style='color:var(--warn)'>Needs a prompt.</b>" : ""}</div>
       <div class="acts"><button class="ed-btn" data-go="video-scene">Render whole scene</button><button class="ed-btn gold" data-go="video">Render this shot</button></div></div>`;
     if (key === "voice") { const sp = S.refs.filter((r) => ["character", "voice"].includes(r.kind) && sh.refs.includes(r.id)).concat(S.refs.filter((r) => ["character", "voice"].includes(r.kind) && !sh.refs.includes(r.id)));
       return `<div class="ed-genform"><label class="ed-field">Who<select id="g-ref">${sp.map((r) => `<option value="${r.id}">${esc(r.name)}</option>`).join("")}<option value="">Narrator / default voice</option></select></label>

@@ -532,6 +532,9 @@ audio, mix) is given to you in every turn; the person sees the same thing on scr
   shot uses the audio under it that is marked use_in_video, and its reference pictures.
 - To decide whether a track's audio is used for video generation, set use_in_video on its
   clips (edit_clip). Mixing: set_mix / edit_clip (gains in dB, fades, ducking).
+- Continuity between shots: `start_from: "prev_last"` makes a shot open on the previous shot's
+  last frame (taken when it renders: render the two together); `use_frame` puts any frame of a
+  rendered clip (e.g. at: "last") into a shot as its picture, or into a new shot after it.
 - For every new or changed shot, fill `framing` (EWS|WS|MS|MCU|CU|ECU|OTS|POV|2S|INSERT) and
   `make` (animate|perform|lipsync) explicitly; a close-up is framing "CU", not just a word in
   the prompt. Lines of dialogue a character speaks on camera suit `lipsync`.

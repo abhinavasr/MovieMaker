@@ -128,6 +128,9 @@ body:has(.ed) footer, body:has(.ed) .retention-note { display: none; }
 .ed-player input[type=range] { flex: 1; min-width: 80px; accent-color: var(--gold); }
 .ed-player #ptime { white-space: nowrap; }
 .ed-player select { flex: none; width: auto; }
+.ed-frametools { display: inline-flex; gap: 6px; flex: none; }
+.ed-frametools[hidden] { display: none; }
+.ed-card .chain { position: absolute; left: 6px; bottom: 30px; z-index: 2; color: var(--gold); font-size: .68rem; background: rgba(0,0,0,.72); padding: 1px 6px; border-radius: 5px; }
 
 /* shot strip */
 .ed-strip { display: flex; gap: 8px; padding: 6px 16px 8px; overflow-x: auto; flex: none; scrollbar-width: thin; }

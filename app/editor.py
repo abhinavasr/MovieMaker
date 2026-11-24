@@ -293,7 +293,7 @@ def delete_scene(project, scene_id: str) -> None:
 def add_shot(project, scene_id: str, title: str = "", prompt: str = "", seconds=None,
              framing: str = "", refs: list | None = None, make: str = "animate",
              position: int | None = None, image_id: str | None = None,
-             user: auth.User | None = None) -> str:
+             user: auth.User | None = None, start_from: str = "") -> str:
     pid = project["id"]
     _not_rendering(project)
     _scene(pid, scene_id)
@@ -310,10 +310,10 @@ def add_shot(project, scene_id: str, title: str = "", prompt: str = "", seconds=
     secs = _clamp(make, seconds if seconds is not None else
                   params.get("seconds", cfg.DEFAULT_SHOT_SECONDS))
     db.run("INSERT INTO shots (id, project_id, idx, title, prompt, seconds, scene_id, framing, "
-           "refs, make) VALUES (?,?,?,?,?,?,?,?,?,?)",
+           "refs, make, start_from) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
            (shot_id, pid, base, (title or "")[:80], prompt or "", secs, scene_id,
             framing if framing in FRAMINGS else "", json.dumps(_valid_refs(pid, refs or [])),
-            make if make in MAKES else "animate"))
+            make if make in MAKES else "animate", start_from if start_from in START_FROM else ""))
     _renumber(pid)
     if image_id and user is not None:
         set_picture(project, user, shot_id, image_id)
@@ -356,7 +356,9 @@ def edit_shot(project, shot_id: str, **fields) -> None:
         sets["framing"] = fields["framing"]
     if fields.get("refs") is not None:
         sets["refs"] = json.dumps(_valid_refs(pid, list(fields["refs"])))
-    changes_clip = any(k in sets for k in ("prompt", "seconds", "make", "refs"))
+    if fields.get("start_from") is not None and fields["start_from"] in START_FROM:
+        sets["start_from"] = fields["start_from"]
+    changes_clip = any(k in sets for k in ("prompt", "seconds", "make", "refs", "start_from"))
     if changes_clip and shot["status"] == "done":
         sets["status"] = "stale"      # the clip no longer matches; render it again
     if fields.get("scene_id") is not None or fields.get("position") is not None:
@@ -390,6 +392,79 @@ def delete_shot(project, shot_id: str) -> None:
     _delete_shot_row(project["id"], shot_id)
     _renumber(project["id"])
     _touch(project["id"])
+
+
+START_FROM = ("", "prev_last")
+
+
+def grab_frame(clip_path: str, at) -> bytes:
+    """One frame of a clip as PNG. `at` = seconds, or "last" for the final frame."""
+    if not clip_path or not Path(clip_path).exists():
+        raise HTTPException(400, "this shot has no rendered clip to take a frame from")
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "frame.png"
+        if at in (None, "", "last"):
+            # Decode the last half second, overwriting one image each frame: what is
+            # left on disk is the clip's final frame.
+            cmd = ["ffmpeg", "-v", "error", "-y", "-sseof", "-0.5", "-i", clip_path,
+                   "-update", "1", str(out)]
+        else:
+            try:
+                t = max(0.0, float(at))
+            except (TypeError, ValueError):
+                raise HTTPException(400, "at must be a number of seconds or \"last\"")
+            cmd = ["ffmpeg", "-v", "error", "-y", "-ss", f"{t:.3f}", "-i", clip_path,
+                   "-frames:v", "1", str(out)]
+        proc = subprocess.run(cmd, capture_output=True, timeout=60)
+        data = out.read_bytes() if out.exists() else b""
+    if proc.returncode != 0 or not data:
+        raise HTTPException(400, "could not read a frame from the clip")
+    return data
+
+
+def chain_picture(project_id: str, shot_id: str, prev_clip) -> tuple[str, str]:
+    """For render.py: a continuous shot's opening picture = the previous clip's last frame."""
+    raw = grab_frame(str(prev_clip), "last")
+    shot = db.one("SELECT asset_id FROM shots WHERE id=?", (shot_id,))
+    asset_id = _store_picture(project_id, f"last-frame-of-previous.png", raw)
+    db.run("UPDATE shots SET asset_id=? WHERE id=?", (asset_id, shot_id))
+    if shot:
+        _drop_unused_asset(project_id, shot["asset_id"])
+    row = db.one("SELECT path FROM assets WHERE id=?", (asset_id,))
+    return asset_id, row["path"]
+
+
+def use_frame(project, user: auth.User, from_shot: str, at="last", to_shot: str | None = None,
+              key_new: bool = False) -> dict:
+    """Take a frame of one shot's clip as a shot's picture: `to_shot` (an id), the next
+    shot (None), or a new shot right after the source (key_new)."""
+    pid = project["id"]
+    src = _shot(pid, from_shot)
+    raw = grab_frame(src["clip_path"], at)
+    label = "last frame" if at in (None, "", "last") else f"{float(at):.2f}s"
+    image_id = _import_picture(user, f"{src['title'] or 'shot'} — {label}.png", raw)
+    if key_new:
+        order = [s["id"] for s in db.query("SELECT id FROM shots WHERE scene_id=? ORDER BY idx",
+                                           (src["scene_id"],))]
+        target = add_shot(project, src["scene_id"], title=f"{src['title'] or 'Shot'} (cont.)",
+                          seconds=src["seconds"], framing=src["framing"], refs=_jl(src["refs"], []),
+                          make="animate", position=order.index(src["id"]) + 1)
+    elif to_shot:
+        target = _shot(pid, to_shot)["id"]
+    else:
+        shots = ordered_shots(pid)
+        i = [s["id"] for s in shots].index(src["id"])
+        if i + 1 >= len(shots):
+            order = [s["id"] for s in db.query("SELECT id FROM shots WHERE scene_id=? ORDER BY idx",
+                                               (src["scene_id"],))]
+            target = add_shot(project, src["scene_id"], title=f"{src['title'] or 'Shot'} (cont.)",
+                              seconds=src["seconds"], framing=src["framing"],
+                              refs=_jl(src["refs"], []), position=order.index(src["id"]) + 1)
+        else:
+            target = shots[i + 1]["id"]
+    set_picture(db.one("SELECT * FROM projects WHERE id=?", (pid,)), user, target, image_id)
+    return {"image_id": image_id, "shot_id": target}
 
 
 def set_picture(project, user: auth.User, shot_id: str, image_id: str) -> None:
@@ -767,13 +842,24 @@ def render_shots(project, user: auth.User, shot_ids: list[str] | None = None):
     if not want:
         raise HTTPException(400, "every shot already has a clip; pick the ones to redo")
     by_id = {s["id"]: s for s in shots}
+    pos = {s["id"]: i for i, s in enumerate(shots)}
     problems = []
     for sid in want:
         s = by_id.get(sid)
         if s is None:
             raise HTTPException(404, f"no shot {sid}")
         label = s["title"] or f"shot {s['idx'] + 1}"
-        if not s["asset_id"]:
+        if s["start_from"] == "prev_last":
+            prev = shots[pos[sid] - 1] if pos[sid] > 0 else None
+            if prev is None:
+                problems.append(f"{label} starts from the previous shot's last frame, but it is "
+                                "the first shot")
+            elif prev["id"] not in want and not (prev["clip_path"] and
+                                                 Path(prev["clip_path"]).exists()):
+                problems.append(f"{label} starts from the last frame of "
+                                f"{prev['title'] or 'the previous shot'}, which isn't rendered — "
+                                "render both")
+        elif not s["asset_id"]:
             problems.append(f"{label} has no picture")
         if not (s["prompt"] or "").strip():
             problems.append(f"{label} has no prompt (what moves, how the camera moves)")
@@ -1111,7 +1197,7 @@ def propose(project, title: str, summary: str, changes: list, shot_id: str | Non
 
 
 OPS = {"set_story", "add_scene", "edit_scene", "delete_scene", "add_shot", "edit_shot",
-       "delete_shot", "edit_clip", "delete_clip", "set_mix", "add_ref", "edit_ref"}
+       "delete_shot", "edit_clip", "delete_clip", "set_mix", "add_ref", "edit_ref", "use_frame"}
 
 
 def _validate_changes(changes) -> None:
@@ -1172,10 +1258,11 @@ def apply_changes(project, user: auth.User, changes: list) -> dict:
             keys[c.get("key") or f"shot{len(keys)}"] = add_shot(
                 project, rid(c.get("scene_id")), c.get("title", ""), c.get("prompt", ""),
                 c.get("seconds"), c.get("framing", ""), [rid(r) for r in c.get("refs") or []],
-                c.get("make", "animate"), c.get("position"), c.get("image_id"), user)
+                c.get("make", "animate"), c.get("position"), c.get("image_id"), user,
+                c.get("start_from", ""))
         elif op == "edit_shot":
             fields = {k: c.get(k) for k in ("title", "prompt", "seconds", "framing", "refs",
-                                            "make", "position") if k in c}
+                                            "make", "position", "start_from") if k in c}
             if "scene_id" in c:
                 fields["scene_id"] = rid(c["scene_id"])
             if fields.get("refs") is not None:
@@ -1185,6 +1272,12 @@ def apply_changes(project, user: auth.User, changes: list) -> dict:
                 set_picture(project, user, rid(c["shot_id"]), c["image_id"])
         elif op == "delete_shot":
             delete_shot(project, rid(c.get("shot_id")))
+        elif op == "use_frame":
+            r = use_frame(project, user, rid(c.get("from_shot_id")), c.get("at", "last"),
+                          rid(c.get("to_shot_id")) if c.get("to_shot_id") else None,
+                          key_new=bool(c.get("new_shot")))
+            if c.get("key"):
+                keys[c["key"]] = r["shot_id"]
         elif op == "edit_clip":
             edit_clip(project, c.get("clip_id"), **{k: c.get(k) for k in (
                 "start_s", "trim_s", "duration_s", "gain_db", "fade_in", "fade_out",
@@ -1259,6 +1352,7 @@ def state(project, base: str) -> dict:
             "id": s["id"], "n": n + 1, "scene_id": s["scene_id"], "title": s["title"],
             "prompt": s["prompt"], "seconds": secs, "start": start, "framing": s["framing"],
             "make": s["make"] or "animate", "refs": _jl(s["refs"], []), "status": s["status"],
+            "start_from": s["start_from"] or "",
             "error": s["error"], "picture": _asset_url(pid, s["asset_id"]),
             "clip": f"/api/editor/{pid}/shots/{s['id']}/clip?v={int(Path(s['clip_path']).stat().st_mtime)}"
                     if clip_ok else None})
@@ -1348,7 +1442,7 @@ def describe_for_agent(project_id: str, focus_shot: str | None = None) -> str:
             lines.append(
                 f"  shot_id={s['id']} #{s['idx'] + 1} \"{s['title']}\" {s['framing'] or ''} "
                 f"{s['make']} {secs:g}s @{start:g}s status={s['status']}"
-                f"{' picture' if s['asset_id'] else ' NO PICTURE'} "
+                f"{' starts-from-previous-last-frame' if s['start_from'] == 'prev_last' else (' picture' if s['asset_id'] else ' NO PICTURE')} "
                 f"refs=[{', '.join(names.get(r, r) for r in _jl(s['refs'], []))}] "
                 f"prompt: {(s['prompt'] or '')[:220]}{mark}")
     clips = db.query("SELECT * FROM prod_clips WHERE project_id=? ORDER BY track, start_s",
@@ -1486,8 +1580,12 @@ AGENT_TOOLS = {
                         "(9:16|16:9|1:1|2.39:1)}; "
                         "add_scene{key,title,summary,position}; edit_scene{scene_id,title,"
                         "summary,position}; delete_scene{scene_id}; add_shot{key,scene_id,title,"
-                        "prompt,seconds,framing,refs,make,position,image_id}; edit_shot{shot_id,"
-                        "title,prompt,seconds,framing,refs,make,scene_id,position,image_id}; "
+                        "prompt,seconds,framing,refs,make,position,image_id,start_from}; edit_shot{"
+                        "shot_id,title,prompt,seconds,framing,refs,make,scene_id,position,image_id,"
+                        "start_from}; use_frame{from_shot_id,at:'last'|seconds,to_shot_id or "
+                        "new_shot:true,key} (a frame of a rendered clip becomes a shot's picture); "
+                        "start_from: '' (own picture) | 'prev_last' (opens on the previous shot's "
+                        "last frame, taken when it renders: a continuous take); "
                         "delete_shot{shot_id}; edit_clip{clip_id,start_s,trim_s,duration_s,"
                         "gain_db,fade_in,fade_out,use_in_video,track}; delete_clip{clip_id}; "
                         "set_mix{dialogue:{gain_db,mute},ambience:{..},music:{..},shot:{..},"
@@ -1665,6 +1763,18 @@ def _import_picture(user: auth.User, name: str, raw: bytes) -> str:
            (image_id, user.id, f"uploaded: {name}"[:200], 0, "succeeded", 100, str(path), w, h,
             "upload", now, now))
     return image_id
+
+
+@router.post("/api/editor/{pid}/shots/{sid}/frame")
+async def api_frame(pid: str, sid: str, request: Request):
+    """{at: seconds|"last", to: "next"|"new"|"this"|<shot id>} -- a frame becomes a picture."""
+    user = _user(request)
+    project = production(user, pid)
+    b = await _body(request)
+    to = str(b.get("to") or "next")
+    return await asyncio.to_thread(
+        use_frame, project, user, sid, b.get("at", "last"),
+        sid if to == "this" else (None if to in ("next", "new") else to), key_new=(to == "new"))
 
 
 @router.post("/api/editor/{pid}/shots/{sid}/options")

@@ -44,6 +44,10 @@
             <button class="ed-btn icon" id="play" type="button" aria-label="Play">▶</button>
             <span id="ptime">0:00.0 / 0:00.0</span>
             <input type="range" id="scrub" min="0" max="1000" value="0" aria-label="Position">
+            <span class="ed-frametools" id="frametools" hidden>
+              <button class="ed-btn sm" id="fr-last" type="button" title="Take this shot's last frame as the opening picture of the next shot">⏭ Last frame → next shot</button>
+              <button class="ed-btn sm" id="fr-pick" type="button" title="Use the frame showing now, or the last frame, as a shot's picture">📸 Use a frame…</button>
+            </span>
             <select id="prange" class="ed-btn sm" aria-label="Play range"><option value="shot">This shot</option><option value="scene" selected>This scene</option><option value="film">Whole film</option></select>
           </div>
         </div>
