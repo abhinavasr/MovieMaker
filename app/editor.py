@@ -2126,6 +2126,38 @@ async def _t_music(user, args, base):
     return {"clip_id": cid, "status": "composing (about a minute when the GPU is free)"}
 
 
+def _t_lines(user, args, base):
+    """The script's lines onto existing shots, voiced automatically."""
+    project = _agent_project(user, args)
+    pid = project["id"]
+    names = {r["name"].lower(): r["id"] for r in
+             db.query("SELECT id, name FROM prod_refs WHERE project_id=?", (pid,))}
+    added, problems, lipsync = 0, [], set()
+    for i, ln in enumerate(args.get("lines") or []):
+        if not isinstance(ln, dict) or not (ln.get("text") or ln.get("line")) or not ln.get("shot_id"):
+            problems.append(f"line {i + 1}: needs shot_id and text")
+            continue
+        who = str(ln.get("speaker") or ln.get("character") or "").strip()
+        ref_id = names.get(who.lower())
+        try:
+            shot = _shot(pid, str(ln["shot_id"]))
+            add_script(db.one("SELECT * FROM projects WHERE id=?", (pid,)), shot["id"],
+                       str(ln.get("text") or ln.get("line")), ref_id,
+                       str(ln.get("delivery") or ln.get("instruct") or ""),
+                       auto=args.get("voice", True) is not False)
+            added += 1
+            # A character in the shot speaking on camera: its video is made from the voice.
+            if ref_id and ref_id in _jl(shot["refs"], []) and shot["make"] != "lipsync":
+                lipsync.add(shot["id"])
+        except HTTPException as exc:
+            problems.append(f"line {i + 1}: {exc.detail}")
+    for sid in lipsync:
+        edit_shot(db.one("SELECT * FROM projects WHERE id=?", (pid,)), sid, make="lipsync")
+    return {"added": added, "lipsync_shots": len(lipsync),
+            "status": "voicing in each character's voice" if args.get("voice", True) is not False
+            else "added as script lines", **({"skipped": problems[:10]} if problems else {})}
+
+
 def _t_apply(user, args, base):
     project = _agent_project(user, args)
     want = args.get("proposal_ids") or []
@@ -2180,7 +2212,8 @@ AGENT_TOOLS = {
                         "gain_db,fade_in,fade_out,use_in_video,track}; delete_clip{clip_id}; "
                         "set_mix{dialogue:{gain_db,mute},ambience:{..},music:{..},shot:{..},"
                         "duck_db}; add_ref{key,kind,name,description,image_id,speaker}; "
-                        "edit_ref{ref_id,...}. A new scene/shot/ref may be given a `key` and "
+                        "edit_ref{ref_id,...}; add_line{shot_id,ref_id,text,instruct}. A new "
+                        "scene/shot/ref may be given a `key` and "
                         "used as its id later in the same list. framing: " +
                         "|".join(f for f in FRAMINGS if f) + ". make: animate (silent, picture "
                         "is the first frame) | perform (ref2v: picture + reference pictures + "
@@ -2260,6 +2293,17 @@ AGENT_TOOLS = {
             "instrumental": {"type": "boolean"}, "lyrics": {"type": "string"},
             "use_in_video": {"type": "boolean", "description": "default false"}}},
         "description": "Score or ambience/sound effects on the timeline (ACE-Step)."},
+    "add_lines": {
+        "handler": _t_lines, "light": True,
+        "schema": {"type": "object", "required": ["project_id", "lines"], "properties": {
+            **_PID,
+            "lines": {"type": "array", "items": {"type": "object"}, "description":
+                      "in order: {shot_id, speaker: character name or 'Narrator', text (word for "
+                      "word from the story), delivery}"},
+            "voice": {"type": "boolean", "description": "default true: voice them now"}}},
+        "description": "Put the script's dialogue and narration under the shots where they are "
+                       "said (shots that already exist). They are voiced automatically in each "
+                       "character's voice; shots where a character speaks become lipsync."},
     "apply_proposals": {
         "handler": _t_apply, "light": True,
         "schema": {"type": "object", "required": ["project_id"], "properties": {

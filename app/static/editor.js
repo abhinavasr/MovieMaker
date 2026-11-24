@@ -136,10 +136,15 @@
   function paintStory() {
     const tx = (S.story || "").replace(/[#*_`>]/g, "").trim();
     $("story-card").innerHTML = (tx ? `<div class="tx">${esc(tx.slice(0, 600))}</div>` : `<div>No story yet. Write or paste it here, or develop it with the agent.</div>`)
-      + `<div class="acts"><button class="ed-btn sm" id="story-build" type="button">✨ Build scenes & shots from the story</button></div>`;
+      + `<div class="acts"><button class="ed-btn sm" id="story-build" type="button">✨ Build scenes & shots from the story</button>${S.shots.length && !S.clips.some((c) => c.track === "dialogue") ? `<button class="ed-btn sm gold" id="story-lines" type="button">📝 Add the script's lines</button>` : ""}</div>`;
+    if ($("story-lines")) $("story-lines").onclick = (e) => { e.stopPropagation(); addLines(); };
     $("story-build").onclick = (e) => { e.stopPropagation(); if (!tx) { storyModal(); return; }
       scope = "story"; paintScope(); setTab("agent");
       chatSend("Define all the scenes and their shots."); };
+  }
+  function addLines() {
+    scope = "story"; paintScope(); setTab("agent");
+    chatSend("Add the script's lines: put every line of dialogue and narration from the story under the shot where it is said, word for word, with its speaker (add_lines), and voice them.");
   }
   function storyModal() {
     modal(`<h2>Story</h2><p class="ed-note">The agent reads this for every scene and shot. Markdown is fine.</p>
@@ -503,7 +508,10 @@
     TL.pps = w / Math.max(1, b - a);
     const x = (t) => (t - a) * TL.pps;
     const unvoiced = S.clips.filter((c) => c.status === "script" && !c.auto).length;
-    $("tl-time").innerHTML = `${fmt(a)} – ${fmt(b)}` + (unvoiced ? ` <button class="ed-btn sm gold" id="voice-all" type="button">🎙 Voice all ${unvoiced} line(s)</button>` : "");
+    const noLines = S.shots.length && !S.clips.some((c) => c.track === "dialogue");
+    $("tl-time").innerHTML = `${fmt(a)} – ${fmt(b)}` + (unvoiced ? ` <button class="ed-btn sm gold" id="voice-all" type="button">🎙 Voice all ${unvoiced} line(s)</button>`
+      : noLines && S.story ? ` <button class="ed-btn sm gold" id="add-lines" type="button" title="The agent puts the story's dialogue and narration under the shots, then they are voiced">📝 Add the script's lines</button>` : "");
+    if ($("add-lines")) $("add-lines").onclick = addLines;
     if ($("voice-all")) $("voice-all").onclick = async () => { const d = await api(`/api/editor/${PID}/voice-all`, {}); toast(`Voicing ${d.queued} line(s) in the characters' voices`); load(true); };
     const step = [0.5, 1, 2, 5, 10, 15, 30, 60, 120].find((s) => s * TL.pps >= 46) || 300;
     let ticks = ""; for (let t = Math.ceil(a / step) * step; t <= b; t += step) ticks += `<span class="ed-tick" style="left:${x(t)}px">${fmt(t).replace(/\.0$/, "")}</span>`;

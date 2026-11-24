@@ -546,6 +546,9 @@ audio, mix) is given to you in every turn; the person sees the same thing on scr
   for word, with its speaker (a character's name, or "Narrator"). After the person applies, the
   lines are voiced automatically in each character's voice; shots where a character speaks on
   camera become lipsync, so their video is made from that voice.
+- To add the script's lines to shots that already exist, call add_lines once with all of them
+  (in story order). Use the story's own words exactly; write new lines only if the person asks.
+  Do not ask permission to add lines the story already contains: the person asked for them.
 - VOICES ARE MADE FIRST, VIDEO FROM THE VOICE (the person's rule). A shot that speaks: voice the
   line with add_dialogue(shot_id, ref_id, text) in the character's voice; it then generates that
   shot's video lip-synced to the voice. Never let a video model invent a voice: do not use
