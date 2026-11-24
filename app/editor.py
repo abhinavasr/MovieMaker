@@ -1198,6 +1198,37 @@ async def check_continuity(pid: str, scene_id: str) -> dict:
     return decided
 
 
+def _shot_ref_ids(shot) -> list[str]:
+    """A shot's references plus its scene's (the scene group's cast and set)."""
+    ids = list(_jl(shot["refs"], []))
+    if shot["scene_id"]:
+        row = db.one("SELECT refs FROM prod_scenes WHERE id=?", (shot["scene_id"],))
+        ids += [r for r in _jl(row["refs"] if row else "[]", []) if r not in ids]
+    return ids
+
+
+def _ref_ready(r) -> str:
+    """'ready', 'waiting' (being drawn), or 'missing' (picture or views not made)."""
+    if not r["image_id"]:
+        return "missing"
+    row = db.one("SELECT status FROM images WHERE id=?", (r["image_id"],))
+    if row is None or row["status"] in ("failed", "cancelled"):
+        return "missing"
+    if row["status"] != "succeeded":
+        return "waiting"
+    views = views_for(r["kind"])
+    if not views:
+        return "ready"
+    angles = _jl(r["angles"], {})
+    if angles.get("_auto"):
+        return "waiting"
+    states = [(db.one("SELECT status FROM images WHERE id=?", (angles[k],)) or {"status": "failed"})["status"]
+              if isinstance(angles.get(k), str) else "missing" for k in views]
+    if any(st not in images.TERMINAL and st != "missing" for st in states):
+        return "waiting"
+    return "ready" if all(st == "succeeded" for st in states) else "missing"
+
+
 def prepare_render(project, user: auth.User, shot_ids: list[str] | None) -> tuple[list, list]:
     """Split a render request: shots that can render now, and shots without a picture.
     The latter go through the pipeline first (their references' pictures, then a picture
@@ -1211,13 +1242,22 @@ def prepare_render(project, user: auth.User, shot_ids: list[str] | None) -> tupl
     now, later = [], []
     unchecked_scenes = {by_id[sid]["scene_id"] for sid in want if sid in by_id
                         and not by_id[sid]["cont_checked"]}
+    refs_needed = set()
+    for sid in want:
+        if sid in by_id:
+            for rid in _shot_ref_ids(by_id[sid]):
+                r = db.one("SELECT * FROM prod_refs WHERE id=?", (rid,))
+                if r is not None and _ref_ready(r) != "ready":
+                    refs_needed.add(sid)
+                    break
     for sid in want:
         s = by_id.get(sid)
         if s is None:
             continue
         # Continuity first: a shot in a scene not yet checked waits for the check; a
         # shot without a picture (that is not continuous) waits for its picture.
-        if s["scene_id"] in unchecked_scenes or (not s["asset_id"] and s["start_from"] != "prev_last"):
+        if s["scene_id"] in unchecked_scenes or sid in refs_needed or \
+                (not s["asset_id"] and s["start_from"] != "prev_last"):
             later.append(sid)
         else:
             now.append(sid)
@@ -1248,6 +1288,7 @@ async def _run_auto_shots() -> None:
             continue
         keep, to_render = [], {}
         checked: set = set()
+        drawing: set = set()
         for j in jobs:
             shot = db.one("SELECT * FROM shots WHERE id=?", (j["shot"],))
             user = agent.load_user(j["user"])
@@ -1261,24 +1302,34 @@ async def _run_auto_shots() -> None:
                         await check_continuity(pid, shot["scene_id"])
                     shot = db.one("SELECT * FROM shots WHERE id=?", (j["shot"],))
                     if shot["cont_checked"]:
-                        j["stage"] = "render" if shot["start_from"] == "prev_last" or \
-                            shot["asset_id"] else "refs"
+                        j["stage"] = "refs"
+                if j["stage"] == "refs" and shot["start_from"] == "prev_last":
+                    j["stage"] = "render"         # opens on the previous clip: no picture needed
                 if j["stage"] == "refs":
+                    # Every character and place in the shot or its scene: main picture,
+                    # then its views, before the shot's own picture or render.
                     waiting = False
-                    for rid in _jl(shot["refs"], []):
+                    for rid in _shot_ref_ids(shot):
                         r = db.one("SELECT * FROM prod_refs WHERE id=?", (rid,))
                         if r is None:
                             continue
-                        if not r["image_id"]:
-                            await make_ref_picture(proj, user, rid)
-                            waiting = True
+                        state = _ref_ready(r)
+                        if state == "ready":
+                            continue
+                        waiting = True
+                        if not r["image_id"] or (db.one("SELECT status FROM images WHERE id=?",
+                                                        (r["image_id"],)) or {"status": "failed"})[
+                                "status"] in ("failed", "cancelled"):
+                            if rid not in drawing:
+                                drawing.add(rid)
+                                await make_ref_picture(proj, user, rid)   # views follow
+                        elif _img_done(r["image_id"]) and state == "missing" and rid not in drawing:
+                            drawing.add(rid)
+                            _want_angles(pid, rid)                        # views only
                         elif not _img_done(r["image_id"]):
-                            row = db.one("SELECT status FROM images WHERE id=?", (r["image_id"],))
-                            if row and row["status"] not in images.TERMINAL:
-                                await images.refresh(r["image_id"])
-                                waiting = True
+                            await images.refresh(r["image_id"])
                     if not waiting:
-                        j["stage"] = "picture"
+                        j["stage"] = "picture" if not shot["asset_id"] else "render"
                 if j["stage"] == "picture" and shot["asset_id"]:
                     j["stage"] = "render"                  # the person set one meanwhile
                 elif j["stage"] == "picture" and not j.get("image"):
