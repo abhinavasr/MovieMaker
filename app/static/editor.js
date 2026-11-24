@@ -58,7 +58,7 @@
   function paint() {
     if (document.activeElement !== $("ptitle")) $("ptitle").value = S.title;
     if (document.activeElement !== $("aspect")) $("aspect").value = S.aspect;
-    paintScenes(); paintRefs(); paintRender();
+    paintStory(); paintScenes(); paintRefs(); paintRender();
     if (view === "assets") paintAssets();
     else { paintCrumbs(); if (!Player.playing) paintStage(); paintStrip(); }
     paintTimeline();
@@ -99,19 +99,31 @@
   }
   $("render-missing").onclick = async () => { try { await api(`/api/editor/${PID}/render`, {}); toast("Rendering the missing shots"); load(true); } catch (e) { toast(e.message); } };
   $("export").onclick = () => openExport();
+  $("del-prod").onclick = () => modal(`<h2>Delete “${esc(S.title)}”?</h2>
+      <p style="font-size:.88rem">This deletes the whole production: ${S.scenes.length} scene(s), ${S.shots.length} shot(s) and their clips, the timeline audio, references, proposals, the exported film and the conversation with the assistant. It can't be undone.</p>
+      <p class="ed-note">Pictures, speech and songs also saved in your studio library stay there.</p>
+      <label class="ed-field">Type the title to confirm<input id="del-confirm" autocomplete="off" placeholder="${esc(S.title)}"></label>
+      <div class="acts"><button class="ed-btn ghost" data-act="close">Cancel</button><button class="ed-btn danger" data-act="delete" id="del-go" disabled>Delete production</button></div>`,
+    async (act) => {
+      if (act !== "delete") return true;
+      try { await api(`/api/editor/${PID}/delete`, {}); location.href = "/edit"; } catch (e) { toast(e.message); return false; }
+      return true;
+    });
+  document.addEventListener("input", (e) => { if (e.target.id === "del-confirm") $("del-go").disabled = e.target.value.trim() !== S.title.trim(); });
 
   function openExport() {
     const ex = S.export;
-    const missing = S.shots.filter((s) => s.status !== "done");
-    modal(`<h2>Export the film</h2>
-      <p class="ed-note" style="font-size:.84rem">Joins every shot's clip in order and mixes the timeline over it: dialogue, ambience and music with their gains, fades and ducking, plus the performance shots' own sound. Mixing runs on the CPU and takes a minute or two.</p>
-      ${missing.length ? `<p style="color:var(--warn);font-size:.84rem">${missing.length} shot(s) don't have an up-to-date clip yet: ${missing.slice(0, 6).map((s) => esc(s.title || "shot " + s.n)).join(", ")}${missing.length > 6 ? "…" : ""}.</p>` : ""}
+    const missing = S.shots.filter((s) => !s.clip), stale = S.shots.filter((s) => s.clip && s.status !== "done");
+    modal(`<h2>Mix &amp; export</h2>
+      <p class="ed-note" style="font-size:.84rem">Joins the shots' clips as they are and mixes the timeline over them — dialogue, ambience and music with their levels, fades and ducking. It never runs the video model: a quick mix on the CPU.</p>
+      ${missing.length ? `<p style="color:var(--warn);font-size:.84rem">${missing.length} shot(s) have no clip yet and appear as their still picture: ${missing.slice(0, 6).map((s) => esc(s.title || "shot " + s.n)).join(", ")}${missing.length > 6 ? "…" : ""}.</p>` : ""}
+      ${stale.length ? `<p class="ed-note" style="font-size:.8rem">${stale.length} shot(s) changed since they were rendered; their existing clip is used.</p>` : ""}
       ${ex.status === "failed" ? `<p style="color:var(--bad);font-size:.84rem">Last export failed: ${esc(ex.error)}</p>` : ""}
       ${ex.url ? `<video src="${esc(ex.url)}" controls style="width:100%;max-height:50dvh;border-radius:10px;background:#000"></video>` : ""}
       <div class="acts">
         ${ex.url ? `<a class="ed-btn" href="${esc(ex.url)}&download=1">⤓ Download MP4</a>` : ""}
-        ${missing.length ? `<button class="ed-btn" data-act="render">▶ Render ${missing.length} missing</button>` : ""}
-        <button class="ed-btn gold" data-act="mix" ${missing.length ? "disabled" : ""}>${ex.url ? "Mix again" : "Mix the film"}</button>
+        ${missing.length ? `<button class="ed-btn" data-act="render" title="Uses the video model">▶ Render ${missing.length} missing first</button>` : ""}
+        <button class="ed-btn gold" data-act="mix">${ex.url ? "Mix again" : "Mix the film"}</button>
         <button class="ed-btn ghost" data-act="close">Close</button></div>`, async (act) => {
       if (act === "render") { try { await api(`/api/editor/${PID}/render`, {}); toast("Rendering the missing shots"); } catch (e) { toast(e.message); } return true; }
       if (act === "mix") { try { await api(`/api/editor/${PID}/export`, {}); toast("Mixing the film…"); load(true); } catch (e) { toast(e.message); } return true; }
@@ -119,16 +131,63 @@
     });
   }
 
+  // ------------------------------------------------------------------ left: story
+  function paintStory() {
+    const tx = (S.story || "").replace(/[#*_`>]/g, "").trim();
+    $("story-card").innerHTML = (tx ? `<div class="tx">${esc(tx.slice(0, 600))}</div>` : `<div>No story yet. Write or paste it here, or develop it with the agent.</div>`)
+      + `<div class="acts"><button class="ed-btn sm" id="story-build" type="button">✨ Build scenes & shots from the story</button></div>`;
+    $("story-build").onclick = (e) => { e.stopPropagation(); if (!tx) { storyModal(); return; }
+      scope = "story"; paintScope(); setTab("agent");
+      chatSend("Define all the scenes and their shots."); };
+  }
+  function storyModal() {
+    modal(`<h2>Story</h2><p class="ed-note">The agent reads this for every scene and shot. Markdown is fine.</p>
+      <textarea class="ed-story" id="story-text" placeholder="The story, the characters, the scenes…">${esc(S.story || "")}</textarea>
+      <div class="acts"><button class="ed-btn ghost" data-act="close">Cancel</button><button class="ed-btn" data-act="save">Save</button><button class="ed-btn gold" data-act="build">Save & build scenes and shots</button></div>`,
+      async (act) => {
+        if (act === "close") return true;
+        try { await api(`/api/editor/${PID}/settings`, {story: $("story-text").value}); toast("Story saved"); load(true); } catch (e) { toast(e.message); return false; }
+        if (act === "build") { scope = "story"; paintScope(); setTab("agent"); chatSend("Define all the scenes and their shots."); }
+        return true;
+      });
+    $("sheet").classList.add("wide"); setTimeout(() => $("story-text")?.focus(), 30);
+  }
+  $("story-edit").onclick = storyModal;
+  $("story-card").addEventListener("click", (e) => { if (!e.target.closest("button")) storyModal(); });
+
   // ------------------------------------------------------------------ left: scenes + refs
   function paintScenes() {
     $("scenes").innerHTML = S.scenes.map((sc, i) => {
       const shots = sceneShots(sc.id), pic = shots.find((s) => s.picture)?.picture;
+      const cast = (sc.refs || []).map(refById).filter(Boolean);
       return `<div class="ed-scene ${sc.id === sel.scene ? "on" : ""}" data-scene="${sc.id}" draggable="true">
         <div class="th">${pic ? `<img src="${esc(pic)}" alt="" loading="lazy">` : "🎞"}</div>
-        <div><b>${String(i + 1).padStart(2, "0")}. ${esc(sc.title || "Untitled scene")}</b><span>${shots.length} shot${shots.length === 1 ? "" : "s"} · ${Math.round(shots.reduce((a, s) => a + s.seconds, 0))} s</span></div></div>`;
+        <div><b>${String(i + 1).padStart(2, "0")}. ${esc(sc.title || "Untitled scene")}</b><span>${shots.length} shot${shots.length === 1 ? "" : "s"} · ${Math.round(shots.reduce((a, s) => a + s.seconds, 0))} s ${sc.locked ? '<span class="lock" title="Locked: the agent won\'t change it">🔒</span>' : ""}</span>
+          ${cast.length ? `<div class="cast">${cast.slice(0, 8).map((r) => r.image ? `<img src="${esc(r.image)}" alt="${esc(r.name)}" title="${esc(r.name)}">` : `<i title="${esc(r.name)}">${esc(r.name[0] || "?")}</i>`).join("")}</div>` : ""}</div>
+        <button class="sc-edit" type="button" data-scedit="${sc.id}" title="Edit this scene">✎</button></div>`;
     }).join("");
   }
-  $("scenes").addEventListener("click", (e) => { const d = e.target.closest("[data-scene]"); if (!d) return; selectScene(d.dataset.scene); ED.classList.remove("left-open"); });
+  $("scenes").addEventListener("click", (e) => {
+    const ed = e.target.closest("[data-scedit]"); if (ed) { e.stopPropagation(); sceneModal(sceneById(ed.dataset.scedit)); return; }
+    const d = e.target.closest("[data-scene]"); if (!d) return; selectScene(d.dataset.scene); ED.classList.remove("left-open"); });
+  function sceneModal(sc) {
+    if (!sc) return;
+    const on = new Set(sc.refs || []);
+    modal(`<h2>Scene ${S.scenes.indexOf(sc) + 1}</h2>
+      <label class="ed-field">Title<input id="sm-title" value="${esc(sc.title)}" maxlength="120"></label>
+      <label class="ed-field">What happens (the agent reads this for every shot in the scene)<textarea id="sm-sum" rows="5">${esc(sc.summary)}</textarea></label>
+      <div class="ed-field">Assets in this scene — new shots get these as references<div class="ed-pick">${S.refs.map((r) => `<label class="ed-chip ${on.has(r.id) ? "" : "off"}" style="cursor:pointer"><div class="th">${r.image ? `<img src="${esc(r.image)}" alt="">` : "👤"}</div><span>${esc(r.name)}</span><input type="checkbox" data-scref="${r.id}" ${on.has(r.id) ? "checked" : ""} style="accent-color:var(--gold)"></label>`).join("") || '<span class="ed-note">No references yet — add characters and places under Project references.</span>'}</div></div>
+      <label class="ed-switch"><input type="checkbox" id="sm-lock" ${sc.locked ? "checked" : ""}> 🔒 Lock this scene — the agent won't change it or its shots</label>
+      <div class="acts"><button class="ed-btn danger" data-act="delete" style="margin-right:auto">Delete scene</button><button class="ed-btn ghost" data-act="close">Cancel</button><button class="ed-btn gold" data-act="save">Save</button></div>`,
+      async (act) => {
+        if (act === "close") return true;
+        if (act === "delete") { if (!confirm(`Delete “${sc.title}” and its ${sc.shots.length} shot(s)?`)) return false; await change([{op: "delete_scene", scene_id: sc.id}], "Scene deleted"); return true; }
+        const refs = [...document.querySelectorAll("[data-scref]")].filter((x) => x.checked).map((x) => x.dataset.scref);
+        await change([{op: "edit_scene", scene_id: sc.id, title: $("sm-title").value, summary: $("sm-sum").value, refs, locked: $("sm-lock").checked}], "Scene saved");
+        return true;
+      });
+    document.querySelectorAll("[data-scref]").forEach((x) => x.onchange = () => x.closest(".ed-chip").classList.toggle("off", !x.checked));
+  }
   dragList($("scenes"), "[data-scene]", (id, toIndex) => change([{op: "edit_scene", scene_id: id, position: toIndex}], "Scene moved"));
   $("add-scene").onclick = async () => {
     const r = await change([{op: "add_scene", key: "n", title: `Scene ${S.scenes.length + 1}`}]);
@@ -189,7 +248,7 @@
     const sh = at || shotById(sel.shot);
     const st = $("stage");
     if (!sh) { $("frametools").hidden = true; st.innerHTML = `<div class="empty"><b>This scene has no shots yet</b>Add one below, or ask the agent to break the scene into shots.<br><br><button class="ed-btn gold" id="stage-add">＋ Add a shot</button> <button class="ed-btn" id="stage-ask">✨ Ask the agent</button></div>`;
-      $("stage-add").onclick = addShot; $("stage-ask").onclick = () => { setTab("agent"); scope = "story"; paintScope(); chatSend(`Break the scene "${sceneById(sel.scene)?.title}" into shots with framing, length and prompts.`); }; return; }
+      $("stage-add").onclick = addShot; $("stage-ask").onclick = () => { setTab("agent"); scope = "scene"; paintScope(); chatSend("Define the shots this scene should have."); }; return; }
     if (preview && preview.shot === sh.id) {
       st.innerHTML = `<div class="ed-frame" id="frame"><img src="${esc(preview.url)}" alt="picture option"></div><span class="ed-badge">✦ Option ${preview.n} of ${preview.of} — preview</span>
         <div class="use"><button class="ed-btn" id="pv-back">Back to the shot</button><button class="ed-btn gold" id="pv-use">Use this picture</button></div>`;
@@ -534,7 +593,7 @@
   }
   function paintInspectorHead() {
     const sh = shotById(sel.shot), c = clipById(sel.clip);
-    $("insp-title").textContent = tab === "agent" ? (scope === "shot" && sh ? `Agent · Shot ${String(sceneShots(sh.scene_id).indexOf(sh) + 1).padStart(2, "0")}` : "Agent · Whole story")
+    $("insp-title").textContent = tab === "agent" ? (scope === "shot" && sh ? `Agent · Shot ${String(sceneShots(sh.scene_id).indexOf(sh) + 1).padStart(2, "0")}` : scope === "scene" && sceneById(sel.scene) ? `Agent · ${sceneById(sel.scene).title}` : "Agent · Whole story")
       : c ? TRACK_NAME[c.track] + " clip" : sh ? `Shot ${String(sceneShots(sh.scene_id).indexOf(sh) + 1).padStart(2, "0")}` : sceneById(sel.scene)?.title || "Scene";
     $("insp-more").hidden = tab === "agent";
   }
@@ -561,7 +620,7 @@
   function sceneInspector(sc) {
     return `<div class="ed-group"><label class="ed-field">Scene title<input data-scene-f="title" value="${esc(sc.title)}" maxlength="120"></label></div>
       <div class="ed-group"><label class="ed-field">What happens (the agent reads this for every shot in the scene)<textarea data-scene-f="summary" rows="4">${esc(sc.summary)}</textarea></label></div>
-      <div class="ed-group"><button class="ed-btn gold" id="sc-add">＋ Add a shot</button> <button class="ed-btn" id="sc-ask">✨ Plan the shots with the agent</button></div>`;
+      <div class="ed-group"><button class="ed-btn gold" id="sc-add">＋ Add a shot</button> <button class="ed-btn" id="sc-ask">✨ Plan the shots with the agent</button> <button class="ed-btn" id="sc-more">✎ Assets & lock</button></div>`;
   }
 
   function shotInspector(sh) {
@@ -575,7 +634,7 @@
     const silentCard = silent ? `<div class="ed-silent"><div class="h">🔇 This shot has no sound</div>
       <div class="ed-note">Animate shots make picture only. Sound comes from the timeline, or from a shot that makes its own.</div>
       <div class="opts">
-        <button type="button" data-sound="line"><span>🎙</span>Speak a line<small>voice it, lip-sync the shot to it, render when ready</small></button>
+        <button type="button" data-sound="line"><span>🎙</span>Speak a line<small>voiced on the dialogue track and mixed in — no re-render</small></button>
         <button type="button" data-sound="perform"><span>🎭</span>Let it make its own sound<small>Performance: the video model generates sound with the picture</small></button>
         <button type="button" data-sound="music"><span>🎵</span>Music or ambience<small>score or a soundscape under this scene</small></button>
       </div></div>` : "";
@@ -616,7 +675,7 @@
       return `<div class="ed-genform"><label class="ed-field">Who<select id="g-ref">${sp.map((r) => `<option value="${r.id}">${esc(r.name)}</option>`).join("")}<option value="">Narrator / default voice</option></select></label>
       <label class="ed-field">Line<textarea id="g-text" rows="3"></textarea></label><label class="ed-field">Delivery<input id="g-inst" placeholder="trembling, quiet"></label>
       <label class="ed-switch"><input type="checkbox" id="g-vid" checked> Use in video</label>
-      ${sh.picture || sh.start_from === "prev_last" ? `<label class="ed-switch"><input type="checkbox" id="g-lip" ${sh.make === "perform" ? "" : "checked"}> Lip-sync this shot to the line — renders when the voice is ready</label>` : ""}
+      ${sh.picture || sh.start_from === "prev_last" ? `<label class="ed-switch"><input type="checkbox" id="g-lip"> Also regenerate this shot lip-synced to the line (uses the video model; otherwise the line is just mixed in)</label>` : ""}
       <div class="acts"><button class="ed-btn gold" data-go="voice">Speak it at ${fmt(sh.start + 0.3)}</button></div></div>`; }
     const mus = key === "music";
     const [a, b] = sceneSpan(sh.scene_id);
@@ -662,7 +721,7 @@
   function proposalsHtml() {
     const props = S.proposals.slice().sort((a, b) => (b.shot_id === sel.shot) - (a.shot_id === sel.shot));
     if (!props.length) return "";
-    return `<div class="ed-group"><h3>✨ Proposed changes <span class="c ed-note">${props.length}</span></h3>` + props.map((p) => {
+    return `<div class="ed-group"><h3>✨ Proposed changes <span class="c">${props.length > 1 ? `<button class="ed-btn sm" id="apply-all" type="button" title="Apply every proposal (picture options take the selected or first picture)">Apply all ${props.length}</button>` : `<span class="ed-note">1</span>`}</span></h3>` + props.map((p) => {
       const pending = p.options.filter((o) => !["succeeded", "failed", "gone"].includes(o.status)).length;
       const ready = p.options.length && !pending;
       const fresh = ready && !seenReady.has(p.id); if (ready) seenReady.add(p.id);
@@ -707,7 +766,8 @@
     if ($("ins-ask")) $("ins-ask").onclick = () => { scope = "shot"; paintScope(); setTab("agent"); $("text").focus(); };
     if ($("ins-addref")) $("ins-addref").onclick = (e) => { e.preventDefault(); refModal(null); };
     if ($("sc-add")) $("sc-add").onclick = addShot;
-    if ($("sc-ask")) $("sc-ask").onclick = () => { setTab("agent"); scope = "story"; paintScope(); chatSend(`Plan the shots for the scene "${sc.title}": framing, length, what moves, and who is in each.`); };
+    if ($("sc-more")) $("sc-more").onclick = () => sceneModal(sc);
+    if ($("sc-ask")) $("sc-ask").onclick = () => { setTab("agent"); scope = "scene"; paintScope(); chatSend("Define the shots this scene should have."); };
     if ($("ci-close")) $("ci-close").onclick = () => { sel.clip = null; paint(); };
     pane.querySelectorAll("[data-c]").forEach((el) => {
       const k = el.dataset.c;
@@ -727,9 +787,19 @@
       const opt = pickedOption[id] || p.options.find((o) => o.status === "succeeded")?.image_id || null;
       if (p.options.length && !opt) { toast("The options are still being made"); return; }
       try { const r = await api(`/api/editor/${PID}/proposals/${id}/apply`, {option: opt, render});
-        toast(r.rendering ? `Applied — rendering ${r.rendering.length} shot(s)` : "Applied"); load(true); } catch (e) { toast(e.message); load(true); }
+        toast((r.rendering ? `Applied — rendering ${r.rendering.length} shot(s)` : "Applied") + (r.failed?.length ? ` · ${r.failed.length} change(s) skipped: ${r.failed[0]}` : "")); load(true); } catch (e) { toast(e.message); load(true); }
     };
     pane.querySelectorAll("[data-apply]").forEach((b) => b.onclick = () => apply(b.dataset.apply, false));
+    if ($("apply-all")) $("apply-all").onclick = async () => {
+      const ids = S.proposals.map((p) => p.id); let done = 0, failed = [];
+      for (const id of ids) {
+        const p = S.proposals.find((x) => x.id === id); if (!p) continue;
+        const opt = pickedOption[id] || p.options.find((o) => o.status === "succeeded")?.image_id || null;
+        if (p.options.length && !opt) { failed.push(p.title + " (pictures not ready)"); continue; }
+        try { const r = await api(`/api/editor/${PID}/proposals/${id}/apply`, {option: opt}); done++; if (r.failed) failed.push(...r.failed); } catch (e) { failed.push(p.title + ": " + e.message); }
+      }
+      toast(`Applied ${done}` + (failed.length ? ` · ${failed.length} skipped` : "")); if (failed.length) console.warn(failed); load(true);
+    };
     pane.querySelectorAll("[data-applygen]").forEach((b) => b.onclick = () => apply(b.dataset.applygen, true));
   }
 
@@ -742,7 +812,7 @@
       else if (what === "voice") { const text = $("g-text").value.trim(); if (!text) { toast("Write the line"); btn.disabled = false; return; }
         const lip = $("g-lip")?.checked;
         await api(`/api/editor/${PID}/clips`, {kind: "dialogue", ref_id: $("g-ref").value || null, text, instruct: $("g-inst").value, start_s: sh.start + 0.3, use_in_video: lip || $("g-vid").checked, lipsync_shot: lip ? sh.id : null});
-        toast(lip ? "Speaking the line — the shot re-renders lip-synced as soon as the voice is ready" : "Speaking… it lands on the dialogue lane"); }
+        toast(lip ? "Speaking the line — the shot regenerates lip-synced when the voice is ready" : "Speaking… it lands on the dialogue lane and is mixed in"); }
       else { const d = $("g-text").value.trim(); if (!d) { toast("Describe it"); btn.disabled = false; return; }
         await api(`/api/editor/${PID}/clips`, {kind: what === "music" ? "music" : "ambience", description: d, start_s: sceneSpan(sh.scene_id)[0], duration: +$("g-dur").value, use_in_video: $("g-vid").checked}); toast("Generating… it lands on the lane when ready"); }
       genOpen = null; load(true);
@@ -767,7 +837,7 @@
 
   // ------------------------------------------------------------------ modal helper
   function modal(html, onAct) {
-    $("sheet").innerHTML = html; $("modal").hidden = false;
+    $("sheet").innerHTML = html; $("sheet").classList.remove("wide"); $("modal").hidden = false;
     $("sheet").onclick = async (e) => { const b = e.target.closest("[data-act]"); if (!b) return; const done = await onAct(b.dataset.act); if (done !== false) $("modal").hidden = true; };
   }
   $("modal").addEventListener("click", (e) => { if (e.target === $("modal")) $("modal").hidden = true; });
@@ -853,21 +923,24 @@
 
   // ------------------------------------------------------------------ agent
   function focusNow() {
-    if (scope !== "shot") return null; const sh = shotById(sel.shot); if (!sh) return null;
-    const sc = sceneById(sh.scene_id);
-    return {shot_id: sh.id, label: `${sc ? sc.title + " › " : ""}Shot ${String(sceneShots(sh.scene_id).indexOf(sh) + 1).padStart(2, "0")}${sh.title ? " · " + sh.title : ""}`};
+    if (scope === "story") return {level: "story", label: "the whole story"};
+    const sc = sceneById(sel.scene);
+    if (scope === "scene") return sc ? {level: "scene", scene_id: sc.id, label: `“${sc.title}”`} : {level: "story"};
+    const sh = shotById(sel.shot); if (!sh) return sc ? {level: "scene", scene_id: sc.id, label: `“${sc.title}”`} : {level: "story"};
+    return {level: "shot", shot_id: sh.id, scene_id: sh.scene_id, label: `${sc ? sc.title + " › " : ""}Shot ${String(sceneShots(sh.scene_id).indexOf(sh) + 1).padStart(2, "0")}${sh.title ? " · " + sh.title : ""}`};
   }
   function paintScope() {
-    $("scope-shot").classList.toggle("on", scope === "shot"); $("scope-story").classList.toggle("on", scope === "story");
+    ["story", "scene", "shot"].forEach((k) => $("scope-" + k).classList.toggle("on", scope === k));
     const quick = scope === "shot"
-      ? ["Give me 2 better picture options for this shot", "Write a line of dialogue for this shot and voice it", "Make this a lip-sync shot with the line under it", "Tighten the prompt: what moves, how the camera moves", "Render this shot now"]
-      : ["Break the story into scenes and shots", "Suggest the cast and places as references", "Write the dialogue for this scene and voice it", "Score each scene and duck the music under dialogue", "Generate all the clips in advance", "Review the mix and fix the levels"];
+      ? ["Define this shot: framing, length, prompt, references", "Give me 2 picture options for this shot", "Write a line for this shot and voice it", "Render this shot now"]
+      : scope === "scene"
+      ? ["Define the shots this scene should have", "Make pictures for this scene's characters and places", "Give every shot in this scene a picture", "Score this scene", "Render this scene"]
+      : ["Define all the scenes and their shots", "Understand the story and summarise it", "Make pictures for every character and place", "Score each scene and duck the music under dialogue", "Render every shot that isn't rendered"];
     $("quick").innerHTML = quick.map((q) => `<button type="button">${esc(q)}</button>`).join("");
     $("quick-empty").innerHTML = $("quick").innerHTML;
     paintInspectorHead();
   }
-  $("scope-shot").onclick = () => { scope = "shot"; paintScope(); };
-  $("scope-story").onclick = () => { scope = "story"; paintScope(); };
+  ["story", "scene", "shot"].forEach((k) => $("scope-" + k).onclick = () => { scope = k; paintScope(); });
   ["quick", "quick-empty"].forEach((id) => $(id).addEventListener("click", (e) => { const b = e.target.closest("button"); if (b) chatSend(b.textContent); }));
   $("applies").onchange = async () => { await api(`/api/editor/${PID}/settings`, {agent_applies: $("applies").checked}); toast($("applies").checked ? "The agent applies its edits directly" : "The agent proposes; you apply"); };
 

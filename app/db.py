@@ -423,6 +423,8 @@ def _migrate(conn) -> None:
               "images": {"model": "TEXT"},
               "agent_threads": {"thought": "TEXT NOT NULL DEFAULT ''", "stage_at": "REAL",
                                 "context": "TEXT NOT NULL DEFAULT '[]'", "project_id": "TEXT"},
+              "prod_scenes": {"refs": "TEXT NOT NULL DEFAULT '[]'",
+                              "locked": "INTEGER NOT NULL DEFAULT 0"},
               "shots": {"title": "TEXT NOT NULL DEFAULT ''", "scene_id": "TEXT",
                         "framing": "TEXT NOT NULL DEFAULT ''", "refs": "TEXT NOT NULL DEFAULT '[]'",
                         "make": "TEXT NOT NULL DEFAULT 'animate'",

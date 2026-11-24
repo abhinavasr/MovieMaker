@@ -27,9 +27,10 @@
   <h2 class="el-h2">Your productions</h2>
   <div class="el-grid">
     {% for p in productions %}
-    <a class="el-card" href="/edit/{{ p.id }}">
+    <a class="el-card" href="/edit/{{ p.id }}" data-id="{{ p.id }}" data-title="{{ p.title }}">
       <div class="el-thumb">{% if p.thumb %}<img src="{{ p.thumb }}" alt="" loading="lazy">{% else %}<span>🎬</span>{% endif %}</div>
-      <div class="el-meta"><b>{{ p.title }}</b><span>{{ p.shots }} shot{{ "" if p.shots == 1 else "s" }} · {{ p.updated }}</span></div>
+      <div class="el-meta"><b>{{ p.title }}</b><span>{{ p.shots }} shot{{ "" if p.shots == 1 else "s" }} · {{ p.updated }}</span>
+        <button class="el-del" type="button" data-del="{{ p.id }}" title="Delete this production" aria-label="Delete {{ p.title }}">🗑 Delete</button></div>
     </a>
     {% endfor %}
   </div>
@@ -45,6 +46,13 @@
 {% endblock %}
 {% block scripts %}
 <script>
+document.querySelectorAll("[data-del]").forEach((b) => b.addEventListener("click", async (e) => {
+  e.preventDefault(); e.stopPropagation();
+  const card = b.closest("[data-id]"), title = card.dataset.title;
+  if (prompt(`Delete “${title}” and everything in it (shots, clips, audio, scenes, the export, its conversation)? This can't be undone.\n\nType the title to confirm:`) !== title) return;
+  const r = await fetch(`/api/editor/${card.dataset.id}/delete`, {method: "POST"});
+  if (r.ok) card.remove(); else alert((await r.json().catch(() => ({}))).error || "could not delete");
+}));
 document.getElementById("new").addEventListener("submit", async (e) => {
   e.preventDefault();
   const f = new FormData(e.target);

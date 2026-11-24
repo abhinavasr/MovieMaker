@@ -520,7 +520,34 @@ You are working INSIDE A PRODUCTION in the studio's editor, with the person, on 
 The production's full state (story, references, scenes, shots with ids and timing, timeline
 audio, mix) is given to you in every turn; the person sees the same thing on screen.
 - "This shot" / "here" means the shot the person is looking at (marked in the state).
-- Story, scene, shot, reference, audio-clip and mix EDITS go through propose_changes: the
+- THREE LEVELS. Each message from the person is tagged with the level it is about; work at that
+  level and don't reach past it:
+  LEVEL 1 · the whole story -> define (or revise) ALL the scenes and their shots.
+  LEVEL 2 · a scene -> define the shots that scene should have (add, change, reorder, remove
+            shots in THAT scene only; its references are its cast and set).
+  LEVEL 3 · a shot -> define that specific shot: framing, length, make, prompt, references,
+            picture (shot_picture_options), and its clip only if asked.
+- WORK IN STAGES, in this order; finish one before the next and say in one line where you are:
+  1. UNDERSTAND: read the whole story. Reply with a 3-5 line summary: the arc, the characters,
+     the places. Ask only if something essential is missing.
+  2. SCENES: identify ALL the scenes in one build_storyboard call: each with title, summary and
+     refs = the characters and places in it (add them as refs). Shots may wait for stage 3.
+  3. SCENE ASSETS, scene by scene: make sure every reference in the scene has a picture
+     (make_ref_picture), then lay out that scene's shots (build_storyboard for the scene, or
+     propose_changes add_shot) and give each shot a picture (shot_picture_options; it uses the
+     scene's references, so faces and places stay the same).
+  4. VIDEOS: render_shots: one shot, one scene, or all, as the person asks.
+  Pick up from the stage the production is at: look at the state before starting over.
+- THE PERSON'S EDITS WIN. The state you are given is the truth: never undo or re-propose
+  something the person changed. Scenes marked LOCKED-BY-THE-PERSON are not yours to change
+  (nor their shots); work around them.
+- AUDIO IS MIXED, NOT RE-RENDERED (the person's rule). Adding or changing dialogue, music,
+  ambience, levels or timing only changes the mix (export_film mixes on the CPU in seconds). Do
+  NOT switch shots to lipsync/perform, and do NOT call render_shots, because of an audio change,
+  unless the person explicitly asks to regenerate the video with the audio.
+- To lay out a story as scenes and shots use build_storyboard (nested scenes -> shots, plus
+  characters as refs); for a long film call it once per 1-3 scenes so each answer stays short.
+- Other story, scene, shot, reference, audio-clip and mix EDITS go through propose_changes: the
   person reviews and applies them (unless the state says you may apply directly). One
   proposal per coherent idea, with a clear title; for a whole-story breakdown, one proposal
   that adds the scenes and shots (use `key`s so shots can name their new scene).
@@ -537,7 +564,8 @@ audio, mix) is given to you in every turn; the person sees the same thing on scr
   rendered clip (e.g. at: "last") into a shot as its picture, or into a new shot after it.
 - For every new or changed shot, fill `framing` (EWS|WS|MS|MCU|CU|ECU|OTS|POV|2S|INSERT) and
   `make` (animate|perform|lipsync) explicitly; a close-up is framing "CU", not just a word in
-  the prompt. Lines of dialogue a character speaks on camera suit `lipsync`.
+  the prompt. Use `lipsync`/`perform` only when the person asks for the video itself to carry
+  the audio.
 - Only use project_id from the state. Keep replies short; the editor shows the details.
 """
 
@@ -638,8 +666,12 @@ def _history(thread_id: str) -> tuple[list[dict], int]:
             msg = {"role": "user", "content": r["content"] or "(sent files)"}
             if meta.get("focus"):
                 f = meta["focus"]
-                msg["content"] = (f"(about {f.get('label') or 'a shot'}, shot_id="
-                                  f"{f.get('shot_id')}) " + msg["content"])
+                lvl = f.get("level") or ("shot" if f.get("shot_id") else "story")
+                where = {"story": "LEVEL 1 · the whole story",
+                         "scene": f"LEVEL 2 · scene {f.get('label')} (scene_id={f.get('scene_id')})",
+                         "shot": f"LEVEL 3 · shot {f.get('label')} (shot_id={f.get('shot_id')})"
+                         }.get(lvl, lvl)
+                msg["content"] = f"({where}) " + msg["content"]
             attached = [files[f] for f in meta.get("files") or [] if f in files]
             if attached:
                 recent = r["seq"] in recent_users
@@ -794,7 +826,7 @@ async def _plan(thread, trigger: str, turn: GpuTurn) -> dict:
         result = await _stream_plan(thread["id"], {
             "model": cfg.PLANNER_MODEL, "messages": messages,
             "think": True, "format": _plan_schema(), "keep_alive": "10m",
-            "options": {"num_ctx": cfg.PLANNER_CTX, "num_predict": 6000,
+            "options": {"num_ctx": cfg.PLANNER_CTX, "num_predict": 12000,
                         "temperature": 0.6 if attempt == 0 else 0.8}})
         out = _parse_json(result.get("content", ""))
         log.info("planner %s: %.1fs, %s tokens, ok=%s", thread["id"], time.monotonic() - t0,
@@ -943,6 +975,12 @@ async def _execute(thread, user, steps: list[dict], plan_seq: int = 0) -> tuple[
         args, problems = _validate(draft, schema)
         ok, result, preview, fixed_by = False, {"error": "not run"}, None, None
         for attempt in range(EXECUTOR_TRIES):
+            if problems and len(json.dumps(args, ensure_ascii=False)) > 4000:
+                # A big call (a whole storyboard) is not the small CPU model's job: at
+                # ~12 tokens/s rebuilding it takes many minutes (it stalled a 47-change
+                # proposal on 2026-11-24). The planner gets the error and fixes it.
+                result = {"error": "; ".join(problems)[:1500]}
+                break
             if problems:
                 fixed = await _executor_fix(tid, step, schema, args, "; ".join(problems), results)
                 if fixed is None:
@@ -999,7 +1037,8 @@ def _clip_status(clip_id: str) -> dict:
 def _focus(thread_id: str) -> str | None:
     row = db.one("SELECT meta FROM agent_messages WHERE thread_id=? AND role='user' "
                  "ORDER BY seq DESC LIMIT 1", (thread_id,))
-    return (json.loads(row["meta"] or "{}").get("focus") or {}).get("shot_id") if row else None
+    f = (json.loads(row["meta"] or "{}").get("focus") or {}) if row else {}
+    return f.get("shot_id") or None
 
 
 def _watch_summary(thread_id: str) -> str:
@@ -1456,7 +1495,9 @@ async def api_message(thread_id: str, request: Request):
         _set(thread_id, base_url=service.base_url(request))
     focus = body.get("focus") if isinstance(body.get("focus"), dict) else None
     if focus:
-        focus = {"shot_id": str(focus.get("shot_id") or "")[:40],
+        focus = {"level": str(focus.get("level") or ("shot" if focus.get("shot_id") else "story"))[:8],
+                 "shot_id": str(focus.get("shot_id") or "")[:40],
+                 "scene_id": str(focus.get("scene_id") or "")[:40],
                  "label": str(focus.get("label") or "")[:80]}
     return await _say(user, _thread(thread_id), text, files, focus)
 
@@ -1472,7 +1513,8 @@ async def _say(user, row, text: str, file_ids: list, focus: dict | None = None) 
         names = [db.one("SELECT name FROM agent_files WHERE id=?", (i,))["name"] for i in ids]
         _set(row["id"], title=(" ".join(text.split()) or ", ".join(names) or NEW_TITLE)[:70])
     _post(row["id"], "user", text, **({"files": ids} if ids else {}),
-          **({"focus": focus} if focus and focus.get("shot_id") else {}))
+          **({"focus": focus} if focus and (focus.get("shot_id") or focus.get("scene_id")
+                                            or focus.get("level") == "story") else {}))
     if text.startswith("/") and not ids:
         answer = _command(user, row, text)
         if answer is not None:

@@ -17,12 +17,17 @@
       <div class="ed-render" id="render-state"></div>
       <button class="ed-btn sm" id="render-missing" type="button" title="Generate every shot that has no up-to-date clip">▶ Render missing</button>
       <button class="ed-btn outline" id="export" type="button">⤓ Export</button>
+      <button class="ed-btn ghost icon" id="del-prod" type="button" title="Delete this production" aria-label="Delete this production">🗑</button>
     </div>
   </div>
 
   <div class="ed-body" id="body">
     <!-- left: scenes + references -->
     <aside class="ed-left" id="left">
+      <section>
+        <div class="ed-sec-h"><h2>Story</h2><button class="ed-btn ghost sm" id="story-edit" type="button">✎ Edit</button></div>
+        <div class="ed-storycard" id="story-card"></div>
+      </section>
       <section>
         <div class="ed-sec-h"><h2>Scenes</h2><button class="ed-btn ghost icon" id="add-scene" type="button" title="Add a scene" aria-label="Add a scene">＋</button></div>
         <div class="ed-scenes" id="scenes"></div>
@@ -83,7 +88,7 @@
           </div></div>
           <button class="ws-btn ws-jump" id="jump" type="button" hidden>↓ New activity</button>
           <div class="ws-dock"><div class="ws-col">
-            <div class="ed-scopebar">Talking about <button type="button" data-scope="shot" class="on" id="scope-shot">this shot</button><button type="button" data-scope="story" id="scope-story">the whole story</button>
+            <div class="ed-scopebar">Working on <button type="button" id="scope-story" title="Level 1: defines the scenes and their shots">the story</button><button type="button" id="scope-scene" title="Level 2: defines the shots this scene should have">this scene</button><button type="button" id="scope-shot" class="on" title="Level 3: defines this specific shot">this shot</button>
               <label class="ed-switch" style="margin-left:auto" title="Let the assistant apply edits without asking"><input type="checkbox" id="applies"> apply directly</label></div>
             <div class="ed-quick" id="quick"></div>
             <div class="ws-status" id="status" aria-live="polite"><span class="ws-dot" id="st-dot"></span><span class="txt" id="st-txt">Ready.</span><button class="ws-btn sm danger" id="stop" type="button" hidden>■ Stop</button></div>

@@ -52,6 +52,8 @@ body:has(.ed) footer, body:has(.ed) .retention-note { display: none; }
 .el-meta { padding: 10px 12px; display: flex; flex-direction: column; gap: 2px; }
 .el-meta span { font-size: .78rem; color: var(--muted); }
 .el-list { display: flex; gap: 8px; flex-wrap: wrap; }
+.el-del { align-self: flex-start; margin-top: 6px; font: inherit; font-size: .74rem; background: none; border: 1px solid var(--line); color: var(--muted); border-radius: 7px; padding: 2px 8px; cursor: pointer; }
+.el-del:hover { color: var(--bad); border-color: var(--bad); }
 
 /* ------------------------------------------------------------ editor shell */
 .ed { display: grid; grid-template-rows: auto minmax(0, 1fr); height: calc(100dvh - var(--hdr, 50px)); overflow: hidden; }
@@ -87,6 +89,21 @@ body:has(.ed) footer, body:has(.ed) .retention-note { display: none; }
 .ed-scene b { font-size: .86rem; font-weight: 600; display: block; line-height: 1.3; }
 .ed-scene span { font-size: .74rem; color: var(--muted); }
 .ed-scene.drop { box-shadow: inset 0 2px 0 var(--gold); }
+.ed-scene { position: relative; }
+.ed-scene .cast { display: flex; gap: 3px; margin-top: 4px; flex-wrap: wrap; }
+.ed-scene .cast img, .ed-scene .cast i { width: 22px; height: 22px; border-radius: 50%; object-fit: cover; border: 1px solid var(--line); background: var(--panel-3); display: grid; place-items: center; font-style: normal; font-size: .62rem; }
+.ed-scene .sc-edit { position: absolute; right: 4px; top: 4px; opacity: 0; background: var(--panel-3); border: 1px solid var(--line); color: var(--ink); border-radius: 7px; font-size: .72rem; padding: 2px 7px; cursor: pointer; }
+.ed-scene:hover .sc-edit, .ed-scene.on .sc-edit, .ed-scene .sc-edit:focus { opacity: 1; }
+.ed-scene .lock { color: var(--gold); font-size: .72rem; }
+.ed-pick { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 6px; }
+
+/* story */
+.ed-storycard { font-size: .8rem; color: var(--muted); line-height: 1.5; background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px; padding: 9px 10px; cursor: pointer; }
+.ed-storycard:hover { border-color: var(--gold); }
+.ed-storycard .tx { max-height: 7.5em; overflow: hidden; white-space: pre-wrap; -webkit-mask-image: linear-gradient(#000 70%, transparent); mask-image: linear-gradient(#000 70%, transparent); color: var(--ink); }
+.ed-storycard .acts { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+.ed-sheet.wide { width: min(960px, 100%); }
+.ed-sheet textarea.ed-story { min-height: 52dvh; }
 
 /* references */
 .ed-refs { display: flex; flex-direction: column; gap: 2px; }

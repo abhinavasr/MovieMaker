@@ -73,6 +73,7 @@ def aspect_of(params: dict) -> str:
 MAX_AUDIO_REFS = 3
 MAX_IMAGE_REFS = 9
 _exporting: set[str] = set()
+_export_tasks: set = set()
 
 
 # =========================================================================== access
@@ -239,13 +240,16 @@ def set_story(project, title: str | None = None, story: str | None = None,
         set_aspect(db.one("SELECT * FROM projects WHERE id=?", (project["id"],)), aspect)
 
 
-def add_scene(project, title: str = "", summary: str = "", position: int | None = None) -> str:
+def add_scene(project, title: str = "", summary: str = "", position: int | None = None,
+              refs: list | None = None) -> str:
     pid = project["id"]
     scenes = scenes_of(pid)
     pos = len(scenes) if position is None else max(0, min(len(scenes), int(position)))
     for s in scenes[pos:]:
         db.run("UPDATE prod_scenes SET idx=? WHERE id=?", (s["idx"] + 1, s["id"]))
     sid = _new_scene(pid, title or f"Scene {len(scenes) + 1}", summary, pos)
+    if refs:
+        db.run("UPDATE prod_scenes SET refs=? WHERE id=?", (json.dumps(_valid_refs(pid, refs)), sid))
     _reindex_scenes(pid)
     _touch(pid)
     return sid
@@ -258,9 +262,15 @@ def _reindex_scenes(pid: str) -> None:
 
 
 def edit_scene(project, scene_id: str, title: str | None = None, summary: str | None = None,
-               position: int | None = None) -> None:
+               position: int | None = None, refs: list | None = None,
+               locked: bool | None = None) -> None:
     pid = project["id"]
     row = _scene(pid, scene_id)
+    if locked is not None:
+        db.run("UPDATE prod_scenes SET locked=? WHERE id=?", (1 if locked else 0, scene_id))
+    if refs is not None:
+        db.run("UPDATE prod_scenes SET refs=? WHERE id=?",
+               (json.dumps(_valid_refs(pid, list(refs))), scene_id))
     db.run("UPDATE prod_scenes SET title=?, summary=? WHERE id=?",
            ((title if title is not None else row["title"])[:120],
             (summary if summary is not None else row["summary"])[:2000], scene_id))
@@ -308,6 +318,8 @@ def add_shot(project, scene_id: str, title: str = "", prompt: str = "", seconds=
     # Leave room in idx order: place before the shot currently at `pos`.
     base = in_scene[pos]["idx"] - 0.5 if pos < len(in_scene) else \
         (in_scene[-1]["idx"] + 0.5 if in_scene else 10 ** 5)
+    if not refs:
+        refs = _jl(_scene(pid, scene_id)["refs"], [])       # the scene group's cast and set
     shot_id = db.new_id("sht")
     before = timings(pid)
     params = db.params_of(project)
@@ -1102,12 +1114,12 @@ def _mix_film(project) -> Path:
     params = db.params_of(project)
     mix = _mix(project)
     shots = ordered_shots(pid)
-    missing = [s["title"] or f"shot {i + 1}" for i, s in enumerate(shots)
-               if not (s["clip_path"] and Path(s["clip_path"]).exists()) or
-               s["status"] not in ("done",)]
-    if missing:
-        raise HTTPException(400, f"{len(missing)} shot(s) have no up-to-date clip yet: "
-                                 f"{', '.join(missing[:6])}. Render them first.")
+    if not shots:
+        raise HTTPException(400, "add shots first")
+    # Mixing never waits for the video model: a shot without a clip is shown as its
+    # still picture (or black), and an outdated clip is used as it is.
+    assets = {a["id"]: a["path"] for a in db.query("SELECT id, path FROM assets WHERE project_id=?",
+                                                   (pid,))}
     out = export_path(pid)
     work = out.parent / "mixwork"
     work.mkdir(parents=True, exist_ok=True)
@@ -1117,9 +1129,20 @@ def _mix_film(project) -> Path:
 
     # 1) picture: every clip trimmed/padded to its shot length, scaled, joined.
     inputs, filters = [], []
+    has_clip = []
     for i, s in enumerate(shots):
-        inputs += ["-i", s["clip_path"]]
-        filters.append(f"[{i}:v]scale={w * k}:{h * k}:flags=lanczos,setsar=1,fps=24,"
+        clip = s["clip_path"] if s["clip_path"] and Path(s["clip_path"]).exists() else None
+        pic = assets.get(s["asset_id"]) if s["asset_id"] else None
+        has_clip.append(bool(clip))
+        if clip:
+            inputs += ["-i", clip]
+        elif pic and Path(pic).exists():
+            inputs += ["-loop", "1", "-t", str(s["seconds"]), "-i", pic]
+        else:
+            inputs += ["-f", "lavfi", "-t", str(s["seconds"]), "-i",
+                       f"color=c=black:s={w * k}x{h * k}:r=24"]
+        filters.append(f"[{i}:v]scale={w * k}:{h * k}:force_original_aspect_ratio=increase,"
+                       f"crop={w * k}:{h * k},setsar=1,fps=24,"
                        f"tpad=stop_mode=clone:stop_duration=30,trim=duration={s['seconds']},"
                        f"setpts=PTS-STARTPTS[v{i}]")
     crop = ASPECTS[aspect_of(params)][1]
@@ -1133,7 +1156,8 @@ def _mix_film(project) -> Path:
     t = 0.0
     for i, s in enumerate(shots):
         # Lip-sync shots carry the dialogue line, which is already on its track.
-        if s["make"] == "perform" and not mix["shot"]["mute"] and _has_audio(s["clip_path"]):
+        if has_clip[i] and s["make"] == "perform" and not mix["shot"]["mute"] and \
+                _has_audio(s["clip_path"]):
             lab = f"sa{i}"
             filters.append(f"[{i}:a]atrim=duration={s['seconds']},asetpts=PTS-STARTPTS,"
                            f"aresample=48000,adelay={int(t * 1000)}:all=1[{lab}]")
@@ -1254,17 +1278,8 @@ async def export(project) -> None:
         p["_export"] = state
         db.set_params(pid, p)
         _touch(pid)
-    # Check the shots synchronously so the person gets the reason straight away.
-    missing = [s for s in _mix_check if not (s["clip_path"] and Path(s["clip_path"]).exists())
-               or s["status"] != "done"]
-    if missing:
-        _exporting.discard(pid)
-        params["_export"] = {"status": "failed", "at": db.now(),
-                             "error": f"{len(missing)} shot(s) need rendering first"}
-        db.set_params(pid, params)
-        raise HTTPException(400, f"{len(missing)} shot(s) have no up-to-date clip yet; render "
-                                 "them first (Render missing shots)")
-    asyncio.create_task(go())
+    _export_tasks.add(t := asyncio.create_task(go()))   # keep a reference: tasks can be collected
+    t.add_done_callback(_export_tasks.discard)
 
 
 # =========================================================================== proposals
@@ -1272,7 +1287,7 @@ async def export(project) -> None:
 def propose(project, title: str, summary: str, changes: list, shot_id: str | None = None,
             options: list | None = None) -> str:
     pid = project["id"]
-    _validate_changes(changes)
+    changes, _ = _validate_changes(changes) if changes else ([], [])
     prop_id = db.new_id("prp")
     now = db.now()
     db.run("INSERT INTO proposals (id, project_id, shot_id, title, summary, changes, options, "
@@ -1287,12 +1302,47 @@ OPS = {"set_story", "add_scene", "edit_scene", "delete_scene", "add_shot", "edit
        "delete_shot", "edit_clip", "delete_clip", "set_mix", "add_ref", "edit_ref", "use_frame"}
 
 
-def _validate_changes(changes) -> None:
+def _guess_op(c: dict) -> str | None:
+    """A change the model wrote without `op` (or under another name)."""
+    for k in ("op", "type", "action", "kind", "operation"):
+        if c.get(k) in OPS:
+            return c[k]
+    if c.get("shot_id"):
+        return "edit_shot"
+    if c.get("clip_id"):
+        return "edit_clip"
+    if c.get("ref_id"):
+        return "edit_ref"
+    if c.get("scene_id") and any(k in c for k in ("prompt", "framing", "seconds", "make")):
+        return "add_shot"
+    if c.get("scene_id"):
+        return "edit_scene"
+    if c.get("summary") is not None and c.get("title"):
+        return "add_scene"
+    if c.get("name") and c.get("kind") in REF_KINDS:
+        return "add_ref"
+    return None
+
+
+def _validate_changes(changes, strict: bool = True) -> tuple[list, list]:
+    """(usable changes, problems). One bad item no longer sinks a 47-change proposal
+    (2026-11-24: a whole film's breakdown was refused for a few items without `op`)."""
     if not isinstance(changes, list):
         raise HTTPException(400, "changes must be a list of {op, ...}")
-    for c in changes:
-        if not isinstance(c, dict) or c.get("op") not in OPS:
-            raise HTTPException(400, f"each change needs an op, one of {', '.join(sorted(OPS))}")
+    good, bad = [], []
+    for i, c in enumerate(changes):
+        if not isinstance(c, dict):
+            bad.append(f"change {i + 1} is not an object")
+            continue
+        op = _guess_op(c)
+        if op is None:
+            bad.append(f"change {i + 1} has no op (one of {', '.join(sorted(OPS))}): "
+                       f"{json.dumps(c, ensure_ascii=False)[:120]}")
+            continue
+        good.append({**c, "op": op})
+    if strict and bad and not good:
+        raise HTTPException(400, "; ".join(bad[:5]))
+    return good, bad
 
 
 _FRAMING_WORDS = {"extreme wide": "EWS", "wide": "WS", "medium close": "MCU", "medium": "MS",
@@ -1317,7 +1367,26 @@ def _normalise(c: dict) -> dict:
     return c
 
 
-def apply_changes(project, user: auth.User, changes: list) -> dict:
+def _locked_target(pid: str, c: dict) -> str | None:
+    """The locked scene a change would alter, if any (the person's scenes win)."""
+    scene = None
+    if c.get("op") in ("edit_scene", "delete_scene") or (c.get("op") == "add_shot"):
+        scene = c.get("scene_id")
+    elif c.get("op") in ("edit_shot", "delete_shot") or c.get("op") == "use_frame":
+        sid = c.get("shot_id") or c.get("to_shot_id")
+        row = db.one("SELECT scene_id FROM shots WHERE id=?", (sid,)) if sid else None
+        scene = row["scene_id"] if row else None
+        if c.get("op") == "edit_shot" and c.get("scene_id"):
+            target = db.one("SELECT locked, title FROM prod_scenes WHERE id=?", (c["scene_id"],))
+            if target and target["locked"]:
+                return target["title"]
+    if not scene:
+        return None
+    row = db.one("SELECT locked, title FROM prod_scenes WHERE id=? AND project_id=?", (scene, pid))
+    return row["title"] if row and row["locked"] else None
+
+
+def apply_changes(project, user: auth.User, changes: list, guard: bool = False) -> dict:
     """Run a list of edits. New scenes/shots can be named with `key` and referred
     to by that key later in the same list (e.g. add_scene key=s1, add_shot scene=s1)."""
     keys: dict[str, str] = {}
@@ -1326,19 +1395,27 @@ def apply_changes(project, user: auth.User, changes: list) -> dict:
     def rid(v):
         return keys.get(v, v) if isinstance(v, str) else v
 
-    done = []
-    for c in changes:
+    done, failed = [], []
+    for n, c in enumerate(changes):
+      try:
         project = db.one("SELECT * FROM projects WHERE id=?", (pid,))
         c = _normalise(c)
         op = c.get("op")
+        if guard:
+            locked = _locked_target(pid, c)
+            if locked:
+                raise HTTPException(409, f"the scene “{locked}” is locked by you; left as it is")
         if op == "set_story":
             set_story(project, title=c.get("title"), story=c.get("story"), aspect=c.get("aspect"))
         elif op == "add_scene":
             keys[c.get("key") or f"scene{len(keys)}"] = add_scene(
-                project, c.get("title", ""), c.get("summary", ""), c.get("position"))
+                project, c.get("title", ""), c.get("summary", ""), c.get("position"),
+                [rid(r) for r in c.get("refs") or []])
         elif op == "edit_scene":
             edit_scene(project, rid(c.get("scene_id")), c.get("title"), c.get("summary"),
-                       c.get("position"))
+                       c.get("position"),
+                       [rid(r) for r in c["refs"]] if isinstance(c.get("refs"), list) else None,
+                       c.get("locked") if not guard else None)
         elif op == "delete_scene":
             delete_scene(project, rid(c.get("scene_id")))
         elif op == "add_shot":
@@ -1383,7 +1460,12 @@ def apply_changes(project, user: auth.User, changes: list) -> dict:
                      **{k: c.get(k) for k in ("name", "description", "kind", "image_id",
                                               "speaker") if k in c})
         done.append(op)
-    return {"applied": done, "new_ids": keys}
+      except HTTPException as exc:
+        failed.append(f"change {n + 1} ({c.get('op')}): {exc.detail}")
+    out = {"applied": done, "new_ids": keys}
+    if failed:
+        out["failed"] = failed
+    return out
 
 
 def apply_proposal(project, user: auth.User, prop_id: str, option: str | None = None) -> dict:
@@ -1393,7 +1475,7 @@ def apply_proposal(project, user: auth.User, prop_id: str, option: str | None = 
         raise HTTPException(404, "no such proposal")
     if row["status"] != "open":
         raise HTTPException(409, f"this proposal was already {row['status']}")
-    result = apply_changes(project, user, _jl(row["changes"], []))
+    result = apply_changes(project, user, _jl(row["changes"], []), guard=True)
     options = _jl(row["options"], [])
     if options and row["shot_id"]:
         pick = option or options[0]
@@ -1430,6 +1512,7 @@ def state(project, base: str) -> dict:
     scenes = []
     for sc in scenes_of(pid):
         scenes.append({"id": sc["id"], "title": sc["title"], "summary": sc["summary"],
+                       "refs": _jl(sc["refs"], []), "locked": bool(sc["locked"]),
                        "shots": [s["id"] for s in shots if s["scene_id"] == sc["id"]]})
     shot_views = []
     for n, s in enumerate(shots):
@@ -1522,7 +1605,9 @@ def describe_for_agent(project_id: str, focus_shot: str | None = None) -> str:
     shots = ordered_shots(project_id)
     names = {r["id"]: r["name"] for r in refs}
     for sc in scenes_of(project_id):
-        lines.append(f"SCENE scene_id={sc['id']} \"{sc['title']}\": {sc['summary'][:300]}")
+        cast = [names.get(r, r) for r in _jl(sc["refs"], [])]
+        lines.append(f"SCENE scene_id={sc['id']} \"{sc['title']}\"{' LOCKED-BY-THE-PERSON' if sc['locked'] else ''} assets=[{', '.join(cast)}]: "
+                     f"{sc['summary'][:300]}")
         for s in [x for x in shots if x["scene_id"] == sc["id"]]:
             start, secs = tm[s["id"]]
             mark = " <== the person is looking at this shot" if s["id"] == focus_shot else ""
@@ -1572,14 +1657,117 @@ def _t_state(user, args, base):
 
 def _t_propose(user, args, base):
     project = _agent_project(user, args)
-    changes = args.get("changes") or []
+    changes, bad = _validate_changes(args.get("changes") or [])
     if db.params_of(project).get("agent_applies"):
-        result = apply_changes(project, user, changes)
+        result = apply_changes(project, user, changes, guard=True)
+        if bad:
+            result.setdefault("failed", []).extend(bad)
         return {"applied": True, **result}
     pid = propose(project, str(args.get("title") or "Proposed changes"),
                   str(args.get("summary") or ""), changes, args.get("shot_id"))
-    return {"proposal_id": pid, "status": "waiting for the person to review and apply",
-            "changes": len(changes)}
+    out = {"proposal_id": pid, "status": "waiting for the person to review and apply",
+           "changes": len(changes)}
+    if bad:
+        out["skipped"] = bad[:10]
+        out["next"] = "fix the skipped items in a second proposal"
+    return out
+
+
+def storyboard_changes(project_id: str, args: dict) -> list:
+    """The nested shape a model writes for a whole story, as editor changes:
+    {story?, refs:[{name,kind,description,speaker}], scenes:[{title,summary,
+     shots:[{title,framing,seconds,prompt,make,refs:[names],start_from}]}]}."""
+    changes: list = []
+    if args.get("story") or args.get("title"):
+        changes.append({"op": "set_story", **({"story": args["story"]} if args.get("story") else {}),
+                        **({"title": args["title"]} if args.get("title") else {})})
+    names: dict[str, str] = {r["name"].lower(): r["id"] for r in
+                             db.query("SELECT id, name FROM prod_refs WHERE project_id=?",
+                                      (project_id,))}
+    for i, r in enumerate(args.get("refs") or args.get("characters") or []):
+        if not isinstance(r, dict) or not r.get("name"):
+            continue
+        if r["name"].lower() in names:
+            continue
+        key = f"ref{i}"
+        names[r["name"].lower()] = key
+        kind = str(r.get("kind") or r.get("type") or "").lower()
+        kind = {"place": "location", "setting": "location", "environment": "location",
+                "set": "location", "background": "location", "object": "prop", "item": "prop",
+                "person": "character", "animal": "character", "creature": "character"}.get(kind, kind)
+        changes.append({"op": "add_ref", "key": key, "name": r["name"],
+                        "kind": kind if kind in REF_KINDS else "character",
+                        "description": r.get("description", ""),
+                        **({"speaker": r["speaker"]} if r.get("speaker") in speech.SPEAKERS else {})})
+    existing = scenes_of(project_id)
+    empty_first = existing and len(existing) == 1 and not db.one(
+        "SELECT 1 FROM shots WHERE scene_id=?", (existing[0]["id"],))
+    for si, sc in enumerate(args.get("scenes") or []):
+        if not isinstance(sc, dict):
+            continue
+        cast = [names.get(str(n).lower(), n) for n in
+                (sc.get("refs") or sc.get("assets") or sc.get("characters") or [])]
+        if si == 0 and empty_first:
+            key = existing[0]["id"]               # fill the empty "Scene 1" instead of adding one
+            changes.append({"op": "edit_scene", "scene_id": key, "title": sc.get("title", ""),
+                            "summary": sc.get("summary", ""), "refs": cast})
+        else:
+            key = f"scene{si}"
+            changes.append({"op": "add_scene", "key": key, "title": sc.get("title", ""),
+                            "summary": sc.get("summary", ""), "refs": cast})
+        for hi, sh in enumerate(sc.get("shots") or []):
+            if not isinstance(sh, dict):
+                continue
+            refs = [names.get(str(n).lower(), n) for n in sh.get("refs") or sh.get("characters") or []] \
+                or cast
+            changes.append({"op": "add_shot", "key": f"s{si}_{hi}", "scene_id": key,
+                            **{k: sh[k] for k in ("title", "framing", "seconds", "prompt", "make",
+                                                  "start_from") if sh.get(k) is not None},
+                            "refs": [r for r in refs if r]})
+    return changes
+
+
+def _t_storyboard(user, args, base):
+    project = _agent_project(user, args)
+    changes = storyboard_changes(project["id"], args)
+    if not changes:
+        raise HTTPException(400, "give scenes (each with shots) and/or refs")
+    n_sc = sum(1 for c in changes if c["op"] in ("add_scene", "edit_scene"))
+    n_sh = sum(1 for c in changes if c["op"] == "add_shot")
+    return _t_propose(user, {"project_id": project["id"],
+                             "title": args.get("proposal_title") or
+                             f"Storyboard: {n_sc} scene(s), {n_sh} shot(s)",
+                             "summary": args.get("summary") or "", "changes": changes}, base)
+
+
+async def make_ref_picture(project, user: auth.User, ref_id: str, prompt: str = "",
+                           model: str | None = None) -> str:
+    """A picture for a character/place reference (a clean, front-on look the shots copy)."""
+    pid = project["id"]
+    r = _ref(pid, ref_id)
+    params = db.params_of(project)
+    text = prompt.strip() or (
+        f"{r['name']}, {r['description']}. " +
+        ("Character reference: full body, front view, neutral pose, plain soft background, "
+         "clear face, consistent design." if r["kind"] == "character" else
+         "Establishing view of the place, no people, clear layout." if r["kind"] == "location" else
+         "Clear reference picture, plain background."))
+    image_id = await images.create(user, text[:1900], [], orientation=params.get("orientation", "portrait"),
+                                   model=model)
+    db.run("UPDATE prod_refs SET image_id=? WHERE id=?", (image_id, ref_id))
+    _touch(pid)
+    return image_id
+
+
+async def _t_ref_picture(user, args, base):
+    project = _agent_project(user, args)
+    image_id = await make_ref_picture(project, user, str(args.get("ref_id") or ""),
+                                      str(args.get("prompt") or ""), args.get("model"))
+    row = await images.wait(image_id, 60)
+    out = {"ref_id": args.get("ref_id"), "image_id": image_id, "status": row["status"]}
+    if row["status"] == "succeeded":
+        out["image_url"] = base + service.signed_path("image", image_id, 86400)
+    return out
 
 
 async def _t_picture_options(user, args, base):
@@ -1687,6 +1875,29 @@ AGENT_TOOLS = {
         "description": "Edit the production (story, scenes, shots, references, audio clips, "
                        "mix). The person reviews and applies the proposal unless they let you "
                        "apply directly. Use it for any change to the story structure or mix."},
+    "build_storyboard": {
+        "handler": _t_storyboard, "light": True,
+        "schema": {"type": "object", "required": ["project_id", "scenes"], "properties": {
+            **_PID,
+            "story": {"type": "string", "description": "the full story text (optional)"},
+            "refs": {"type": "array", "items": {"type": "object"},
+                     "description": "characters/places: {name, kind, description, speaker}"},
+            "scenes": {"type": "array", "items": {"type": "object"}, "description":
+                       "in order: {title, summary, refs:[the characters/places in the scene, by "
+                       "name], shots:[{title, framing, seconds, prompt, make, refs, "
+                       "start_from}]} (shots optional; they inherit the scene's refs)"},
+            "proposal_title": {"type": "string"}, "summary": {"type": "string"}}},
+        "description": "Lay out a story (or a part of it) as scenes and shots in one go, in a "
+                       "natural nested shape; it becomes one proposal the person applies. Use "
+                       "this for breakdowns; one call per 1-3 scenes keeps each answer short."},
+    "make_ref_picture": {
+        "handler": _t_ref_picture,
+        "schema": {"type": "object", "required": ["project_id", "ref_id"], "properties": {
+            **_PID, "ref_id": {"type": "string"},
+            "prompt": {"type": "string", "description": "default: from its name, kind, description"},
+            "model": {"type": "string"}}},
+        "description": "Make the picture for a character/place reference (its look for every "
+                       "shot it is in). Do this for each scene's references before its shots."},
     "shot_picture_options": {
         "handler": _t_picture_options,
         "schema": {"type": "object", "required": ["project_id", "shot_id"], "properties": {
@@ -1735,7 +1946,8 @@ AGENT_TOOLS = {
         "schema": {"type": "object", "required": ["project_id"], "properties": {**_PID}},
         "description": "Join every shot's clip and mix the timeline into the final film."},
 }
-EDITOR_HEAVY = {"shot_picture_options", "render_shots", "add_dialogue", "add_music"}
+EDITOR_HEAVY = {"shot_picture_options", "render_shots", "add_dialogue", "add_music",
+                "make_ref_picture"}
 
 
 # =========================================================================== API
@@ -1803,9 +2015,11 @@ async def api_changes(pid: str, request: Request):
     user = _user(request)
     project = production(user, pid)
     b = await _body(request)
-    changes = b.get("changes") or []
-    _validate_changes(changes)
-    return apply_changes(project, user, changes)
+    changes, bad = _validate_changes(b.get("changes") or [])
+    out = apply_changes(project, user, changes)
+    if bad:
+        out.setdefault("failed", []).extend(bad)
+    return out
 
 
 @router.post("/api/editor/{pid}/shots/{sid}/picture")
@@ -2056,6 +2270,25 @@ async def api_export_file(pid: str, request: Request, download: int = 0):
     name = "".join(ch for ch in project["title"] if ch.isalnum() or ch in " -_")[:60] or "film"
     return FileResponse(p, media_type="video/mp4", filename=f"{name}.mp4",
                         content_disposition_type="attachment" if download else "inline")
+
+
+@router.post("/api/editor/{pid}/delete")
+async def api_delete_production(pid: str, request: Request):
+    """Delete the whole production: shots, clips, pictures in it, audio, scenes,
+    references, proposals, its export and its conversation with the assistant."""
+    from app import agent
+    user = _user(request)
+    project = service.owned_project(user, pid)
+    if service.is_rendering(project):
+        render.request_cancel(pid)
+    for t in db.query("SELECT id FROM agent_threads WHERE project_id=?", (pid,)):
+        agent.delete_thread(t["id"])
+    service.delete_project_files(pid)          # files + the production's own rows
+    db.run("DELETE FROM shots WHERE project_id=?", (pid,))
+    db.run("DELETE FROM assets WHERE project_id=?", (pid,))
+    db.run("DELETE FROM projects WHERE id=?", (pid,))
+    log.info("production %s deleted by %s", pid, user.username)
+    return {"ok": True}
 
 
 @router.post("/api/editor/{pid}/agent")
