@@ -547,6 +547,8 @@ audio, mix) is given to you in every turn; the person sees the same thing on scr
   unless the person explicitly asks to regenerate the video with the audio.
 - To lay out a story as scenes and shots use build_storyboard (nested scenes -> shots, plus
   characters as refs); for a long film call it once per 1-3 scenes so each answer stays short.
+- When the person says to apply / approve / go ahead with your proposal(s), call apply_proposals
+  (and then carry on with the next stage). Never apply on your own initiative.
 - Other story, scene, shot, reference, audio-clip and mix EDITS go through propose_changes: the
   person reviews and applies them (unless the state says you may apply directly). One
   proposal per coherent idea, with a clear title; for a whole-story breakdown, one proposal
@@ -1504,6 +1506,10 @@ async def api_message(thread_id: str, request: Request):
 
 async def _say(user, row, text: str, file_ids: list, focus: dict | None = None) -> dict:
     text = text[:8000]
+    last = db.one("SELECT content, created_at FROM agent_messages WHERE thread_id=? AND role='user' "
+                  "ORDER BY seq DESC LIMIT 1", (row["id"],))
+    if last and not file_ids and last["content"] == text and _now() - last["created_at"] < 5:
+        return {"id": row["id"], "duplicate": True}     # the same message twice in a row
     ids = []
     for f in file_ids if isinstance(file_ids, list) else []:
         r = db.one("SELECT id FROM agent_files WHERE id=? AND thread_id=?", (str(f), row["id"]))

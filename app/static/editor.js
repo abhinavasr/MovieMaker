@@ -64,6 +64,7 @@
     paintTimeline();
     if (!typing()) paintInspector();
     const n = S.proposals.length; $("prop-n").hidden = !n; $("prop-n").textContent = n;
+    paintPropbar();
     $("applies").checked = S.agent_applies;
     const d = String(S.mix.duck_db <= -0.5 ? Math.round(S.mix.duck_db) : 0);
     if (![...$("duck").options].some((o) => o.value === d)) $("duck").insertAdjacentHTML("beforeend", `<option value="${d}">${d} dB</option>`);
@@ -921,6 +922,34 @@
   $("scrub").oninput = () => { const [a, b] = Player.playing ? Player.range : Player.rangeNow(); Player.seek(a + (b - a) * $("scrub").value / 1000); };
   $("prange").onchange = () => { Player.stop(); Player.t = Player.rangeNow()[0]; Player.paintHead(); };
 
+  // Waiting proposals, shown where the conversation is, with the buttons right there.
+  function paintPropbar() {
+    const bar = $("propbar"), props = S.proposals;
+    bar.hidden = !props.length;
+    if (!props.length) { bar.innerHTML = ""; return; }
+    const what = (p) => p.options.length ? `${p.options.length} picture option(s)` : (() => {
+      const c = p.changes, k = (op) => c.filter((x) => x.op === op).length;
+      return [k("add_scene") + k("edit_scene") && `${k("add_scene") + k("edit_scene")} scene(s)`, k("add_shot") && `${k("add_shot")} shot(s)`,
+        k("add_ref") && `${k("add_ref")} reference(s)`].filter(Boolean).join(" · ") || `${c.length} change(s)`; })();
+    bar.innerHTML = `<div class="h">✨ Waiting for you <span class="sp"></span>${props.length > 1 ? `<button class="ed-btn sm gold" data-pb-all>Apply all ${props.length}</button>` : ""}</div>`
+      + props.map((p) => `<div class="row"><div><b>${esc(p.title)}</b><span>${esc(what(p))}</span></div>
+        <button class="ed-btn sm" data-pb-review="${p.id}">Review</button><button class="ed-btn sm gold" data-pb-apply="${p.id}">Apply</button></div>`).join("");
+  }
+  $("propbar").addEventListener("click", async (e) => {
+    const rv = e.target.closest("[data-pb-review]"), ap = e.target.closest("[data-pb-apply]"), all = e.target.closest("[data-pb-all]");
+    if (rv) { setTab("shot"); $("pane-shot").scrollTop = 0; document.querySelector(`.ed-prop[data-p="${rv.dataset.pbReview}"]`)?.scrollIntoView({block: "start"}); return; }
+    const ids = all ? S.proposals.map((p) => p.id) : ap ? [ap.dataset.pbApply] : [];
+    if (!ids.length) return;
+    e.target.disabled = true; let done = 0; const failed = [];
+    for (const id of ids) {
+      const p = S.proposals.find((x) => x.id === id); if (!p) continue;
+      const opt = pickedOption[id] || p.options.find((o) => o.status === "succeeded")?.image_id || null;
+      if (p.options.length && !opt) { failed.push(p.title + " (pictures not ready)"); continue; }
+      try { const r = await api(`/api/editor/${PID}/proposals/${id}/apply`, {option: opt}); done++; failed.push(...(r.failed || [])); } catch (err) { failed.push(err.message); }
+    }
+    toast(`Applied ${done}` + (failed.length ? ` · ${failed.length} skipped: ${failed[0]}` : "")); load(true);
+  });
+
   // ------------------------------------------------------------------ agent
   function focusNow() {
     if (scope === "story") return {level: "story", label: "the whole story"};
@@ -944,14 +973,16 @@
   ["quick", "quick-empty"].forEach((id) => $(id).addEventListener("click", (e) => { const b = e.target.closest("button"); if (b) chatSend(b.textContent); }));
   $("applies").onchange = async () => { await api(`/api/editor/${PID}/settings`, {agent_applies: $("applies").checked}); toast($("applies").checked ? "The agent applies its edits directly" : "The agent proposes; you apply"); };
 
-  let threadId = null, lastAgentStatus = null;
-  async function ensureThread() { if (!threadId) threadId = (await api(`/api/editor/${PID}/agent`, {})).id; return threadId; }
-  async function ensureChat() {
-    if (chat) return chat;
-    await ensureThread();
-    chat = A.mount({root: $("chatroot"), threadId, focus: focusNow, ensureThread,
-      onUpdate: (v) => { if (lastAgentStatus && lastAgentStatus !== v.status) load(true); else if (["executing", "watching"].includes(v.status)) load(); lastAgentStatus = v.status; }});
-    return chat;
+  let threadId = null, lastAgentStatus = null, threadP = null, chatP = null;
+  // Both are memoised as promises: the page load, opening the Agent tab and sending can all
+  // ask at once, and three chat panels on one thread drew every message three times.
+  function ensureThread() {
+    if (threadId) return Promise.resolve(threadId);
+    return threadP ||= api(`/api/editor/${PID}/agent`, {}).then((d) => (threadId = d.id)).finally(() => { threadP = null; });
+  }
+  function ensureChat() {
+    return chatP ||= ensureThread().then(() => (chat = A.mount({root: $("chatroot"), threadId, focus: focusNow, ensureThread,
+      onUpdate: (v) => { if (lastAgentStatus && lastAgentStatus !== v.status) load(true); else if (["executing", "watching"].includes(v.status)) load(); lastAgentStatus = v.status; }})));
   }
   async function chatSend(text) { setTab("agent"); const c = await ensureChat(); c.send(text); }
 

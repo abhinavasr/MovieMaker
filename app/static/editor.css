@@ -311,6 +311,13 @@ body:has(.ed) footer, body:has(.ed) .retention-note { display: none; }
 .ed-quick button { font: inherit; font-size: .72rem; border: 1px solid var(--line); background: var(--panel-2); color: var(--ink); border-radius: 999px; padding: 3px 9px; cursor: pointer; }
 .ed-quick button:hover { border-color: var(--gold); }
 
+.ed-propbar { border-bottom: 1px solid var(--line); padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; background: color-mix(in srgb, var(--gold) 7%, var(--panel)); flex: none; max-height: 40%; overflow-y: auto; }
+.ed-propbar[hidden] { display: none; }
+.ed-propbar .h { display: flex; align-items: center; gap: 8px; font-weight: 650; font-size: .86rem; }
+.ed-propbar .h .sp { flex: 1; }
+.ed-propbar .row { display: grid; grid-template-columns: 1fr auto auto; gap: 6px; align-items: center; font-size: .82rem; border: 1px solid var(--line); background: var(--panel); border-radius: 9px; padding: 6px 8px; }
+.ed-propbar .row b { font-weight: 600; } .ed-propbar .row span { color: var(--muted); font-size: .74rem; display: block; }
+
 /* popover for adding audio on the timeline */
 .ed-pop { position: fixed; z-index: 45; width: 340px; background: var(--panel); border: 1px solid var(--gold); border-radius: 12px; padding: 12px; box-shadow: 0 16px 40px rgba(0,0,0,.5); display: flex; flex-direction: column; gap: 8px; }
 .ed-pop[hidden] { display: none; }

@@ -1831,6 +1831,26 @@ async def _t_music(user, args, base):
     return {"clip_id": cid, "status": "composing (about a minute when the GPU is free)"}
 
 
+def _t_apply(user, args, base):
+    project = _agent_project(user, args)
+    want = args.get("proposal_ids") or []
+    rows = db.query("SELECT id, title FROM proposals WHERE project_id=? AND status='open' "
+                    "ORDER BY created_at", (project["id"],))
+    rows = [r for r in rows if not want or r["id"] in want]
+    if not rows:
+        return {"applied": [], "note": "no open proposals"}
+    done, problems = [], []
+    for r in rows:
+        try:
+            res = apply_proposal(db.one("SELECT * FROM projects WHERE id=?", (project["id"],)),
+                                 user, r["id"])
+            done.append(r["title"])
+            problems += res.get("failed") or []
+        except HTTPException as exc:
+            problems.append(f"{r['title']}: {exc.detail}")
+    return {"applied": done, **({"skipped": problems[:10]} if problems else {})}
+
+
 async def _t_export(user, args, base):
     project = _agent_project(user, args)
     await export(project)
@@ -1941,6 +1961,14 @@ AGENT_TOOLS = {
             "instrumental": {"type": "boolean"}, "lyrics": {"type": "string"},
             "use_in_video": {"type": "boolean", "description": "default false"}}},
         "description": "Score or ambience/sound effects on the timeline (ACE-Step)."},
+    "apply_proposals": {
+        "handler": _t_apply, "light": True,
+        "schema": {"type": "object", "required": ["project_id"], "properties": {
+            **_PID, "proposal_ids": {"type": "array", "items": {"type": "string"},
+                                     "description": "omit = every open proposal"}}},
+        "description": "Apply open proposals ONLY when the person has just said so in their own "
+                       "words (\"apply\", \"approve\", \"go ahead\", \"yes, do it\"). Never on your "
+                       "own initiative."},
     "export_film": {
         "handler": _t_export,
         "schema": {"type": "object", "required": ["project_id"], "properties": {**_PID}},
@@ -2291,19 +2319,24 @@ async def api_delete_production(pid: str, request: Request):
     return {"ok": True}
 
 
+_thread_locks: dict[str, asyncio.Lock] = {}
+
+
 @router.post("/api/editor/{pid}/agent")
 async def api_agent_thread(pid: str, request: Request):
-    """The production's conversation with the assistant (made on first use)."""
+    """The production's conversation with the assistant (made on first use). Locked
+    per production so simultaneous first requests can't make two conversations."""
     from app import agent
     user = _user(request)
     project = production(user, pid)
-    row = db.one("SELECT id FROM agent_threads WHERE project_id=? ORDER BY created_at LIMIT 1",
-                 (pid,))
-    if row:
-        return {"id": row["id"]}
-    tid = agent._new_thread(user, request, f"🎬 {project['title']}"[:70])
-    db.run("UPDATE agent_threads SET project_id=? WHERE id=?", (pid, tid))
-    return {"id": tid}
+    async with _thread_locks.setdefault(pid, asyncio.Lock()):
+        row = db.one("SELECT id FROM agent_threads WHERE project_id=? ORDER BY created_at LIMIT 1",
+                     (pid,))
+        if row:
+            return {"id": row["id"]}
+        tid = agent._new_thread(user, request, f"🎬 {project['title']}"[:70])
+        db.run("UPDATE agent_threads SET project_id=? WHERE id=?", (pid, tid))
+        return {"id": tid}
 
 
 def productions_of(user: auth.User) -> list:
