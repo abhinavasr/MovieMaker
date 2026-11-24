@@ -1540,7 +1540,9 @@ def perform_payload(project_id: str, shot, image_path: str | None, params: dict)
                 # where the line has not started yet.
                 "reference_audio": [{"b64": wis.b64(_window(lines, start, length)),
                                      "mime": "audio/wav"}]}
-    refs = [db.one("SELECT * FROM prod_refs WHERE id=?", (r,)) for r in _jl(shot.get("refs"), [])]
+    # The shot's characters and places, then its scene's: main pictures first, views after,
+    # up to the model's 9.
+    refs = [db.one("SELECT * FROM prod_refs WHERE id=?", (r,)) for r in _shot_ref_ids(shot)]
     refs = [r for r in refs if r is not None]
     pics: list[tuple[str, str]] = []           # (label, path)
     if image_path:
@@ -2129,6 +2131,7 @@ def state(project, base: str) -> dict:
         "mix": _mix(project), "duration": sum(s["seconds"] for s in shot_views),
         "proposals": props, "export": export_view, "ai": ai_activity(project),
         "agent_applies": bool(params.get("agent_applies")),
+        "video_refs": bool(params.get("video_refs")),
         "thread_id": thread["id"] if thread else None,
         "speakers": sorted(speech.SPEAKERS), "framings": list(FRAMINGS),
         "limits": {m: cap_seconds(m) for m in MAKES},
@@ -2725,6 +2728,11 @@ async def api_settings(pid: str, request: Request):
         set_story(project, b.get("title"), b.get("story"))
     if b.get("aspect"):
         out["rerender"] = set_aspect(db.one("SELECT * FROM projects WHERE id=?", (pid,)), b["aspect"])
+    if "video_refs" in b:
+        params = db.params_of(db.one("SELECT * FROM projects WHERE id=?", (pid,)))
+        params["video_refs"] = bool(b["video_refs"])
+        db.set_params(pid, params)
+        _touch(pid)
     if "agent_applies" in b:
         params = db.params_of(db.one("SELECT * FROM projects WHERE id=?", (pid,)))
         params["agent_applies"] = bool(b["agent_applies"])

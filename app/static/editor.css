@@ -416,3 +416,6 @@ body:has(.ed) footer, body:has(.ed) .retention-note { display: none; }
 .ed-tl-bar label { display: inline-flex; align-items: center; gap: 6px; }
 .ed-tl-bar label select, .ed-tl-bar label input { flex: none; }
 .ed-tl-bar select { width: auto; }
+.ed-more-menu { min-width: 240px; }
+.ed-more-menu .ed-aspect { display: grid; gap: 4px; }
+.ed-more-menu .ed-aspect select { width: 100%; }

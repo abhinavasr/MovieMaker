@@ -60,6 +60,7 @@
   function paint() {
     if (document.activeElement !== $("ptitle")) $("ptitle").value = S.title;
     if (document.activeElement !== $("aspect")) $("aspect").value = S.aspect;
+    if (document.activeElement !== $("video-refs")) $("video-refs").value = S.video_refs ? "1" : "0";
     paintStory(); paintScenes(); paintRefs(); paintRender(); paintStopAI();
     if (view === "assets") paintAssets();
     else { paintCrumbs(); if (!Player.playing) paintStage(); paintStrip(); }
@@ -447,6 +448,12 @@
   }
   addEventListener("resize", () => S && fitFrame());
   if (window.ResizeObserver) new ResizeObserver(() => S && fitFrame()).observe($("stage"));
+  $("video-refs").onchange = async () => {
+    const on = $("video-refs").value === "1";
+    try { await api(`/api/editor/${PID}/settings`, {video_refs: on});
+      toast(on ? "Videos will use the shot picture plus its characters and places (its own sound muted). Existing clips stay until you remake them." : "Videos will start exactly on the shot picture");
+      load(true); } catch (e) { toast(e.message); }
+  };
   $("aspect").onchange = async () => {
     const v = $("aspect").value;
     try { const r = await api(`/api/editor/${PID}/settings`, {aspect: v});
@@ -798,7 +805,7 @@
         <option value="" ${sh.start_from ? "" : "selected"}>Its own picture</option>
         <option value="prev_last" ${sh.start_from === "prev_last" ? "selected" : ""} ${S.shots[0]?.id === sh.id ? "disabled" : ""}>Last frame of the previous shot (continuous)</option></select></label>
       <div class="ed-group"><div class="ed-seg" role="radiogroup" aria-label="How the clip is made">${Object.keys(MAKE).map((m) => `<button type="button" data-make="${m}" class="${sh.make === m ? "on" : ""}">${{animate: "🎞", perform: "🎭", lipsync: "👄"}[m]} ${MAKE[m][0]}</button>`).join("")}</div>
-        <div class="ed-note" style="margin-top:5px">${MAKE[sh.make][1]}${sh.make !== "animate" ? (lines.length ? ` Under it: ${lines.map((l) => esc(l.name)).join("; ")}${lines.some((l) => !l.use_in_video) ? " (some not marked “use in video”)" : ""}.` : " <b style='color:var(--warn)'>No dialogue under this shot yet</b> — click the Dialogue lane under it.") : ""}</div></div>
+        <div class="ed-note" style="margin-top:5px">${sh.make === "animate" && S.video_refs ? "The picture comes to life, with its characters' and places' pictures as references (this production's “Videos from” setting, in ⋯). Its own sound is muted." : MAKE[sh.make][1]}${sh.make !== "animate" ? (lines.length ? ` Under it: ${lines.map((l) => esc(l.name)).join("; ")}${lines.some((l) => !l.use_in_video) ? " (some not marked “use in video”)" : ""}.` : " <b style='color:var(--warn)'>No dialogue under this shot yet</b> — click the Dialogue lane under it.") : ""}</div></div>
       <label class="ed-field">Prompt — what moves, how the camera moves<textarea data-f="prompt" rows="4" placeholder="What moves, and how the camera moves…">${esc(sh.prompt)}</textarea></label>
       <div class="ed-group"><h3>References <span class="c ed-note">${sh.refs.length} in this shot</span></h3>
         ${S.refs.length ? `<div class="ed-chips">${refChips}</div>` : `<div class="ed-note">No references yet. <a href="#" id="ins-addref" style="color:var(--gold)">Add a character or place</a> so it stays consistent across shots.</div>`}</div>
@@ -817,7 +824,7 @@
       <div class="ed-row2"><label class="ed-field">Options<select id="g-count"><option>1</option><option selected>2</option><option>3</option><option>4</option></select></label>
       <label class="ed-field">Model<select id="g-model"><option value="">FLUX.2 klein (default)</option><option value="qwen-image-2.1-turbo">Qwen-Image turbo</option><option value="qwen-image-2.1">Qwen-Image</option></select></label></div>
       <div class="acts"><button class="ed-btn gold" data-go="image">Generate options</button></div><div class="ed-note">Uses this shot's references as source pictures. You pick one under Proposed changes.</div></div>`;
-    if (key === "video") return `<div class="ed-genform"><div class="ed-note">${MAKE[sh.make][0]} · ${sh.seconds} s · about ${Math.ceil(sh.seconds / 5 * 2)} min of GPU. ${!sh.picture && sh.start_from !== "prev_last" ? "No picture yet: one is drawn from its characters first, then it renders." : sh.start_from === "prev_last" ? "Opens on the previous shot's last frame." : ""} ${!sh.prompt ? "<b style='color:var(--warn)'>Needs a prompt.</b>" : ""}</div>
+    if (key === "video") return `<div class="ed-genform"><div class="ed-note">${MAKE[sh.make][0]} · ${sh.seconds} s · about ${Math.ceil(sh.seconds / 5 * 2)} min of GPU. ${!sh.picture && sh.start_from !== "prev_last" ? "No picture yet: draw it first (🖼 Pictures)." : sh.start_from === "prev_last" ? "Opens on the previous shot's last frame." : ""} ${!sh.prompt ? "<b style='color:var(--warn)'>Needs a prompt.</b>" : ""}</div>
       <div class="acts"><button class="ed-btn" data-go="video-scene">Render whole scene</button><button class="ed-btn gold" data-go="video">Render this shot</button></div></div>`;
     if (key === "voice") { const sp = S.refs.filter((r) => ["character", "voice"].includes(r.kind) && sh.refs.includes(r.id)).concat(S.refs.filter((r) => ["character", "voice"].includes(r.kind) && !sh.refs.includes(r.id)));
       return `<div class="ed-genform"><label class="ed-field">Who<select id="g-ref">${sp.map((r) => `<option value="${r.id}">${esc(r.name)}</option>`).join("")}<option value="">Narrator / default voice</option></select></label>
