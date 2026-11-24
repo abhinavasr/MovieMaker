@@ -44,7 +44,14 @@ MODELS = {
     "qwen-image-2.1-turbo": "Qwen-Image-2.1 turbo — ~10 s; strong lettering and editing; "
                             "no negative prompt",
     "qwen-image-2.1": "Qwen-Image-2.1 base — slower (25 steps), the most careful Qwen result",
+    # Added 2026-11-24 so the person can switch when one model draws a view wrong.
+    "qwen-image-edit-2511": "Qwen-Image-Edit 2511 — made for edits; keeps a person's identity "
+                            "well; up to 3 source pictures",
+    # Not flux-2-dev: with source pictures it ran out of memory on this 24 GB card every
+    # time (2026-11-24, twice, including on a clear card).
 }
+# Models that take fewer source pictures than MAX_SOURCES (WIS refuses more).
+MODEL_MAX_SOURCES = {"qwen-image-edit-2511": 3}
 MAX_PROMPT = 4000
 # Close to klein's ~1 MP native buckets. WIS diffuses at its own bucket and
 # upscales to the exact size asked, so a bigger number here buys upscaler
@@ -160,6 +167,9 @@ async def create(user: auth.User, prompt: str, sources: list[tuple[str, bytes]],
         raise HTTPException(400, f"model must be one of {', '.join(MODELS)}")
     if len(sources) > MAX_SOURCES:
         raise HTTPException(400, f"at most {MAX_SOURCES} source pictures per image")
+    # The first sources are the main ones (callers order them so); a model that takes
+    # fewer keeps those.
+    sources = sources[:MODEL_MAX_SOURCES.get(model, MAX_SOURCES)]
     if seed is not None:
         try:
             seed = int(seed)

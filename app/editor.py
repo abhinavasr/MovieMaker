@@ -1139,8 +1139,11 @@ def remove_ref_view(project, ref_id: str, key: str) -> None:
     _touch(pid)
 
 
-async def make_angles(project, user: auth.User, ref_id: str, only: list | None = None) -> dict:
-    """Queue the turnaround pictures (needs a finished main picture)."""
+async def make_angles(project, user: auth.User, ref_id: str, only: list | None = None,
+                      model: str | None = None) -> dict:
+    """Queue the turnaround pictures (needs a finished main picture). `model`: the person's
+    choice when the default draws them wrong; otherwise klein for characters and
+    Qwen-Image for places."""
     pid = project["id"]
     r = _ref(pid, ref_id)
     if not r["image_id"] or not _img_done(r["image_id"]):
@@ -1151,6 +1154,7 @@ async def make_angles(project, user: auth.User, ref_id: str, only: list | None =
             src.append(images.source_from_image(user, i))
         except HTTPException:
             pass
+    src = src[:images.MODEL_MAX_SOURCES.get(model or "", images.MAX_SOURCES)]
     more = (f" Pictures 2-{len(src)} are more photos of the same "
             f"{'place' if r['kind'] == 'location' else 'character'}." if len(src) > 1 else "")
     params = db.params_of(project)
@@ -1180,7 +1184,8 @@ async def make_angles(project, user: auth.User, ref_id: str, only: list | None =
                     "plain soft background; character turnaround reference.")
         angles[key] = await images.create(user, (text + more)[:1900], src,
                                           orientation=params.get("orientation", "portrait"),
-                                          model=PLACE_VIEW_MODEL if r["kind"] == "location" else None)
+                                          model=model or (PLACE_VIEW_MODEL if r["kind"] == "location"
+                                                          else None))
     db.run("UPDATE prod_refs SET angles=? WHERE id=?", (json.dumps(angles), ref_id))
     _touch(pid)
     return angles
@@ -3596,7 +3601,10 @@ async def api_ref_angles(pid: str, rid: str, request: Request):
     project = production(user, pid)
     b = await _body(request)
     only = [a for a in (b.get("only") or []) if a in ANGLES or a in PLACE_VIEWS] or None
-    return {"angles": await make_angles(project, user, rid, only)}
+    model = str(b.get("model") or "") or None
+    if model and model not in images.MODELS:
+        raise HTTPException(400, f"model must be one of {', '.join(images.MODELS)}")
+    return {"angles": await make_angles(project, user, rid, only, model)}
 
 
 @router.post("/api/editor/{pid}/refs/{rid}/photos")

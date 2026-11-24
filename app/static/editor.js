@@ -23,6 +23,12 @@
     {make: "restyle", icon: "🎨", title: "Change a video's look", what: "Change outfits, objects, weather, light, setting or style; the motion, camera and sound stay. The shot's picture is a frame of the video with the change (🖼 Pictures).", needs: "the video, and what changes", model: "Viggle Remake (edit)"},
   ];
   const ICON = Object.fromEntries(USES.map((u) => [u.make, u.icon]));
+  // Picture models (2026-11-24: "I should be able to choose models; sometimes the default
+  // model may not be generating the correct image").
+  const IMG_MODELS = [["", "Auto (the usual one)"], ["flux-2-klein-9b", "FLUX.2 klein — fast"],
+    ["qwen-image-2.1-turbo", "Qwen-Image turbo — fast"], ["qwen-image-2.1", "Qwen-Image — careful"],
+    ["qwen-image-edit-2511", "Qwen-Image-Edit — keeps identity"]];
+  const modelOptions = (cur) => IMG_MODELS.map(([v, t]) => `<option value="${v}" ${v === (cur || "") ? "selected" : ""}>${t}</option>`).join("");
   const MAKE = {animate: ["Bring to life", USES[0].what], perform: ["With references", USES[1].what],
     lipsync: ["Speaks / sings", USES[2].what], longtalk: ["Talks / sings long", USES[3].what],
     talk2: ["Two people talk", USES[4].what], motion: ["Copies motion", USES[5].what],
@@ -309,13 +315,14 @@
           <div class="ed-refgen">
             <button class="ed-btn gold" type="button" id="rf-gen">✨ Generate picture</button>
             <label class="ed-note">Options <select id="rf-count"><option>1</option><option selected>2</option><option>3</option><option>4</option></select></label>
+            <label class="ed-note">Model <select id="rf-model">${modelOptions("")}</select></label>
             <details><summary class="ed-note">Edit the prompt</summary><textarea id="rf-prompt" rows="3" placeholder="Empty = from the name, kind and description, in the film's style"></textarea></details>
           </div>
         </div>
         <div class="ed-refopts" id="rf-opts"></div></div>
       ${r && (r.kind === "character" || r.kind === "location") ? `<div class="ed-field">${r.kind === "location" ? "Views of the place" : "Every angle"} — drawn from the main picture and your photos <div class="ed-turn" id="rf-turn"></div>
-        <div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap;align-items:center"><button class="ed-btn sm" type="button" id="rf-photos">⤒ Add photos</button><button class="ed-btn sm" type="button" id="rf-angles">↻ Redraw all</button><span class="ed-note" id="rf-turn-note"></span></div>
-        <div class="ed-note" style="margin-top:4px">Drawn views not right? Use your own photos: ⤒ on a view replaces it, ✕ removes it, and “Add photos” takes several at once as extra references. Your photos are never redrawn.</div></div>` : ""}
+        <div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap;align-items:center"><button class="ed-btn sm" type="button" id="rf-photos">⤒ Add photos</button><label class="ed-note ed-drawwith">Draw with <select id="rf-vmodel" title="If a view comes out wrong, pick another model and press ↻ on it">${modelOptions("")}</select></label><button class="ed-btn sm" type="button" id="rf-angles">↻ Redraw all</button><span class="ed-note" id="rf-turn-note"></span></div>
+        <div class="ed-note" style="margin-top:4px">A view not right? Pick another model under “Draw with” and press ↻ on it — or use your own photos: ⤒ on a view replaces it, ✕ removes it, and “Add photos” takes several at once. Your photos are never redrawn.</div></div>` : ""}
       <input type="file" id="rf-picfile" accept="image/*" hidden>
       <div class="ed-row2" id="rf-voicerow" ${voiced(r?.kind || "character") ? "" : "hidden"}><label class="ed-field">Preset voice<select id="rf-speaker"><option value="">— none —</option>${S.speakers.map((s) => `<option value="${esc(s)}" ${r?.speaker === s ? "selected" : ""}>${esc(voiceLabel(s))}</option>`).join("")}</select></label>
       <label class="ed-field">…or a voice sample to clone<div class="ed-drop" id="rf-voice">${r?.voice ? "🎙 sample saved — click to replace" : "5–30 s of clear speech"}</div><input type="file" id="rf-voicefile" accept="audio/*" hidden></label></div>
@@ -357,7 +364,8 @@
     }
     paintTurn();
     const turnTimer = setInterval(async () => { if ($("modal").hidden || !$("rf-turn")) { clearInterval(turnTimer); return; } await load(); paintTurn(); }, 3000);
-    if ($("rf-angles")) $("rf-angles").onclick = async () => { try { await api(`/api/editor/${PID}/refs/${r.id}/angles`, {}); toast("Drawing every angle from the main picture"); await load(true); paintTurn(); } catch (e) { toast(e.message); } };
+    const vmodel = () => ($("rf-vmodel") && $("rf-vmodel").value) || null;
+    if ($("rf-angles")) $("rf-angles").onclick = async () => { try { await api(`/api/editor/${PID}/refs/${r.id}/angles`, {model: vmodel()}); toast("Drawing every view again (your own photos are kept)"); await load(true); paintTurn(); } catch (e) { toast(e.message); } };
     const pickPhotos = (multiple, slot) => { const inp = document.createElement("input"); inp.type = "file"; inp.accept = "image/*"; inp.multiple = multiple;
       inp.onchange = async () => { if (!inp.files.length) return; const fd = new FormData(); [...inp.files].forEach((f) => fd.append("file", f)); if (slot) fd.append("slot", slot);
         try { const d = await api(`/api/editor/${PID}/refs/${r.id}/photos`, fd); toast(`Added ${d.placed.length} photo(s)` + (d.dropped ? ` · ${d.dropped} over the limit of 6 extra photos` : "")); await load(true); paintTurn(); } catch (err) { toast(err.message); } };
@@ -367,12 +375,12 @@
       const up = e.target.closest("[data-vup]"); if (up) { pickPhotos(false, up.dataset.vup); return; }
       const del = e.target.closest("[data-vdel]"); if (del) { try { await api(`/api/editor/${PID}/refs/${r.id}/views/${del.dataset.vdel}/delete`, {}); toast("Removed"); await load(true); paintTurn(); } catch (err) { toast(err.message); } return; }
       const b = e.target.closest("[data-angle]"); if (!b) return;
-      try { await api(`/api/editor/${PID}/refs/${r.id}/angles`, {only: [b.dataset.angle]}); toast("Redrawing that angle"); await load(true); paintTurn(); } catch (err) { toast(err.message); } });
+      try { await api(`/api/editor/${PID}/refs/${r.id}/angles`, {only: [b.dataset.angle], model: vmodel()}); toast("Redrawing that view" + (vmodel() ? " with " + IMG_MODELS.find((m) => m[0] === vmodel())[1].split(" —")[0] : "")); await load(true); paintTurn(); } catch (err) { toast(err.message); } });
     $("rf-gen").onclick = async () => {
       const btn = $("rf-gen"); btn.disabled = true;
       try {
         await saveRef();                         // a new reference is created first; edits are kept
-        const d = await api(`/api/editor/${PID}/refs/${r.id}/generate`, {prompt: $("rf-prompt").value, count: +$("rf-count").value});
+        const d = await api(`/api/editor/${PID}/refs/${r.id}/generate`, {prompt: $("rf-prompt").value, count: +$("rf-count").value, model: $("rf-model").value || null});
         if (!$("rf-prompt").value) $("rf-prompt").placeholder = d.prompt;
         const ids = d.image_ids;
         $("rf-opts").innerHTML = ids.map((id, i) => `<button type="button" class="opt" data-img="${id}"><span>drawing ${i + 1}…</span><span class="pg"><i></i></span></button>`).join("");
@@ -884,7 +892,7 @@
   function genForm(key, sh) {
     if (key === "image") return `<div class="ed-genform"><label class="ed-field">Picture prompt (empty = from the shot's framing, title, prompt and scene)<textarea id="g-prompt" rows="3"></textarea></label>
       <div class="ed-row2"><label class="ed-field">Options<select id="g-count"><option>1</option><option selected>2</option><option>3</option><option>4</option></select></label>
-      <label class="ed-field">Model<select id="g-model"><option value="">FLUX.2 klein (default)</option><option value="qwen-image-2.1-turbo">Qwen-Image turbo</option><option value="qwen-image-2.1">Qwen-Image</option></select></label></div>
+      <label class="ed-field">Model<select id="g-model">${modelOptions("")}</select></label></div>
       <div class="acts"><button class="ed-btn gold" data-go="image">Generate options</button></div><div class="ed-note">Uses this shot's references as source pictures. You pick one under Proposed changes.</div></div>`;
     if (key === "video") return `<div class="ed-genform"><div class="ed-note">${MAKE[sh.make][0]} · ${sh.seconds} s · about ${Math.ceil(sh.seconds / 5 * 2)} min of GPU. ${!sh.picture && sh.start_from !== "prev_last" ? "No picture yet: draw it first (🖼 Pictures)." : sh.start_from === "prev_last" ? "Opens on the previous shot's last frame." : ""} ${!sh.prompt ? "<b style='color:var(--warn)'>Needs a prompt.</b>" : ""}</div>
       <div class="acts"><button class="ed-btn" data-go="video-scene">Render whole scene</button><button class="ed-btn gold" data-go="video">Render this shot</button></div></div>`;

@@ -453,3 +453,6 @@ body:has(.ed) footer, body:has(.ed) .retention-note { display: none; }
 .ed-check { display: flex; gap: 6px; align-items: center; font-size: .78rem; color: var(--muted); margin: 2px 0 6px; }
 .ed-check input { width: auto; flex: none; margin: 0; }
 .ed-check { justify-content: flex-start; text-align: left; }
+
+.ed-drawwith { display: inline-flex; align-items: center; gap: 6px; }
+.ed-drawwith select, #rf-model { font: inherit; font-size: .76rem; background: var(--panel-2); color: var(--ink); border: 1px solid var(--line); border-radius: 7px; padding: 4px 6px; max-width: 190px; }
