@@ -419,3 +419,11 @@ body:has(.ed) footer, body:has(.ed) .retention-note { display: none; }
 .ed-more-menu { min-width: 240px; }
 .ed-more-menu .ed-aspect { display: grid; gap: 4px; }
 .ed-more-menu .ed-aspect select { width: 100%; }
+
+.ed-rvids { display: grid; gap: 6px; margin-bottom: 8px; }
+.ed-rvid { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 9px; background: var(--panel-2); font-size: .8rem; }
+.ed-rvid span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ed-rvid button { background: none; border: 0; color: var(--muted); cursor: pointer; }
+.ed-rvid button:hover { color: var(--bad); }
+.ed-rvadd { display: flex; gap: 6px; margin-bottom: 6px; }
+.ed-rvadd select { flex: 1; font: inherit; font-size: .8rem; background: var(--panel-2); color: var(--ink); border: 1px solid var(--line); border-radius: 8px; padding: 5px 8px; }

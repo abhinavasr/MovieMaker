@@ -802,6 +802,10 @@
       <label class="ed-field">Prompt — what moves, how the camera moves<textarea data-f="prompt" rows="4" placeholder="What moves, and how the camera moves…">${esc(sh.prompt)}</textarea></label>
       <div class="ed-group"><h3>References <span class="c ed-note">${sh.refs.length} in this shot</span></h3>
         ${S.refs.length ? `<div class="ed-chips">${refChips}</div>` : `<div class="ed-note">No references yet. <a href="#" id="ins-addref" style="color:var(--gold)">Add a character or place</a> so it stays consistent across shots.</div>`}</div>
+      ${sh.make === "lipsync" ? "" : `<div class="ed-group"><h3>Reference videos <span class="c ed-note">${sh.ref_videos.length} of 3</span></h3>
+        ${sh.ref_videos.length ? `<div class="ed-rvids">${sh.ref_videos.map((v) => `<div class="ed-rvid"><span>🎞 &lt;Video ${v.i + 1}&gt; ${esc(v.label)}</span><button type="button" data-rvdel="${v.i}" aria-label="Remove">✕</button></div>`).join("")}</div>` : ""}
+        ${sh.ref_videos.length < 3 ? `<div class="ed-rvadd"><select id="rv-shot" aria-label="Use a shot's clip"><option value="">＋ A shot's clip…</option>${S.shots.filter((x) => x.clip && x.id !== sh.id && !sh.ref_videos.some((v) => v.label.includes("“" + (x.title || "shot " + x.n) + "”"))).map((x) => `<option value="${x.id}">${x.n}. ${esc(x.title || "Shot " + x.n)}</option>`).join("")}</select><button class="ed-btn sm" id="rv-upload" type="button">⤒ Upload video</button></div>` : ""}
+        <div class="ed-note">The video follows its motion and camera movement — strongly. Uses “Picture + references”; up to 15 s of each is used.</div></div>`}
       <div class="ed-group"><h3>Generate</h3><div class="ed-gen">
         ${gen("image", "🖼", "Image", sh.picture ? "new picture options (keeps the references)" : "this shot has no picture yet")}
         ${gen("video", "🎬", "Video", sh.status === "done" ? "clip ready — render again" : sh.status === "stale" ? "changed since rendered" : "render this shot's clip")}
@@ -913,6 +917,15 @@
     });
     pane.querySelectorAll("[data-go]").forEach((b) => b.onclick = () => runGen(b.dataset.go, sh, b));
     if ($("ins-upload")) $("ins-upload").onclick = () => uploadPicture(sh.id);
+    const rvDone = (r) => { toast("Reference video added" + (r.switched ? " — this shot now uses “Picture + references”" : "") + ". Remake its video with 🎬."); load(true); };
+    if ($("rv-shot")) $("rv-shot").onchange = async () => { const v = $("rv-shot").value; if (!v) return;
+      try { rvDone(await api(`/api/editor/${PID}/shots/${sh.id}/ref-videos`, {from_shot: v})); } catch (e) { toast(e.message); } };
+    if ($("rv-upload")) $("rv-upload").onclick = () => { const inp = document.createElement("input"); inp.type = "file"; inp.accept = "video/*";
+      inp.onchange = async () => { const fd = new FormData(); fd.append("file", inp.files[0]); toast("Uploading the video…");
+        try { rvDone(await api(`/api/editor/${PID}/shots/${sh.id}/ref-videos`, fd)); } catch (e) { toast(e.message); } };
+      inp.click(); };
+    pane.querySelectorAll("[data-rvdel]").forEach((b) => b.onclick = async () => {
+      try { await api(`/api/editor/${PID}/shots/${sh.id}/ref-videos/${b.dataset.rvdel}/delete`, {}); toast("Reference video removed"); load(true); } catch (e) { toast(e.message); } });
     if ($("mv-up")) $("mv-up").onclick = () => nudge(sh.id, -1);
     if ($("mv-down")) $("mv-down").onclick = () => nudge(sh.id, 1);
     if ($("mv-scene")) $("mv-scene").onchange = () => { const sc = sceneById($("mv-scene").value); moveShot(sh.id, sc.id, sc.shots.filter((x) => x !== sh.id).length, `Moved to “${sc.title}”`); };

@@ -37,6 +37,7 @@ import logging
 import math
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request, UploadFile
@@ -1517,6 +1518,118 @@ def _dialogue_under(pid: str, shot_id: str) -> list:
             c["start_s"] + (c["duration_s"] or 0) > start]
 
 
+# ------------------------------------------------------------ reference videos
+# A "Picture + references" shot can also follow up to 3 reference videos (another
+# shot's clip, or an uploaded video): MiniMax H3 ref2v, `<Video k>` in the prompt.
+# Measured 2026-11-24: a reference video steers the result much harder than the
+# pictures -- the test clip followed its reference's motion and camera almost
+# frame for frame.
+MAX_REF_VIDEOS = 3
+REF_VIDEO_MAX_S = 15.0
+REF_VIDEO_UPLOAD_MB = 95          # Cloudflare refuses request bodies over 100 MB
+
+
+def _ref_video_items(pid: str, shot) -> list[tuple[str, Path]]:
+    """(label, file) for each reference video of a shot that still exists."""
+    out = []
+    for it in _jl(shot["ref_videos"] if "ref_videos" in shot.keys() else "[]", []):
+        if it.get("shot"):
+            row = db.one("SELECT title, idx, clip_path FROM shots WHERE id=? AND project_id=?",
+                         (it["shot"], pid))
+            if row and row["clip_path"] and Path(row["clip_path"]).exists():
+                out.append((f"the clip of shot “{row['title'] or 'shot ' + str(row['idx'] + 1)}”",
+                            Path(row["clip_path"])))
+        elif it.get("path") and Path(it["path"]).exists():
+            out.append((f"the video “{Path(it.get('name') or 'uploaded').stem}”", Path(it["path"])))
+    return out
+
+
+def _probe_seconds(path: Path) -> float:
+    res = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+                          "format=duration", "-of", "csv=p=0", str(path)],
+                         capture_output=True, text=True, timeout=60)
+    try:
+        return float(res.stdout.strip().split("\n")[0])
+    except ValueError:
+        return 0.0
+
+
+def _ref_video_b64(path: Path, width: int, height: int) -> str:
+    """As the model reads them: 24 fps, 2-15 s, fitted inside the clip's size, no sound."""
+    dur = _probe_seconds(path)
+    vf = (f"fps=24,scale={width}:{height}:force_original_aspect_ratio=decrease,"
+          "scale=trunc(iw/2)*2:trunc(ih/2)*2")
+    if dur < 2.1:
+        vf += f",tpad=stop_mode=clone:stop_duration={2.1 - dur:.2f}"
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "ref.mp4"
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(path), "-t",
+                        str(REF_VIDEO_MAX_S), "-vf", vf, "-an", "-c:v", "libx264", "-crf", "23",
+                        "-preset", "veryfast", "-pix_fmt", "yuv420p", str(out)],
+                       check=True, timeout=300)
+        return wis.b64(out.read_bytes())
+
+
+def add_ref_video(project, sid: str, from_shot: str | None = None,
+                  upload: tuple[str, bytes] | None = None) -> dict:
+    pid = project["id"]
+    shot = _shot(pid, sid)
+    if shot["make"] == "lipsync":
+        raise HTTPException(400, "a lip-sync shot is made from its voice; switch it to "
+                                 "“Picture + references” to use reference videos")
+    items = _jl(shot["ref_videos"], [])
+    if len(items) >= MAX_REF_VIDEOS:
+        raise HTTPException(409, f"a shot takes at most {MAX_REF_VIDEOS} reference videos")
+    if from_shot:
+        src = db.one("SELECT id, clip_path FROM shots WHERE id=? AND project_id=?", (from_shot, pid))
+        if src is None or src["id"] == sid:
+            raise HTTPException(400, "pick another shot of this production")
+        if not (src["clip_path"] and Path(src["clip_path"]).exists()):
+            raise HTTPException(400, "that shot has no clip yet")
+        if any(it.get("shot") == from_shot for it in items):
+            raise HTTPException(409, "that clip is already a reference of this shot")
+        item = {"shot": from_shot}
+    elif upload:
+        name, raw = upload
+        if len(raw) > REF_VIDEO_UPLOAD_MB * 1024 * 1024:
+            raise HTTPException(413, f"videos up to {REF_VIDEO_UPLOAD_MB} MB")
+        ext = (Path(name).suffix.lower() or ".mp4")[:6]
+        dest = cfg.uploads_dir / pid / "refvideos"
+        dest.mkdir(parents=True, exist_ok=True)
+        path = dest / f"{db.new_id('rv')}{ext}"
+        path.write_bytes(raw)
+        if _probe_seconds(path) <= 0.2:
+            path.unlink(missing_ok=True)
+            raise HTTPException(400, "that file is not a video this studio can read")
+        item = {"path": str(path), "name": Path(name).name[:80]}
+    else:
+        raise HTTPException(400, "choose a shot's clip or upload a video")
+    items.append(item)
+    sets = {"ref_videos": json.dumps(items)}
+    if shot["make"] != "perform":
+        sets["make"] = "perform"           # only the reference model reads videos
+    if shot["status"] == "done":
+        sets["status"] = "stale"
+    db.run(f"UPDATE shots SET {', '.join(k + '=?' for k in sets)} WHERE id=?",
+           (*sets.values(), sid))
+    _touch(pid)
+    return {"ok": True, "count": len(items), "switched": "make" in sets}
+
+
+def remove_ref_video(project, sid: str, index: int) -> None:
+    pid = project["id"]
+    shot = _shot(pid, sid)
+    items = _jl(shot["ref_videos"], [])
+    if not 0 <= index < len(items):
+        raise HTTPException(404, "no such reference video")
+    gone = items.pop(index)
+    if gone.get("path"):
+        Path(gone["path"]).unlink(missing_ok=True)
+    db.run("UPDATE shots SET ref_videos=?, status=CASE WHEN status='done' THEN 'stale' ELSE "
+           "status END WHERE id=?", (json.dumps(items), sid))
+    _touch(pid)
+
+
 def perform_payload(project_id: str, shot, image_path: str | None, params: dict) -> dict:
     """The WIS request for a performance or lip-sync shot (called by app/render.py)."""
     pid = project_id
@@ -1581,6 +1694,9 @@ def perform_payload(project_id: str, shot, image_path: str | None, params: dict)
             lines.append(f"Someone says \"{c['text']}\", as in <Audio {i + 1}>.")
         else:
             lines.append(f"The {c['track']} sounds like <Audio {i + 1}>.")
+    vids = _ref_video_items(pid, shot)[:MAX_REF_VIDEOS] if "ref_videos" in shot else []
+    for k, (label, _) in enumerate(vids):
+        lines.append(f"<Video {k + 1}> is {label}: follow its motion and camera movement.")
     ctx = _shot_context(pid, shot)
     prompt = " ".join([shot.get("prompt") or "", *lines, ctx]).strip()
     payload = {
@@ -1595,6 +1711,10 @@ def perform_payload(project_id: str, shot, image_path: str | None, params: dict)
     if under:
         payload["reference_audio"] = [{"b64": wis.b64(_cut(c, start, length)), "mime": "audio/wav"}
                                       for c in under]
+    if vids:
+        payload["reference_videos"] = [
+            {"b64": _ref_video_b64(p, payload["width"], payload["height"]), "mime": "video/mp4"}
+            for _, p in vids]
     if params.get("upscale") in ("latent", "refine"):
         payload["upscale"] = params["upscale"]
     return payload
@@ -2075,6 +2195,8 @@ def state(project, base: str) -> dict:
             "prompt": s["prompt"], "seconds": secs, "start": start, "framing": s["framing"],
             "make": s["make"] or "animate", "refs": _jl(s["refs"], []), "status": s["status"],
             "start_from": s["start_from"] or "",
+            "ref_videos": [{"i": i, "label": lbl} for i, (lbl, _) in
+                           enumerate(_ref_video_items(pid, s))],
             "auto": next((j["stage"] for j in params.get("_auto_shots") or [] if j["shot"] == s["id"]), None),
             "error": s["error"], "picture": _asset_url(pid, s["asset_id"]),
             "clip": f"/api/editor/{pid}/shots/{s['id']}/clip?v={int(Path(s['clip_path']).stat().st_mtime)}"
@@ -2415,6 +2537,15 @@ async def _t_render(user, args, base):
     return out
 
 
+async def _t_refvid(user, args, base):
+    project = _agent_project(user, args)
+    out = add_ref_video(project, str(args.get("shot_id") or ""),
+                        from_shot=str(args.get("from_shot_id") or ""))
+    return {"project_id": project["id"], **out,
+            "note": "the shot now follows that clip's motion and camera; render_shots remakes it "
+                    "only when the person asks for videos"}
+
+
 async def _t_draw(user, args, base):
     project = _agent_project(user, args)
     _, later = prepare_render(project, user, args.get("shot_ids") or None, "pictures")
@@ -2596,6 +2727,15 @@ AGENT_TOOLS = {
             "summary": {"type": "string"}}},
         "description": "Make picture options for a shot with its references' pictures as "
                        "sources (keeps characters consistent). Offered to the person to pick."},
+    "add_reference_video": {
+        "handler": _t_refvid,
+        "schema": {"type": "object", "required": ["project_id", "shot_id", "from_shot_id"],
+                   "properties": {**_PID, "shot_id": {"type": "string"},
+                                  "from_shot_id": {"type": "string", "description": "a shot whose "
+                                                   "clip is already rendered"}}},
+        "description": "Make a shot follow the motion and camera movement of another shot's clip "
+                       "(a reference video, up to 3 per shot). Switches the shot to Picture + "
+                       "references. The person can also upload their own reference videos."},
     "draw_pictures": {
         "handler": _t_draw,
         "schema": {"type": "object", "required": ["project_id"], "properties": {
@@ -2780,6 +2920,27 @@ async def api_picture(pid: str, sid: str, request: Request):
         image_id = str((await _body(request)).get("image_id") or "")
     set_picture(project, user, sid, image_id)
     return {"ok": True, "image_id": image_id}
+
+
+@router.post("/api/editor/{pid}/shots/{sid}/ref-videos")
+async def api_add_ref_video(pid: str, sid: str, request: Request):
+    user = _user(request)
+    project = production(user, pid)
+    if request.headers.get("content-type", "").startswith("multipart/"):
+        form = await request.form()
+        up = form.get("file")
+        if up is None or not hasattr(up, "read"):
+            raise HTTPException(400, "no file")
+        return add_ref_video(project, sid, upload=(getattr(up, "filename", "video.mp4"),
+                                                   await up.read()))
+    return add_ref_video(project, sid, from_shot=str((await _body(request)).get("from_shot") or ""))
+
+
+@router.post("/api/editor/{pid}/shots/{sid}/ref-videos/{index}/delete")
+async def api_remove_ref_video(pid: str, sid: str, index: int, request: Request):
+    user = _user(request)
+    remove_ref_video(production(user, pid), sid, index)
+    return {"ok": True}
 
 
 def _import_picture(user: auth.User, name: str, raw: bytes) -> str:
