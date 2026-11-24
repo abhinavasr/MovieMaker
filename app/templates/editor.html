@@ -12,14 +12,19 @@
       <button type="button" data-view="assets">🖼 <span class="t">Assets</span></button>
       <button type="button" data-view="timeline">☰ <span class="t">Timeline</span></button>
     </nav>
+    <div class="ed-render" id="render-state" aria-live="polite"></div>
     <div class="ed-topr">
-      <label class="ed-aspect" title="The film's shape"><span>Aspect</span><select id="aspect" aria-label="Aspect ratio"><option value="9:16">9:16</option><option value="16:9">16:9</option><option value="1:1">1:1</option><option value="2.39:1">2.39:1 cinema</option></select></label>
-      <button class="ed-btn sm danger" id="stop-ai" type="button" hidden title="Stop every AI operation in this production">■ Stop</button>
-      <div class="ed-render" id="render-state"></div>
-      <button class="ed-btn sm" id="draw-missing" type="button" title="Step 1: draw the missing character and place pictures, then a picture for every shot without one. No video is made.">🖼 Draw pictures</button>
-      <button class="ed-btn sm" id="render-missing" type="button" title="Step 2: make the video of every shot that has a picture and no up-to-date clip">🎬 Make videos</button>
-      <button class="ed-btn outline" id="export" type="button">⤓ Export</button>
-      <button class="ed-btn ghost icon" id="del-prod" type="button" title="Delete this production" aria-label="Delete this production">🗑</button>
+      <button class="ed-btn sm danger" id="stop-ai" type="button" hidden title="Stop every AI operation in this production">■ <span class="t">Stop</span></button>
+      <button class="ed-btn sm" id="draw-missing" type="button" title="Step 1 · Draw pictures: the missing character and place pictures, then a picture for every shot without one. No video is made.">🖼 <span class="t">Pictures</span><b class="n" hidden></b></button>
+      <button class="ed-btn sm" id="render-missing" type="button" title="Step 2 · Make videos: every shot that has a picture and no up-to-date clip">🎬 <span class="t">Videos</span><b class="n" hidden></b></button>
+      <button class="ed-btn sm outline" id="export" type="button" title="Mix and export the film">⤓ <span class="t">Export</span></button>
+      <div class="ed-more">
+        <button class="ed-btn ghost icon" id="more-btn" type="button" aria-label="More" aria-expanded="false" title="Aspect ratio, delete">⋯</button>
+        <div class="ed-more-menu" id="more-menu" hidden>
+          <label class="ed-aspect" title="The film's shape"><span>Aspect</span><select id="aspect" aria-label="Aspect ratio"><option value="9:16">9:16</option><option value="16:9">16:9</option><option value="1:1">1:1</option><option value="2.39:1">2.39:1 cinema</option></select></label>
+          <button class="ed-btn sm danger" id="del-prod" type="button">🗑 Delete production</button>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -35,7 +40,7 @@
         <div class="ed-scenes" id="scenes"></div>
       </section>
       <section>
-        <div class="ed-sec-h"><h2>Project references</h2><span><button class="ed-btn ghost icon" id="refs-gen" type="button" title="Generate a picture for every reference that has none" aria-label="Generate missing reference pictures">✨</button><button class="ed-btn ghost icon" id="add-ref" type="button" title="Add a character, place or voice" aria-label="Add reference">＋</button></span></div>
+        <div class="ed-sec-h"><h2 title="Characters, places and voices the film keeps coming back to">References</h2><span><button class="ed-btn ghost icon" id="refs-gen" type="button" title="Generate a picture for every reference that has none" aria-label="Generate missing reference pictures">✨</button><button class="ed-btn ghost icon" id="add-ref" type="button" title="Add a character, place or voice" aria-label="Add reference">＋</button></span></div>
         <div class="ed-refs" id="refs"></div>
       </section>
     </aside>

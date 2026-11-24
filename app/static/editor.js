@@ -98,14 +98,16 @@
     const busy = ["running", "queued"].includes(S.status);
     const needPic = S.shots.filter((s) => !s.asset_id && s.start_from !== "prev_last").length;
     const canVideo = S.shots.filter((s) => s.status !== "done" && (s.asset_id || s.start_from === "prev_last")).length;
+    const badge = (id, n) => { const b = $(id).querySelector(".n"); b.hidden = !n; b.textContent = n || ""; };
     $("draw-missing").disabled = !S.shots.length;
-    $("draw-missing").textContent = needPic ? `🖼 Draw ${needPic} picture${needPic > 1 ? "s" : ""}` : "🖼 Draw pictures";
+    badge("draw-missing", needPic);
     $("render-missing").disabled = !S.shots.length || busy || !canVideo;
-    $("render-missing").textContent = canVideo ? `🎬 Make ${canVideo} video${canVideo > 1 ? "s" : ""}` : "🎬 Make videos";
+    badge("render-missing", canVideo);
     const ex = S.export;
     const b = $("export");
-    if (ex.status === "running") { b.textContent = "⏳ Mixing…"; b.disabled = true; }
-    else { b.disabled = false; b.textContent = ex.url ? "⤓ Export (ready)" : "⤓ Export"; }
+    b.disabled = ex.status === "running";
+    b.querySelector(".t").textContent = ex.status === "running" ? "Mixing…" : "Export";
+    b.classList.toggle("ready", !!ex.url && ex.status !== "running");
   }
   // Two separate steps (the person's rule): pictures, then -- only when asked -- videos.
   // Making videos never draws pictures, and drawing pictures never starts the video model.
@@ -155,6 +157,9 @@
       });
   };
   $("export").onclick = () => openExport();
+  const more = (open) => { $("more-menu").hidden = !open; $("more-btn").setAttribute("aria-expanded", String(open)); };
+  $("more-btn").onclick = (e) => { e.stopPropagation(); more($("more-menu").hidden); };
+  document.addEventListener("click", (e) => { if (!e.target.closest(".ed-more")) more(false); });
   $("del-prod").onclick = () => modal(`<h2>Delete “${esc(S.title)}”?</h2>
       <p style="font-size:.88rem">This deletes the whole production: ${S.scenes.length} scene(s), ${S.shots.length} shot(s) and their clips, the timeline audio, references, proposals, the exported film and the conversation with the assistant. It can't be undone.</p>
       <p class="ed-note">Pictures, speech and songs also saved in your studio library stay there.</p>
@@ -191,7 +196,7 @@
   function paintStory() {
     const tx = (S.story || "").replace(/[#*_`>]/g, "").trim();
     $("story-card").innerHTML = (tx ? `<div class="tx">${esc(tx.slice(0, 600))}</div>` : `<div>No story yet. Write or paste it here, or develop it with the agent.</div>`)
-      + `<div class="acts"><button class="ed-btn sm" id="story-build" type="button">✨ Build scenes & shots from the story</button>${S.shots.length && !S.clips.some((c) => c.track === "dialogue") ? `<button class="ed-btn sm gold" id="story-lines" type="button">📝 Add the script's lines</button>` : ""}</div>`;
+      + `<div class="acts"><button class="ed-btn sm" id="story-build" type="button" title="The agent builds the scenes and shots from the story">✨ Build shots</button>${S.shots.length && !S.clips.some((c) => c.track === "dialogue") ? `<button class="ed-btn sm gold" id="story-lines" type="button" title="The agent puts the story's dialogue and narration under the shots, then they are voiced">📝 Add lines</button>` : ""}</div>`;
     if ($("story-lines")) $("story-lines").onclick = (e) => { e.stopPropagation(); addLines(); };
     $("story-build").onclick = (e) => { e.stopPropagation(); if (!tx) { storyModal(); return; }
       scope = "story"; paintScope(); setTab("agent");
@@ -493,7 +498,7 @@
     const shots = sceneShots(sel.scene);
     $("strip").innerHTML = shots.map((s, i) => `<div class="ed-card ${s.id === sel.shot ? "on" : ""}" data-shot="${s.id}" draggable="true" title="Drag to reorder, or onto a scene on the left to move it there">
       ${s.start_from === "prev_last" ? `<span class="chain" title="Opens on the previous shot's last frame">⛓ continues</span>` : ""}
-      <div class="th">${s.picture ? `<img src="${esc(s.picture)}" alt="" loading="lazy">` : s.start_from === "prev_last" ? "⛓ continues" : "no picture"}</div>
+      <div class="th">${s.picture ? `<img src="${esc(s.picture)}" alt="" loading="lazy">` : s.start_from === "prev_last" ? "" : "no picture"}</div>
       <span class="mk">${{animate: "🎞", perform: "🎭", lipsync: "👄"}[s.make]} ${s.seconds}s</span>
       ${(() => { const b = s.auto ? {continuity: "🔗 checking continuity", refs: "⏳ characters & places", picture: "🖼 making picture", render: s.start_from === "prev_last" ? "⛓ after previous" : "⏳ to render"}[s.auto] : {done: "● clip", running: "⏳ rendering", failed: "failed", stale: "changed"}[s.status] || (s.status === "pending" && ["running", "queued"].includes(S.status) ? "queued" : ""); return b ? `<span class="st ${s.auto ? "running" : esc(s.status)}">${b}</span>` : ""; })()}
       <div class="m"><b>Shot ${String(i + 1).padStart(2, "0")}</b><span class="f">${esc(s.framing)}</span><span>${esc(s.title || s.prompt || "untitled")}</span></div></div>`).join("")
@@ -564,8 +569,8 @@
     const x = (t) => (t - a) * TL.pps;
     const unvoiced = S.clips.filter((c) => c.status === "script" && !c.auto).length;
     const noLines = S.shots.length && !S.clips.some((c) => c.track === "dialogue");
-    $("tl-time").innerHTML = `${fmt(a)} – ${fmt(b)}` + (unvoiced ? ` <button class="ed-btn sm gold" id="voice-all" type="button">🎙 Voice all ${unvoiced} line(s)</button>`
-      : noLines && S.story ? ` <button class="ed-btn sm gold" id="add-lines" type="button" title="The agent puts the story's dialogue and narration under the shots, then they are voiced">📝 Add the script's lines</button>` : "");
+    $("tl-time").innerHTML = `${fmt(a)} – ${fmt(b)}` + (unvoiced ? ` <button class="ed-btn sm gold" id="voice-all" type="button" title="Voice all ${unvoiced} line(s)">🎙 Voice ${unvoiced}</button>`
+      : noLines && S.story ? ` <button class="ed-btn sm gold" id="add-lines" type="button" title="The agent puts the story's dialogue and narration under the shots, then they are voiced">📝 Add lines</button>` : "");
     if ($("add-lines")) $("add-lines").onclick = addLines;
     if ($("voice-all")) $("voice-all").onclick = async () => { const d = await api(`/api/editor/${PID}/voice-all`, {}); toast(`Voicing ${d.queued} line(s) in the characters' voices`); load(true); };
     const step = [0.5, 1, 2, 5, 10, 15, 30, 60, 120].find((s) => s * TL.pps >= 46) || 300;
