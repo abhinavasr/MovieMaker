@@ -95,28 +95,42 @@
       // render-only Cancel, which left pictures and voicing running.
       box.innerHTML = `<span class="bar"><i style="width:${S.progress}%"></i></span><span title="${esc(S.message)}">${esc(S.status === "queued" ? "waiting for the GPU" : S.message || "rendering")}</span>`;
     } else box.innerHTML = S.shots.length ? `<span>${done}/${S.shots.length} shots rendered</span>` : "";
-    $("render-missing").disabled = !S.shots.length || ["running", "queued"].includes(S.status) || done === S.shots.length;
+    const busy = ["running", "queued"].includes(S.status);
+    const needPic = S.shots.filter((s) => !s.asset_id && s.start_from !== "prev_last").length;
+    const canVideo = S.shots.filter((s) => s.status !== "done" && (s.asset_id || s.start_from === "prev_last")).length;
+    $("draw-missing").disabled = !S.shots.length;
+    $("draw-missing").textContent = needPic ? `🖼 Draw ${needPic} picture${needPic > 1 ? "s" : ""}` : "🖼 Draw pictures";
+    $("render-missing").disabled = !S.shots.length || busy || !canVideo;
+    $("render-missing").textContent = canVideo ? `🎬 Make ${canVideo} video${canVideo > 1 ? "s" : ""}` : "🎬 Make videos";
     const ex = S.export;
     const b = $("export");
     if (ex.status === "running") { b.textContent = "⏳ Mixing…"; b.disabled = true; }
     else { b.disabled = false; b.textContent = ex.url ? "⤓ Export (ready)" : "⤓ Export"; }
   }
-  // One door for every Render button: shots without a picture get one first (drawn from
-  // their references), then render; the toast says which.
+  // Two separate steps (the person's rule): pictures, then -- only when asked -- videos.
+  // Making videos never draws pictures, and drawing pictures never starts the video model.
   async function renderShots(ids, what) {
     try {
-      const r = await api(`/api/editor/${PID}/render`, ids ? {shot_ids: ids} : {});
-      toast(r.making_pictures ? `Making ${r.making_pictures} picture(s) from the characters first, then rendering` + (r.rendering ? ` · ${r.rendering} rendering now` : "")
-        : `Rendering ${what || r.rendering + " shot(s)"}`);
+      const r = await api(`/api/editor/${PID}/render`, Object.assign({step: "videos"}, ids ? {shot_ids: ids} : {}));
+      if (!r.rendering) toast(r.need_pictures ? `${r.need_pictures === 1 && ids?.length === 1 ? "This shot needs" : r.need_pictures + " shot(s) need"} a picture first — use 🖼 Draw pictures` : "Nothing to render");
+      else toast(`Making ${what || r.rendering + " video(s)"}` + (r.need_pictures ? ` · ${r.need_pictures} shot(s) skipped: no picture yet` : ""));
       load(true); return r;
     } catch (e) { toast(e.message); }
   }
-  $("render-missing").onclick = () => renderShots(null, "the missing shots");
+  async function drawPictures(ids) {
+    try {
+      const r = await api(`/api/editor/${PID}/render`, Object.assign({step: "pictures"}, ids ? {shot_ids: ids} : {}));
+      toast(r.making_pictures ? `Drawing pictures for ${r.making_pictures} shot(s) — characters and places first. No videos until you press 🎬 Make videos.` : "Every shot already has its picture");
+      load(true); return r;
+    } catch (e) { toast(e.message); }
+  }
+  $("render-missing").onclick = () => renderShots(null, "the videos");
+  $("draw-missing").onclick = () => drawPictures(null);
   function aiSummary() {
     const a = S.ai || {}, parts = [];
     if (a.rendering) parts.push(`rendering (${a.render_message || "queued"})`);
     if (a.pictures) parts.push(`${a.pictures} picture(s) being made`);
-    if (a.shots_waiting) parts.push(`${a.shots_waiting} shot(s) waiting to render`);
+    if (a.shots_waiting) parts.push(`${a.shots_waiting} shot(s) being prepared`);
     if (a.voicing) parts.push(`${a.voicing} line(s) being voiced`);
     if (a.agent) parts.push(`the agent (${a.agent})`);
     return parts;
@@ -164,7 +178,7 @@
       ${ex.url ? `<video src="${esc(ex.url)}" controls style="width:100%;max-height:50dvh;border-radius:10px;background:#000"></video>` : ""}
       <div class="acts">
         ${ex.url ? `<a class="ed-btn" href="${esc(ex.url)}&download=1">⤓ Download MP4</a>` : ""}
-        ${missing.length ? `<button class="ed-btn" data-act="render" title="Uses the video model">▶ Render ${missing.length} missing first</button>` : ""}
+        ${missing.length ? `<button class="ed-btn" data-act="render" title="Uses the video model, for shots that have a picture">🎬 Make ${missing.length} missing video(s) first</button>` : ""}
         <button class="ed-btn gold" data-act="mix">${ex.url ? "Mix again" : "Mix the film"}</button>
         <button class="ed-btn ghost" data-act="close">Close</button></div>`, async (act) => {
       if (act === "render") { await renderShots(null, "the missing shots"); return true; }

@@ -99,7 +99,25 @@ async def lease_gpu(label: str, hold_seconds: int) -> str | None:
 
     Waits as long as WIS takes to reach it (up to ~15 min per call). None when WIS
     answered busy; the caller asks again. Raises on a hard error.
+
+    If the caller is cancelled while waiting (the Stop button), the request carries on
+    in the background and the lease is handed back the moment WIS grants it. WIS does
+    not notice the caller hanging up, so before this an abandoned request was granted
+    to nobody and held the card for its 45 s confirm grace: two Stops in a row on
+    2026-11-24 kept the next planner turn waiting about two minutes.
     """
+    task = asyncio.ensure_future(_take_lease(label, hold_seconds))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        def _give_back(t: asyncio.Task) -> None:
+            if not t.cancelled() and t.exception() is None and t.result():
+                asyncio.ensure_future(release_gpu(t.result()))
+        task.add_done_callback(_give_back)
+        raise
+
+
+async def _take_lease(label: str, hold_seconds: int) -> str | None:
     async with httpx.AsyncClient(timeout=1000.0) as client:
         resp = await client.post(f"{cfg.WIS_BASE_URL}/v1/gpu/lease", headers=_headers(),
                                  json={"label": label, "hold_seconds": int(hold_seconds)})

@@ -424,6 +424,7 @@ def _migrate(conn) -> None:
               "agent_threads": {"thought": "TEXT NOT NULL DEFAULT ''", "stage_at": "REAL",
                                 "context": "TEXT NOT NULL DEFAULT '[]'", "project_id": "TEXT"},
               "prod_refs": {"angles": "TEXT NOT NULL DEFAULT '{}'"},
+              "agent_lessons": {"project_id": "TEXT"},
               "prod_clips": {"instruct": "TEXT NOT NULL DEFAULT ''", "auto": "INTEGER NOT NULL DEFAULT 0"},
               "prod_scenes": {"refs": "TEXT NOT NULL DEFAULT '[]'",
                               "locked": "INTEGER NOT NULL DEFAULT 0"},

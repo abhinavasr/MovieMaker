@@ -152,20 +152,36 @@ def load_user(user_id: str) -> auth.User | None:
     return auth.User(row["id"], row["username"], row["role"], row["expires_at"])
 
 
-def lessons(user_id: str) -> list:
-    return db.query("SELECT * FROM agent_lessons WHERE user_id=? ORDER BY created_at",
-                    (user_id,))
+# A lesson belongs to the person (project_id NULL: every story) or to one story.
+# On 2026-11-24 a Rāmāyaṇa series' rules ("2D hand-drawn animation", unstitched
+# costumes) were all saved for every story, and the planner drew a modern
+# romance as a cartoon with its heroine in a wrapped cloth and uttarīya.
+def lessons(user_id: str, project_id: str | None = None, everything: bool = True) -> list:
+    """The person's lessons. everything=False: only the ones that apply in project_id
+    (the person's general ones plus that story's own)."""
+    rows = db.query("SELECT l.*, p.title AS project_title FROM agent_lessons l "
+                    "LEFT JOIN projects p ON p.id = l.project_id "
+                    "WHERE l.user_id=? ORDER BY l.created_at", (user_id,))
+    if everything:
+        return rows
+    return [r for r in rows if not r["project_id"] or r["project_id"] == project_id]
 
 
-def _add_lesson(user_id: str, text: str) -> None:
+def _lesson_text(r) -> str:
+    if r["project_id"]:
+        return f"[only for “{r['project_title'] or 'a deleted story'}”] {r['text']}"
+    return r["text"]
+
+
+def _add_lesson(user_id: str, text: str, project_id: str | None = None) -> None:
     text = " ".join(str(text).split())[:300]
     if not text:
         return
     have = {r["text"].lower() for r in lessons(user_id)}
     if text.lower() in have or len(have) >= 40:
         return
-    db.run("INSERT INTO agent_lessons (id, user_id, text, created_at) VALUES (?,?,?,?)",
-           (db.new_id("les"), user_id, text, _now()))
+    db.run("INSERT INTO agent_lessons (id, user_id, text, created_at, project_id) "
+           "VALUES (?,?,?,?,?)", (db.new_id("les"), user_id, text, _now(), project_id))
 
 
 def kick() -> None:
@@ -576,11 +592,11 @@ audio, mix) is given to you in every turn; the person sees the same thing on scr
      the places. Ask only if something essential is missing.
   2. SCENES: identify ALL the scenes in one build_storyboard call: each with title, summary and
      refs = the characters and places in it (add them as refs). Shots may wait for stage 3.
-  3. SCENE ASSETS, scene by scene: make sure every reference in the scene has a picture
-     (make_ref_picture), then lay out that scene's shots (build_storyboard for the scene, or
-     propose_changes add_shot) and give each shot a picture (shot_picture_options; it uses the
-     scene's references, so faces and places stay the same).
-  4. VIDEOS: render_shots: one shot, one scene, or all, as the person asks.
+  3. SCENE ASSETS, scene by scene: lay out that scene's shots (build_storyboard for the scene,
+     or propose_changes add_shot), then draw_pictures (every character/place picture and view,
+     then each shot's picture; shot_picture_options to offer choices for one shot).
+  4. VIDEOS, a SEPARATE step: render_shots only when the person asks for videos, after they
+     have seen the pictures. Drawing pictures never starts the video model.
   Pick up from the stage the production is at: look at the state before starting over.
 - THE PERSON'S EDITS WIN. The state you are given is the truth: never undo or re-propose
   something the person changed. Scenes marked LOCKED-BY-THE-PERSON are not yours to change
@@ -610,7 +626,7 @@ audio, mix) is given to you in every turn; the person sees the same thing on scr
 - Pictures for a shot: shot_picture_options (uses the shot's references so characters stay
   the same people). Lines of dialogue: add_dialogue with the character's ref_id. Score or
   ambience: add_music. These are made straight away.
-- Generate video clips (render_shots) when the person asks, including in advance; each shot
+- Generate video clips (render_shots) only when the person asks for videos; each shot
   needs a picture and a prompt that says what moves and how the camera moves. A "perform"
   shot uses the audio under it that is marked use_in_video, and its reference pictures.
 - To decide whether a track's audio is used for video generation, set use_in_video on its
@@ -629,12 +645,20 @@ audio, mix) is given to you in every turn; the person sees the same thing on scr
 """
 
 
-def _system_prompt(user_id: str, first_step: int, production: bool = False) -> str:
+def _system_prompt(user_id: str, first_step: int, production: bool = False,
+                   project_id: str | None = None) -> str:
     rules = PLANNER_RULES.replace("{first_step}", str(first_step)) \
                          .replace("{max_fix}", str(cfg.AGENT_MAX_CORRECTIONS))
     if production:
         rules += PRODUCTION_RULES
-    lessons_txt = "\n".join(f"- {r['text']}" for r in lessons(user_id)) or "- (none yet)"
+    # In a production only the person's general lessons and this story's own apply; the
+    # general assistant sees them all, each story's marked as such.
+    rows = lessons(user_id, project_id, everything=not production)
+    lessons_txt = "\n".join(f"- {_lesson_text(r)}" for r in rows) or "- (none yet)"
+    if production:
+        lessons_txt += ("\n(Looks, style, costume and language come from THIS story, its "
+                        "references and the person's words; never carry them over from "
+                        "another story.)")
     today = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     return (f"{rules}\nNow: {today}.\n\nThe person's standing lessons:\n{lessons_txt}\n\n"
             f"About the studio:\n{mcp.INSTRUCTIONS}\n\nTools (* = required):\n"
@@ -854,7 +878,7 @@ async def _plan(thread, trigger: str, turn: GpuTurn) -> dict:
     first = _next_step_number(thread["id"])
     pid = thread["project_id"] if "project_id" in thread.keys() else None
     messages = [{"role": "system", "content": _system_prompt(thread["user_id"], first,
-                                                             bool(pid))}]
+                                                             bool(pid), pid)}]
     history, eyes = _history(thread["id"])
     messages += history
     pinned, pinned_pics = _pinned(thread)
@@ -1147,7 +1171,8 @@ async def _turn(thread_id: str) -> None:
                 await turn.acquire()
             out = await _plan(thread, trigger, turn)
             for text in out.get("remember") or []:
-                _add_lesson(user.id, text)
+                # Said while working on a story: it is about that story.
+                _add_lesson(user.id, text, thread["project_id"])
             if (out.get("reply") or "").strip():
                 _post(thread_id, "assistant", out["reply"].strip(), state=out.get("state"))
             steps = [s for s in out.get("steps") or [] if isinstance(s, dict)]
@@ -1367,7 +1392,7 @@ def _command(user, thread, text: str) -> str | None:
         return "Asking the planner to review now."
     if cmd == "/lessons":
         rows = lessons(user.id)
-        return "\n".join(f"{i + 1}. {r['text']}" for i, r in enumerate(rows)) or \
+        return "\n".join(f"{i + 1}. {_lesson_text(r)}" for i, r in enumerate(rows)) or \
             "No lessons yet. Tell me things like “always make videos portrait”."
     if cmd == "/forget":
         rows = lessons(user.id)
@@ -1380,8 +1405,9 @@ def _command(user, thread, text: str) -> str | None:
     if cmd == "/remember":
         if not rest.strip():
             return "Use /remember <rule>."
-        _add_lesson(user.id, rest)
-        return f"I'll remember: {rest.strip()}"
+        _add_lesson(user.id, rest, thread["project_id"])
+        return (f"I'll remember for this story: {rest.strip()}" if thread["project_id"]
+                else f"I'll remember: {rest.strip()}")
     if cmd == "/help":
         return ("/status — what's running · /review — planner checks now · /stop — stop the "
                 "assistant · /remember <rule> · /lessons · /forget <n>")
@@ -1537,7 +1563,7 @@ async def api_threads(request: Request):
     user = _user(request)
     return {"threads": [{"id": r["id"], "title": r["title"], "status": r["status"],
                          "updated_at": r["updated_at"]} for r in threads_of(user)],
-            "lessons": [{"id": r["id"], "text": r["text"]} for r in lessons(user.id)],
+            "lessons": [{"id": r["id"], "text": _lesson_text(r)} for r in lessons(user.id)],
             "planner": cfg.PLANNER_MODEL, "executor": cfg.EXECUTOR_MODEL, "now": _now()}
 
 

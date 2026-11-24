@@ -1229,12 +1229,22 @@ def _ref_ready(r) -> str:
     return "ready" if all(st == "succeeded" for st in states) else "missing"
 
 
-def prepare_render(project, user: auth.User, shot_ids: list[str] | None) -> tuple[list, list]:
-    """Split a render request: shots that can render now, and shots without a picture.
-    The latter go through the pipeline first (their references' pictures, then a picture
-    drawn from them, then the render), in the background (`_run_auto_shots`)."""
+def prepare_render(project, user: auth.User, shot_ids: list[str] | None,
+                   step: str = "videos") -> tuple[list, list]:
+    """Rendering is two separate steps, each started by the person (2026-11-24: "Render
+    missing" drew the pictures and then went straight on to the video model, and the
+    person had to press Stop to look at the pictures first).
+
+    step="pictures": (now=[], later) -- `later` shots go through continuity -> their
+      characters' and places' pictures and views -> the shot's picture, in the background
+      (`_run_auto_shots`), and STOP there. No video model.
+    step="videos": (now, skipped) -- render the shots that have a picture (or open on the
+      previous shot's last frame) now; `skipped` still need a picture. Nothing is drawn.
+    """
     pid = project["id"]
     shots = ordered_shots(pid)
+    if step == "videos":
+        return _ready_for_video(shots, shot_ids)
     want = list(shot_ids or []) or [s["id"] for s in shots
                                     if s["status"] != "done" or not (s["clip_path"] and
                                                                      Path(s["clip_path"]).exists())]
@@ -1268,13 +1278,40 @@ def prepare_render(project, user: auth.User, shot_ids: list[str] | None) -> tupl
         if s["start_from"] == "prev_last" and i > 0 and shots[i - 1]["id"] in later:
             now.remove(sid)
             later.append(sid)
+    # Pictures only: shots that already have their picture and references are done.
+    later = [sid for sid in later if not by_id[sid]["asset_id"] or sid in refs_needed
+             or by_id[sid]["scene_id"] in unchecked_scenes]
     if later:
         params = db.params_of(project)
         jobs = [j for j in params.get("_auto_shots") or [] if j["shot"] not in later]
-        jobs += [{"shot": sid, "user": user.id, "stage": "continuity", "at": db.now()} for sid in later]
+        jobs += [{"shot": sid, "user": user.id, "stage": "continuity", "at": db.now(),
+                  "until": "picture"} for sid in later]
         params["_auto_shots"] = jobs
         db.set_params(pid, params)
-    return now, later
+    return [], later
+
+
+def _ready_for_video(shots, shot_ids: list[str] | None) -> tuple[list, list]:
+    """(shots that can go to the video model now, shots that still need a picture)."""
+    want = list(shot_ids or []) or [s["id"] for s in shots
+                                    if s["status"] != "done" or not (s["clip_path"] and
+                                                                     Path(s["clip_path"]).exists())]
+    order = [s["id"] for s in shots]
+    by_id = {s["id"]: s for s in shots}
+    now, skipped = [], []
+    for sid in want:
+        s = by_id.get(sid)
+        if s is None:
+            continue
+        ok = bool(s["asset_id"])
+        if s["start_from"] == "prev_last":
+            # Opens on the previous clip: fine if that clip exists or renders in this batch.
+            i = order.index(sid)
+            prev = by_id[order[i - 1]] if i > 0 else None
+            ok = prev is not None and (prev["id"] in now or (
+                prev["clip_path"] and Path(prev["clip_path"]).exists()))
+        (now if ok else skipped).append(sid)
+    return now, skipped
 
 
 async def _run_auto_shots() -> None:
@@ -1343,6 +1380,8 @@ async def _run_auto_shots() -> None:
                         log.warning("picture for %s failed; dropped", shot["id"])
                         continue
                 if j["stage"] == "render":
+                    if j.get("until") == "picture":
+                        continue                   # step 1 only: the person starts the videos
                     to_render.setdefault(j["user"], []).append(shot["id"])
                     continue
             except HTTPException as exc:
@@ -2361,12 +2400,23 @@ async def _t_picture_options(user, args, base):
 
 async def _t_render(user, args, base):
     project = _agent_project(user, args)
-    now, later = prepare_render(project, user, args.get("shot_ids") or None)
+    now, skipped = prepare_render(project, user, args.get("shot_ids") or None, "videos")
     if now:
         await render_shots(project, user, now)
-    return {"project_id": project["id"], "status": "queued", "rendering": len(now),
-            "making_pictures_first": len(later),
-            "note": "shots without a picture get one drawn from their references, then render"}
+    out = {"project_id": project["id"], "status": "queued" if now else "nothing to render",
+           "rendering": len(now)}
+    if skipped:
+        out["need_pictures"] = skipped
+        out["note"] = "these shots have no picture yet: draw_pictures first, and let the person look"
+    return out
+
+
+async def _t_draw(user, args, base):
+    project = _agent_project(user, args)
+    _, later = prepare_render(project, user, args.get("shot_ids") or None, "pictures")
+    return {"project_id": project["id"], "drawing": len(later),
+            "note": "characters' and places' pictures and views, then each shot's picture; "
+                    "no videos are made (render_shots is a separate step the person asks for)"}
 
 
 async def _t_dialogue(user, args, base):
@@ -2542,13 +2592,21 @@ AGENT_TOOLS = {
             "summary": {"type": "string"}}},
         "description": "Make picture options for a shot with its references' pictures as "
                        "sources (keeps characters consistent). Offered to the person to pick."},
+    "draw_pictures": {
+        "handler": _t_draw,
+        "schema": {"type": "object", "required": ["project_id"], "properties": {
+            **_PID, "shot_ids": {"type": "array", "items": {"type": "string"},
+                                 "description": "omit = every shot without a picture"}}},
+        "description": "STEP 1: draw what the shots need -- missing character/place pictures "
+                       "and views, then a picture for each shot without one. Never makes video."},
     "render_shots": {
         "handler": _t_render,
         "schema": {"type": "object", "required": ["project_id"], "properties": {
             **_PID, "shot_ids": {"type": "array", "items": {"type": "string"},
                                  "description": "omit = every shot without an up-to-date clip"}}},
-        "description": "Generate the video clips of these shots now, ahead of the film. Each "
-                       "needs a picture and a prompt. ~2 min per 5 s."},
+        "description": "STEP 2: generate the video clips of these shots (only shots that have a "
+                       "picture; the rest are reported). ~2 min per 5 s. Only when the person "
+                       "asks for videos."},
     "add_dialogue": {
         "handler": _t_dialogue,
         "schema": {"type": "object", "required": ["project_id", "text"], "properties": {
@@ -2601,7 +2659,7 @@ AGENT_TOOLS = {
         "description": "Join every shot's clip and mix the timeline into the final film."},
 }
 EDITOR_HEAVY = {"shot_picture_options", "render_shots", "add_dialogue", "add_music",
-                "make_ref_picture"}
+                "make_ref_picture", "draw_pictures"}
 
 
 # =========================================================================== API
@@ -2761,10 +2819,13 @@ async def api_render(pid: str, request: Request):
     user = _user(request)
     project = production(user, pid)
     b = await _body(request)
-    now, later = prepare_render(project, user, b.get("shot_ids") or None)
+    step = "pictures" if b.get("step") == "pictures" else "videos"
+    now, other = prepare_render(project, user, b.get("shot_ids") or None, step)
     if now:
         await render_shots(project, user, now)
-    return {"ok": True, "rendering": len(now), "making_pictures": len(later)}
+    if step == "pictures":
+        return {"ok": True, "making_pictures": len(other)}
+    return {"ok": True, "rendering": len(now), "need_pictures": len(other)}
 
 
 @router.post("/api/editor/{pid}/cancel")
