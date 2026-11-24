@@ -194,11 +194,6 @@ async def _render_shot(project_id: str, shot, assets: dict, params: dict,
                        report) -> Path:
     """One clip. Returns the file it was written to."""
     image_path = assets.get(shot["asset_id"])
-    if params.get("video_refs") and shot.get("make") in (None, "", "animate"):
-        # The person's choice for this production: "Videos from: picture + characters &
-        # places". Rendered by the reference model (shot picture = <Picture 1>, then the
-        # references); the sound it makes is muted in the mix like any shot's.
-        shot = dict(shot, make="perform")
     if shot.get("make") in ("perform", "lipsync"):
         from app import editor
         payload = editor.perform_payload(project_id, shot, image_path, params)

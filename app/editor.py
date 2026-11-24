@@ -1964,7 +1964,8 @@ def apply_changes(project, user: auth.User, changes: list, guard: bool = False) 
             keys[c.get("key") or f"shot{len(keys)}"] = add_shot(
                 project, rid(c.get("scene_id")), c.get("title", ""), c.get("prompt", ""),
                 c.get("seconds"), c.get("framing", ""), [rid(r) for r in c.get("refs") or []],
-                c.get("make", "animate"), c.get("position"), c.get("image_id"), user,
+                c.get("make") or ("perform" if db.params_of(project).get("video_refs")
+                                  else "animate"), c.get("position"), c.get("image_id"), user,
                 c.get("start_from", ""))
         elif op == "edit_shot":
             fields = {k: c.get(k) for k in ("title", "prompt", "seconds", "framing", "refs",
@@ -2729,9 +2730,17 @@ async def api_settings(pid: str, request: Request):
     if b.get("aspect"):
         out["rerender"] = set_aspect(db.one("SELECT * FROM projects WHERE id=?", (pid,)), b["aspect"])
     if "video_refs" in b:
+        # Every shot's "Video from" at once (lip-sync shots keep theirs), and the default
+        # for new shots. A rendered clip made the other way is marked as changed.
+        on = bool(b["video_refs"])
         params = db.params_of(db.one("SELECT * FROM projects WHERE id=?", (pid,)))
-        params["video_refs"] = bool(b["video_refs"])
+        params["video_refs"] = on
         db.set_params(pid, params)
+        frm, to = ("animate", "perform") if on else ("perform", "animate")
+        out["switched"] = db.one("SELECT COUNT(*) AS n FROM shots WHERE project_id=? AND make=?",
+                                 (pid, frm))["n"]
+        db.run("UPDATE shots SET make=?, status=CASE WHEN status='done' THEN 'stale' ELSE status "
+               "END WHERE project_id=? AND make=?", (to, pid, frm))
         _touch(pid)
     if "agent_applies" in b:
         params = db.params_of(db.one("SELECT * FROM projects WHERE id=?", (pid,)))

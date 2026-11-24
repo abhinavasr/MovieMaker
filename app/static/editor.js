@@ -9,8 +9,8 @@
   const $ = (id) => document.getElementById(id);
   const TRACK_COLOR = {dialogue: "var(--dlg)", ambience: "var(--amb)", music: "var(--mus)", shot: "var(--sht)"};
   const TRACK_NAME = {dialogue: "Dialogue", ambience: "Ambience", music: "Music", shot: "Shot sound"};
-  const MAKE = {animate: ["Animate", "The picture comes to life. Silent; sound comes from the timeline."],
-    perform: ["Performance", "Reference pictures guide the motion (MiniMax ref2v). Any sound it makes is muted in the mix; voices come from the dialogue track."],
+  const MAKE = {animate: ["Picture only", "The video starts exactly on the shot's picture. Silent; sound comes from the timeline."],
+    perform: ["Picture + references", "The video model gets the shot's picture plus its characters' and places' pictures (the shot's and its scene's), so faces and places stay truer; the opening may shift a little. Any sound it makes is muted in the mix; voices come from the dialogue lane."],
     lipsync: ["Lip-sync", "The picture speaks or sings the dialogue line under the shot, mouth in sync (Wan2.2-S2V)."]};
   const FRAMING = {"": "—", EWS: "Extreme wide", WS: "Wide", MS: "Medium", MCU: "Medium close-up", CU: "Close-up", ECU: "Extreme close-up", OTS: "Over the shoulder", POV: "Point of view", "2S": "Two-shot", INSERT: "Insert"};
 
@@ -60,7 +60,6 @@
   function paint() {
     if (document.activeElement !== $("ptitle")) $("ptitle").value = S.title;
     if (document.activeElement !== $("aspect")) $("aspect").value = S.aspect;
-    if (document.activeElement !== $("video-refs")) $("video-refs").value = S.video_refs ? "1" : "0";
     paintStory(); paintScenes(); paintRefs(); paintRender(); paintStopAI();
     if (view === "assets") paintAssets();
     else { paintCrumbs(); if (!Player.playing) paintStage(); paintStrip(); }
@@ -404,7 +403,7 @@
     }
     const making = S.proposals.find((p) => p.shot_id === sh.id && p.options.some((o) => !["succeeded", "failed", "gone"].includes(o.status)));
     const busy = ["running", "pending"].includes(sh.status) && ["running", "queued"].includes(S.status);
-    const mk = `<span class="ed-badge">${{animate: "🎞", perform: "🎭", lipsync: "👄"}[sh.make]} ${MAKE[sh.make][0]}${sh.framing ? " · " + sh.framing : ""} · ${sh.seconds}s</span>`;
+    const mk = `<span class="ed-badge">${{animate: "🖼", perform: "🧩", lipsync: "👄"}[sh.make]} ${MAKE[sh.make][0]}${sh.framing ? " · " + sh.framing : ""} · ${sh.seconds}s</span>`;
     const state = sh.status === "done" ? "clip ready" : sh.status === "stale" ? "changed since rendered" : sh.status === "failed" ? "failed" : sh.clip ? "" : "not rendered";
     if (sh.clip && Player.mode !== "stage-img") {
       const snd = soundUnder(sh);
@@ -448,12 +447,6 @@
   }
   addEventListener("resize", () => S && fitFrame());
   if (window.ResizeObserver) new ResizeObserver(() => S && fitFrame()).observe($("stage"));
-  $("video-refs").onchange = async () => {
-    const on = $("video-refs").value === "1";
-    try { await api(`/api/editor/${PID}/settings`, {video_refs: on});
-      toast(on ? "Videos will use the shot picture plus its characters and places (its own sound muted). Existing clips stay until you remake them." : "Videos will start exactly on the shot picture");
-      load(true); } catch (e) { toast(e.message); }
-  };
   $("aspect").onchange = async () => {
     const v = $("aspect").value;
     try { const r = await api(`/api/editor/${PID}/settings`, {aspect: v});
@@ -506,7 +499,7 @@
     $("strip").innerHTML = shots.map((s, i) => `<div class="ed-card ${s.id === sel.shot ? "on" : ""}" data-shot="${s.id}" draggable="true" title="Drag to reorder, or onto a scene on the left to move it there">
       ${s.start_from === "prev_last" ? `<span class="chain" title="Opens on the previous shot's last frame">⛓ continues</span>` : ""}
       <div class="th">${s.picture ? `<img src="${esc(s.picture)}" alt="" loading="lazy">` : s.start_from === "prev_last" ? "" : "no picture"}</div>
-      <span class="mk">${{animate: "🎞", perform: "🎭", lipsync: "👄"}[s.make]} ${s.seconds}s</span>
+      <span class="mk" title="${MAKE[s.make][0]}">${{animate: "🖼", perform: "🧩", lipsync: "👄"}[s.make]} ${s.seconds}s</span>
       ${(() => { const b = s.auto ? {continuity: "🔗 checking continuity", refs: "⏳ characters & places", picture: "🖼 making picture", render: s.start_from === "prev_last" ? "⛓ after previous" : "⏳ to render"}[s.auto] : {done: "● clip", running: "⏳ rendering", failed: "failed", stale: "changed"}[s.status] || (s.status === "pending" && ["running", "queued"].includes(S.status) ? "queued" : ""); return b ? `<span class="st ${s.auto ? "running" : esc(s.status)}">${b}</span>` : ""; })()}
       <div class="m"><b>Shot ${String(i + 1).padStart(2, "0")}</b><span class="f">${esc(s.framing)}</span><span>${esc(s.title || s.prompt || "untitled")}</span></div></div>`).join("")
       + `<button class="ed-card add" id="add-shot" type="button" title="Add a shot" aria-label="Add a shot">＋</button>`;
@@ -595,7 +588,7 @@
       return `<div class="ed-blk ${track} ${c.status} ${c.id === sel.clip ? "sel" : ""}" data-clip="${c.id}" style="left:${x(c.start_s)}px;width:${Math.max(8, d * TL.pps)}px" title="${c.status === "script" ? "Script line — not voiced yet" + (c.auto ? " (being voiced)" : "") + ": " : ""}${esc(c.name)}${c.error ? " — " + esc(c.error) : ""}">
         <span>${c.status === "pending" ? "⏳ " : c.status === "script" ? (c.auto ? "⏳📝 " : "📝 ") : ""}${esc(c.name)}</span>${c.use_in_video ? `<span class="vid">🎬</span>` : ""}<span class="rs"></span></div>`;
     }).join("");
-    const shotSound = shotsIn.filter((s) => s.make !== "animate").map((s) => `<div class="ed-blk shot ${s.id === sel.shot ? "on" : ""}" style="left:${x(s.start)}px;width:${s.seconds * TL.pps}px;opacity:.75" title="${s.make === "lipsync" ? "Lip-sync: the line is on the dialogue track, so this isn't mixed twice" : "Performance shot's own sound"}">${s.make === "lipsync" ? "👄 in dialogue" : "🎭 " + esc(s.title || "shot")}</div>`).join("");
+    const shotSound = shotsIn.filter((s) => s.make !== "animate").map((s) => `<div class="ed-blk shot ${s.id === sel.shot ? "on" : ""}" style="left:${x(s.start)}px;width:${s.seconds * TL.pps}px;opacity:.75" title="${s.make === "lipsync" ? "Lip-sync: the line is on the dialogue track, so this isn't mixed twice" : "The sound the reference video model made (muted unless you turn it on)"}">${s.make === "lipsync" ? "👄 in dialogue" : "🧩 " + esc(s.title || "shot")}</div>`).join("");
     const keep = [$("tl-scroll").scrollLeft, $("tl-scroll").scrollTop];
     lanesEl.innerHTML = `<div></div><div class="ed-lane ruler" id="ruler">${ticks}</div>
       <div class="ed-lh"><span class="nm">🎞 Shots</span></div><div class="ed-lane shots">${shotsIn.map((s) => `<div class="ed-blk shot ${s.id === sel.shot ? "on" : ""} ${s.scene_id !== sel.scene && view !== "timeline" ? "other" : ""}" data-tshot="${s.id}" title="Drag to move this shot" style="cursor:grab;left:${x(s.start)}px;width:${s.seconds * TL.pps - 2}px">${esc(s.framing || "")} ${esc(s.title || "shot " + s.n)}</div>`).join("")}</div>
@@ -804,8 +797,8 @@
       <label class="ed-field">Opening picture<select data-f="start_from">
         <option value="" ${sh.start_from ? "" : "selected"}>Its own picture</option>
         <option value="prev_last" ${sh.start_from === "prev_last" ? "selected" : ""} ${S.shots[0]?.id === sh.id ? "disabled" : ""}>Last frame of the previous shot (continuous)</option></select></label>
-      <div class="ed-group"><div class="ed-seg" role="radiogroup" aria-label="How the clip is made">${Object.keys(MAKE).map((m) => `<button type="button" data-make="${m}" class="${sh.make === m ? "on" : ""}">${{animate: "🎞", perform: "🎭", lipsync: "👄"}[m]} ${MAKE[m][0]}</button>`).join("")}</div>
-        <div class="ed-note" style="margin-top:5px">${sh.make === "animate" && S.video_refs ? "The picture comes to life, with its characters' and places' pictures as references (this production's “Videos from” setting, in ⋯). Its own sound is muted." : MAKE[sh.make][1]}${sh.make !== "animate" ? (lines.length ? ` Under it: ${lines.map((l) => esc(l.name)).join("; ")}${lines.some((l) => !l.use_in_video) ? " (some not marked “use in video”)" : ""}.` : " <b style='color:var(--warn)'>No dialogue under this shot yet</b> — click the Dialogue lane under it.") : ""}</div></div>
+      <div class="ed-group"><div class="ed-field" style="margin-bottom:5px">Video from</div><div class="ed-seg" role="radiogroup" aria-label="Video from">${Object.keys(MAKE).map((m) => `<button type="button" data-make="${m}" class="${sh.make === m ? "on" : ""}">${{animate: "🖼", perform: "🧩", lipsync: "👄"}[m]} ${MAKE[m][0]}</button>`).join("")}</div>
+        <div class="ed-note" style="margin-top:5px">${MAKE[sh.make][1]}${sh.make === "perform" ? ` <b>${(sh.refs.length ? sh.refs.length + " reference(s) in this shot" : "No references in this shot")}</b>, plus its scene's.` : ""}${sh.make === "lipsync" ? (lines.length ? ` Under it: ${lines.map((l) => esc(l.name)).join("; ")}${lines.some((l) => !l.use_in_video) ? " (some not marked “use in video”)" : ""}.` : " <b style='color:var(--warn)'>No dialogue under this shot yet</b> — click the Dialogue lane under it.") : ""}</div></div>
       <label class="ed-field">Prompt — what moves, how the camera moves<textarea data-f="prompt" rows="4" placeholder="What moves, and how the camera moves…">${esc(sh.prompt)}</textarea></label>
       <div class="ed-group"><h3>References <span class="c ed-note">${sh.refs.length} in this shot</span></h3>
         ${S.refs.length ? `<div class="ed-chips">${refChips}</div>` : `<div class="ed-note">No references yet. <a href="#" id="ins-addref" style="color:var(--gold)">Add a character or place</a> so it stays consistent across shots.</div>`}</div>
@@ -911,8 +904,8 @@
     pane.querySelectorAll("[data-sound]").forEach((b) => b.onclick = async () => {
       const k = b.dataset.sound;
       if (k === "model") {
-        if (!confirm("The video model will invent this shot's sound (it won't be the character's own voice). Switch this shot to Performance and turn its sound on in the mix?")) return;
-        await change([{op: "edit_shot", shot_id: sh.id, make: "perform"}, {op: "set_mix", shot: {mute: false}}], "Performance shot — its own sound is on; render it to hear it");
+        if (!confirm("The video model will invent this shot's sound (it won't be the character's own voice). Switch this shot to “Picture + references” and turn its sound on in the mix?")) return;
+        await change([{op: "edit_shot", shot_id: sh.id, make: "perform"}, {op: "set_mix", shot: {mute: false}}], "Its own sound is on; render it to hear it");
         genOpen = "video"; paintInspector(); return;
       }
       genOpen = k === "line" ? "voice" : "music"; paintInspector();
