@@ -55,7 +55,9 @@ MAKES = ("animate", "perform", "lipsync")
 DEFAULT_MIX = {"dialogue": {"gain_db": 0.0, "mute": False},
                "ambience": {"gain_db": -6.0, "mute": False},
                "music": {"gain_db": -8.0, "mute": False},
-               "shot": {"gain_db": -4.0, "mute": False},
+               # Sound a video model invents is not used: voices are generated separately
+               # and the video is made from them (the user's rule, 2026-11-24).
+               "shot": {"gain_db": -4.0, "mute": True},
                "duck_db": -10.0}
 MAX_SHOTS = 80
 # The film's shape. The video models render three native 0.4 MP sizes on this
@@ -1840,9 +1842,18 @@ async def _t_dialogue(user, args, base):
             float(args.get("offset_s") or 0.3)
     cid = await add_dialogue(project, user, args.get("ref_id"), str(args.get("text") or ""),
                              float(start or 0), str(args.get("instruct") or ""),
-                             args.get("language"), bool(args.get("use_in_video", True)),
-                             args.get("speaker"))
-    return {"clip_id": cid, "status": "speaking (ready in about 15-60 s)"}
+                             args.get("language"), True, args.get("speaker"))
+    out = {"clip_id": cid, "status": "voicing (ready in about 15-60 s)"}
+    shot_id = args.get("shot_id")
+    if shot_id and args.get("video", True):
+        shot = _shot(project["id"], shot_id)
+        if shot["asset_id"] or shot["start_from"] == "prev_last":
+            edit_shot(project, shot_id, make="lipsync")
+            render_when_ready(project["id"], user, cid, shot_id)
+            out["video"] = "the shot is generated lip-synced to this voice once the voice is ready"
+        else:
+            out["video"] = "the shot has no picture yet: give it one, then render it (lipsync)"
+    return out
 
 
 async def _t_music(user, args, base):
@@ -1979,9 +1990,11 @@ AGENT_TOOLS = {
                                                          "description": "delivery, e.g. 'weeping, "
                                                                         "broken voice'"},
             "speaker": {"type": "string"}, "language": {"type": "string"},
-            "use_in_video": {"type": "boolean", "description": "default true: a perform shot "
-                                                               "under it uses it"}}},
-        "description": "A spoken line on the dialogue track, in a character's voice."},
+            "video": {"type": "boolean", "description": "default true with shot_id: after the "
+                                                        "voice is made, generate that shot's video "
+                                                        "lip-synced to it"}}},
+        "description": "Voice a line in a character's voice, FIRST, on the dialogue track; with "
+                       "shot_id the shot's video is then generated lip-synced to that voice."},
     "add_music": {
         "handler": _t_music,
         "schema": {"type": "object", "required": ["project_id", "description"], "properties": {

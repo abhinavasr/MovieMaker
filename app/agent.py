@@ -541,10 +541,12 @@ audio, mix) is given to you in every turn; the person sees the same thing on scr
 - THE PERSON'S EDITS WIN. The state you are given is the truth: never undo or re-propose
   something the person changed. Scenes marked LOCKED-BY-THE-PERSON are not yours to change
   (nor their shots); work around them.
-- AUDIO IS MIXED, NOT RE-RENDERED (the person's rule). Adding or changing dialogue, music,
-  ambience, levels or timing only changes the mix (export_film mixes on the CPU in seconds). Do
-  NOT switch shots to lipsync/perform, and do NOT call render_shots, because of an audio change,
-  unless the person explicitly asks to regenerate the video with the audio.
+- VOICES ARE MADE FIRST, VIDEO FROM THE VOICE (the person's rule). A shot that speaks: voice the
+  line with add_dialogue(shot_id, ref_id, text) in the character's voice; it then generates that
+  shot's video lip-synced to the voice. Never let a video model invent a voice: do not use
+  `perform` for speech, and never rely on a clip's own sound.
+- MIXING IS NOT RE-RENDERING. Music, ambience, levels, fades, timing and moving clips only change
+  the mix (export_film mixes on the CPU in seconds): no render_shots for those.
 - To lay out a story as scenes and shots use build_storyboard (nested scenes -> shots, plus
   characters as refs); for a long film call it once per 1-3 scenes so each answer stays short.
 - When the person says to apply / approve / go ahead with your proposal(s), call apply_proposals

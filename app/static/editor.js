@@ -10,7 +10,7 @@
   const TRACK_COLOR = {dialogue: "var(--dlg)", ambience: "var(--amb)", music: "var(--mus)", shot: "var(--sht)"};
   const TRACK_NAME = {dialogue: "Dialogue", ambience: "Ambience", music: "Music", shot: "Shot sound"};
   const MAKE = {animate: ["Animate", "The picture comes to life. Silent; sound comes from the timeline."],
-    perform: ["Performance", "Reference pictures + the audio under the shot marked “use in video” → a clip with its own sound (MiniMax ref2v)."],
+    perform: ["Performance", "Reference pictures guide the motion (MiniMax ref2v). Any sound it makes is muted in the mix; voices come from the dialogue track."],
     lipsync: ["Lip-sync", "The picture speaks or sings the dialogue line under the shot, mouth in sync (Wan2.2-S2V)."]};
   const FRAMING = {"": "—", EWS: "Extreme wide", WS: "Wide", MS: "Medium", MCU: "Medium close-up", CU: "Close-up", ECU: "Extreme close-up", OTS: "Over the shoulder", POV: "Point of view", "2S": "Two-shot", INSERT: "Insert"};
 
@@ -690,11 +690,10 @@
     const snd = soundUnder(sh);
     const silent = !snd.tracks.length && sh.make === "animate";
     const silentCard = silent ? `<div class="ed-silent"><div class="h">🔇 This shot has no sound</div>
-      <div class="ed-note">Animate shots make picture only. Sound comes from the timeline, or from a shot that makes its own.</div>
+      <div class="ed-note">Sound is always made separately: a voice first, then the video from that voice.</div>
       <div class="opts">
-        <button type="button" data-sound="line"><span>🎙</span>Speak a line<small>voiced on the dialogue track and mixed in — no re-render</small></button>
-        <button type="button" data-sound="perform"><span>🎭</span>Let it make its own sound<small>Performance: the video model generates sound with the picture</small></button>
-        <button type="button" data-sound="music"><span>🎵</span>Music or ambience<small>score or a soundscape under this scene</small></button>
+        <button type="button" data-sound="line"><span>🎙</span>Give it a voice<small>the line is voiced first, then the video is generated lip-synced to it</small></button>
+        <button type="button" data-sound="music"><span>🎵</span>Music or ambience<small>score or a soundscape under this scene, mixed in</small></button>
       </div></div>` : "";
     const inScene = sceneShots(sh.scene_id), idx = inScene.findIndex((x) => x.id === sh.id);
     const moveRow = `<div class="ed-move"><label class="ed-field">Scene<select id="mv-scene">${S.scenes.map((sc, i) => `<option value="${sc.id}" ${sc.id === sh.scene_id ? "selected" : ""}>${i + 1}. ${esc(sc.title || "Untitled scene")}</option>`).join("")}</select></label>
@@ -733,7 +732,7 @@
       return `<div class="ed-genform"><label class="ed-field">Who<select id="g-ref">${sp.map((r) => `<option value="${r.id}">${esc(r.name)}</option>`).join("")}<option value="">Narrator / default voice</option></select></label>
       <label class="ed-field">Line<textarea id="g-text" rows="3"></textarea></label><label class="ed-field">Delivery<input id="g-inst" placeholder="trembling, quiet"></label>
       <label class="ed-switch"><input type="checkbox" id="g-vid" checked> Use in video</label>
-      ${sh.picture || sh.start_from === "prev_last" ? `<label class="ed-switch"><input type="checkbox" id="g-lip"> Also regenerate this shot lip-synced to the line (uses the video model; otherwise the line is just mixed in)</label>` : ""}
+      ${sh.picture || sh.start_from === "prev_last" ? `<label class="ed-switch"><input type="checkbox" id="g-lip" checked> Then generate the video with this voice (lip-synced) — starts as soon as the voice is ready</label>` : `<div class="ed-note">Give the shot a picture, then its video can be generated with this voice.</div>`}
       <div class="acts"><button class="ed-btn gold" data-go="voice">Speak it at ${fmt(sh.start + 0.3)}</button></div></div>`; }
     const mus = key === "music";
     const [a, b] = sceneSpan(sh.scene_id);
@@ -812,7 +811,6 @@
     pane.querySelectorAll("[data-gen]").forEach((b) => b.onclick = () => { genOpen = genOpen === b.dataset.gen ? null : b.dataset.gen; paintInspector(); });
     pane.querySelectorAll("[data-sound]").forEach((b) => b.onclick = async () => {
       const k = b.dataset.sound;
-      if (k === "perform") { await change([{op: "edit_shot", shot_id: sh.id, make: "perform"}], "Performance shot — render it to hear its sound"); genOpen = "video"; paintInspector(); return; }
       genOpen = k === "line" ? "voice" : "music"; paintInspector();
       setTimeout(() => { const f = $("pane-shot").querySelector(".ed-genform"); f?.scrollIntoView({block: "center"}); $("g-text")?.focus(); }, 50);
     });
@@ -870,7 +868,7 @@
       else if (what === "voice") { const text = $("g-text").value.trim(); if (!text) { toast("Write the line"); btn.disabled = false; return; }
         const lip = $("g-lip")?.checked;
         await api(`/api/editor/${PID}/clips`, {kind: "dialogue", ref_id: $("g-ref").value || null, text, instruct: $("g-inst").value, start_s: sh.start + 0.3, use_in_video: lip || $("g-vid").checked, lipsync_shot: lip ? sh.id : null});
-        toast(lip ? "Speaking the line — the shot regenerates lip-synced when the voice is ready" : "Speaking… it lands on the dialogue lane and is mixed in"); }
+        toast(lip ? "Voicing the line first — the video is generated with this voice as soon as it's ready" : "Voicing the line — it lands on the dialogue lane"); }
       else { const d = $("g-text").value.trim(); if (!d) { toast("Describe it"); btn.disabled = false; return; }
         await api(`/api/editor/${PID}/clips`, {kind: what === "music" ? "music" : "ambience", description: d, start_s: sceneSpan(sh.scene_id)[0], duration: +$("g-dur").value, use_in_video: $("g-vid").checked}); toast("Generating… it lands on the lane when ready"); }
       genOpen = null; load(true);
