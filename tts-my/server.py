@@ -56,6 +56,7 @@ log = logging.getLogger("studio.tts-my")
 MODEL_DIR = os.getenv("TTS_MY_MODEL_DIR", "/models/voxcpm/VoxCPM2")
 PRESET_DIR = Path(os.getenv("TTS_MY_PRESET_DIR", "/models/voxcpm/presets"))
 IDLE = int(os.getenv("TTS_IDLE_UNLOAD_S", "0"))
+KEEP_S = 60
 TIMEOUT = int(os.getenv("TTS_RENDER_TIMEOUT_S", "300"))
 MAX_CHARS = int(os.getenv("TTS_MAX_CHARS", "1200"))
 CHUNK_CHARS = int(os.getenv("TTS_MY_CHUNK_CHARS", "220"))
@@ -82,6 +83,9 @@ class Engine:
         self.lock = threading.Lock()
         self.last = 0.0
         self.renders = 0
+        # A batch of lines keeps the model between requests (`keep`); this bounds it:
+        # unloaded by the sweeper once nothing has asked to keep it for KEEP_S.
+        self.keep_until = 0.0
 
     def _drop(self):
         self.model = None
@@ -106,7 +110,7 @@ class Engine:
             log.info("VoxCPM2 loaded in %.1fs", time.time() - t)
         return self.model
 
-    def run(self, fn):
+    def run(self, fn, keep: bool = False):
         with self.lock:
             try:
                 wav, sr = fn(self._load())
@@ -120,12 +124,27 @@ class Engine:
                 self._drop()
                 raise GpuBusy()
             self.last, self.renders = time.time(), self.renders + 1
-            if IDLE <= 0:
+            if keep:
+                # More lines for this engine are queued right behind this one: reloading
+                # 9 s per line cost a third of a 23-line batch (2026-11-24).
+                self.keep_until = time.time() + KEEP_S
+            elif IDLE <= 0:
                 self._drop()
             return wav, sr
 
+    def unload(self):
+        with self.lock:
+            self.keep_until = 0.0
+            if self.model is not None:
+                self._drop()
+
     def unload_if_idle(self):
-        if self.model is None or IDLE <= 0 or time.time() - self.last < IDLE:
+        if self.model is None:
+            return
+        if IDLE <= 0:
+            if time.time() < self.keep_until:
+                return
+        elif time.time() - self.last < IDLE:
             return
         if self.lock.acquire(blocking=False):
             try:
@@ -210,9 +229,9 @@ def _synth(m, text: str, seed, *, prefix: str = "", **ref) -> tuple[np.ndarray, 
     return out, sr
 
 
-async def _render(fn) -> Response:
+async def _render(fn, keep: bool = False) -> Response:
     try:
-        out, sr = await asyncio.wait_for(asyncio.to_thread(E.run, fn), TIMEOUT)
+        out, sr = await asyncio.wait_for(asyncio.to_thread(E.run, fn, keep), TIMEOUT)
     except GpuBusy:
         raise HTTPException(503, "the GPU is busy with pictures or videos right now; "
                                  "try again in a few minutes")
@@ -237,6 +256,13 @@ class Speak(BaseModel):
     temperature: float | None = None     # accepted for contract parity; VoxCPM2 has none
     top_p: float | None = None
     seed: int | None = None
+    keep: bool = False                   # keep the model loaded: more lines are coming
+
+
+@app.post("/unload")
+async def unload():
+    await asyncio.to_thread(E.unload)
+    return {"unloaded": True}
 
 
 @app.post("/speak")
@@ -252,7 +278,7 @@ async def speak(req: Speak):
         kw = {"prefix": f"({instruct})", "reference_wav_path": ref}
     else:
         kw = {"reference_wav_path": ref, "prompt_wav_path": ref, "prompt_text": TRANSCRIPTS.get(speaker, PRESET_TEXT)}
-    return await _render(lambda m: _synth(m, text, req.seed, **kw))
+    return await _render(lambda m: _synth(m, text, req.seed, **kw), req.keep)
 
 
 def _reference_file(raw: bytes, tmp: str) -> str:
@@ -275,7 +301,8 @@ async def clone(text: str = Form(...), reference_audio: UploadFile = File(...),
                 reference_text: str | None = Form(None), language: str = Form("Burmese"),
                 mode: str = Form("style"), temperature: float | None = Form(None),
                 top_p: float | None = Form(None), top_k: int | None = Form(None),
-                repetition_penalty: float | None = Form(None), seed: int | None = Form(None)):
+                repetition_penalty: float | None = Form(None), seed: int | None = Form(None),
+                keep: bool = Form(False)):
     """The clip's voice speaking Burmese. Reference audio only (see the module
     docstring); reference_text and mode are accepted and ignored."""
     text = _text(text)
@@ -284,4 +311,4 @@ async def clone(text: str = Form(...), reference_audio: UploadFile = File(...),
         raise HTTPException(413, "the reference clip is over 20 MB")
     with tempfile.TemporaryDirectory() as tmp:
         ref = _reference_file(raw, tmp)
-        return await _render(lambda m: _synth(m, text, seed, reference_wav_path=ref))
+        return await _render(lambda m: _synth(m, text, seed, reference_wav_path=ref), keep)

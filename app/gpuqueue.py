@@ -80,6 +80,10 @@ async def release_leftover_lease() -> None:
 
 
 async def _drop_lease() -> None:
+    # VoxCPM2 may be keeping its model loaded for the next line of a batch; it must not
+    # outlive this queue's turn on the card.
+    from app import speech
+    await speech.unload_kept()
     if _held["id"]:
         await wis.release_gpu(_held["id"])
     _held["id"], _held["since"] = None, 0.0

@@ -444,6 +444,28 @@ async def _run_chant(row, p: dict) -> None:
             db.now(), speech_id))
 
 
+def _next_uses(url: str, speech_id: str) -> bool:
+    """Is the next queued speech line for the same engine?"""
+    nxt = db.one("SELECT language, voice FROM speech WHERE status='queued' AND id!=? "
+                 "ORDER BY created_at LIMIT 1", (speech_id,))
+    return bool(nxt) and engine_url(nxt["language"], nxt["voice"]) == url
+
+
+_kept = {"on": False}
+
+
+async def unload_kept() -> None:
+    """Hand the card back after a batch (VoxCPM2 kept its model between lines)."""
+    if not _kept["on"]:
+        return
+    _kept["on"] = False
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            await client.post(f"{cfg.TTS_MY_URL}/unload")
+    except httpx.HTTPError:
+        pass                              # the engine's own sweeper unloads within a minute
+
+
 async def run(row) -> None:
     """Called by the GPU queue when the card is free. Raises gpuqueue.Busy on a full GPU."""
     if row["language"] == SANSKRIT:
@@ -452,12 +474,19 @@ async def run(row) -> None:
     voice, language, instruct = row["voice"], row["language"], row["instruct"]
     ref_text, p = row["reference_text"], params(row)
     ref_wav = _ref_path(speech_id).read_bytes() if voice == "clone" else None
+    url = engine_url(language, voice)
+    # VoxCPM2 can keep its model loaded when the next queued line goes to it too (one
+    # load per batch instead of one per line); after the last it unloads as before.
+    keep = url == cfg.TTS_MY_URL and _next_uses(url, speech_id)
+    if keep:
+        _kept["on"] = True
     try:
         async with httpx.AsyncClient(timeout=300.0) as client:
-            url = engine_url(language, voice)
             tag = engine_language(language, voice)
             if ref_wav is not None:
                 data = {"text": text, "language": tag, "mode": p.get("match") or "style"}
+                if keep:
+                    data["keep"] = "true"
                 for k in ("temperature", "seed"):
                     if p.get(k) is not None:
                         data[k] = str(p[k])
@@ -470,7 +499,7 @@ async def run(row) -> None:
                 resp = await client.post(f"{url}/speak", json={
                     "text": text, "speaker": voice, "language": tag,
                     "instruct": instruct, "temperature": p.get("temperature"),
-                    "seed": p.get("seed")})
+                    "seed": p.get("seed"), **({"keep": True} if keep else {})})
         if resp.status_code == 503:
             raise gpuqueue.Busy()
         if resp.status_code != 200:
