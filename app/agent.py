@@ -405,6 +405,10 @@ async def _unload(model: str) -> None:
         log.warning("could not unload %s: %s", model, exc)
 
 
+# qwen3.8:27b Q4 at a 32k context: measured ~20 GB on the card.
+PLANNER_VRAM_MB = 20500
+
+
 class GpuTurn:
     """Hold the card for the planner: pause the studio queue, take a WIS lease."""
 
@@ -434,9 +438,42 @@ class GpuTurn:
                 if self.lease is not None:
                     break
                 await asyncio.sleep(3)
+            await self._wait_for_room()
         except BaseException:
             await self.release()
             raise
+
+    async def _wait_for_room(self) -> None:
+        """The lease means WIS has stopped, not that the card is already empty.
+
+        On 2026-11-24 the planner was handed the card while a stopped video was still
+        leaving it (22 GB in use): Ollama either died of out-of-memory or quietly put
+        the 27B on the CPU (0.5 of 18 GB on the GPU), and a 13 s plan took minutes.
+        So: wait until the free memory is really there, and drop a planner copy that a
+        previous load left mostly on the CPU so it loads again onto the card.
+        """
+        _activity(self.thread_id, "waiting for the GPU memory to clear")
+        free = None
+        for _ in range(45):
+            try:
+                free = ((await wis.health()).get("gpu") or {}).get("vram_free_mb")
+            except Exception:                                  # noqa: BLE001
+                free = None
+            if free is None or free >= PLANNER_VRAM_MB:
+                break
+            await asyncio.sleep(2)
+        else:
+            log.warning("planner starting with only %s MB free", free)
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                ps = (await client.get(f"{cfg.OLLAMA_URL}/api/ps")).json()
+            for m in ps.get("models") or []:
+                if cfg.PLANNER_MODEL in (m.get("name"), m.get("model")) and \
+                        (m.get("size_vram") or 0) < 0.9 * (m.get("size") or 1):
+                    log.info("planner was loaded mostly on the CPU; reloading it on the GPU")
+                    await _unload(cfg.PLANNER_MODEL)
+        except Exception as exc:                               # noqa: BLE001
+            log.warning("could not check where the planner is loaded: %s", exc)
 
     async def renew(self) -> None:
         if self.lease:
