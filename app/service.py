@@ -414,6 +414,17 @@ def _sig(kind: str, project_id: str, exp: int) -> str:
     return hmac.new(db.secret().encode(), msg, hashlib.sha256).hexdigest()[:40]
 
 
+def stable_signed_path(kind: str, row_id: str, ttl_seconds: int = 86400) -> str:
+    """A signed link whose expiry only moves once an hour, so pages that re-read state
+    every few seconds get the same URL (no needless redraws, and browsers can cache it).
+    Valid for between ttl and ttl + 1 h."""
+    exp = (int(db.now()) // 3600 + 1) * 3600 + ttl_seconds
+    tail = {"video": "/video.mp4", "image": "/image.png", "speech": "/speech.mp3",
+            "music": "/song.mp3", "voice": "/audio.mp3"}.get(kind, "")
+    prefix = {"video": "v", "image": "i", "speech": "s", "music": "m", "voice": "a"}.get(kind, "u")
+    return f"/{prefix}/{row_id}/{exp}/{_sig(kind, row_id, exp)}{tail}"
+
+
 def signed_path(kind: str, project_id: str, ttl_seconds: int) -> str:
     """A path that works without a cookie until it expires.
 

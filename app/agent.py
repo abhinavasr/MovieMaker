@@ -1317,7 +1317,7 @@ def _command(user, thread, text: str) -> str | None:
 # =========================================================================== views + API
 
 def _sign(kind: str, item_id: str, base: str) -> str:
-    return base + service.signed_path(kind, item_id, 24 * 3600)
+    return base + service.stable_signed_path(kind, item_id, 24 * 3600)
 
 
 def _media_view(items: list, base: str) -> list:

@@ -566,7 +566,7 @@ def add_ref(project, kind: str, name: str, description: str = "", image_id: str 
            "voice_path, speaker, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
            (rid, pid, idx, kind, name.strip()[:80], description[:1500], image_id, voice_path,
             speaker or None, db.now()))
-    if image_id and kind == "character":
+    if image_id and kind in ("character", "location"):
         _want_angles(pid, rid)
     _touch(pid)
     return rid
@@ -594,7 +594,7 @@ def edit_ref(project, ref_id: str, user: auth.User | None = None, **f) -> None:
     if f.get("image_id"):
         images.owned_image(user, f["image_id"])
         sets["image_id"] = f["image_id"]
-        if f["image_id"] != row["image_id"] and (f.get("kind") or row["kind"]) == "character":
+        if f["image_id"] != row["image_id"] and (f.get("kind") or row["kind"]) in ("character", "location"):
             sets["angles"] = json.dumps({"_auto": True})
     if f.get("speaker") is not None:
         if f["speaker"] and f["speaker"] not in speech.SPEAKERS:
@@ -796,7 +796,8 @@ def render_when_ready(pid: str, user: auth.User, clip_id: str, shot_id: str) -> 
 async def _run_angles() -> None:
     from app import agent
     for r in db.query("SELECT r.*, p.user_id AS owner FROM prod_refs r JOIN projects p ON "
-                      "p.id=r.project_id WHERE r.kind='character' AND r.angles LIKE '%_auto%'"):
+                      "p.id=r.project_id WHERE r.kind IN ('character','location') AND "
+                      "r.angles LIKE '%_auto%'"):
         if not r["image_id"]:
             continue
         st = db.one("SELECT status FROM images WHERE id=?", (r["image_id"],))
@@ -840,6 +841,7 @@ async def _run_scripts() -> None:
 async def _run_pending() -> None:
     await _run_angles()
     await _run_scripts()
+    await _run_auto_shots()
     from app import agent
     for project in db.query("SELECT * FROM projects WHERE mode='storyboard' AND "
                             "params_json LIKE '%_render_after%'"):
@@ -1015,6 +1017,21 @@ ANGLES = {"three_quarter": "three-quarter view, turned 45 degrees",
           "back": "back view",
           "face": "EXTREME CLOSE-UP PORTRAIT: only the head fills the whole frame, no body or "
                   "legs visible, face toward the camera, detailed eyes and expression"}
+# A place gets its own set of views (2026-11-24: "location should also have multiple shot
+# options"), each drawn from the main picture so it stays the same place.
+PLACE_VIEWS = {"wide": "a very wide establishing view of the whole place from much further back",
+               "reverse": "the reverse angle: standing at the far side looking back toward where "
+                          "the first view was taken",
+               "detail": "a macro close-up of a characteristic detail of the place",
+               "aerial": "a high aerial view looking straight down over the whole place"}
+# FLUX klein copied the main picture's framing for places (four near-identical "views");
+# Qwen-Image with the same source gave real new camera positions of the same place
+# (measured 2026-11-24 on a meadow: aerial, reverse, detail all distinct and consistent).
+PLACE_VIEW_MODEL = "qwen-image-2.1"
+
+
+def views_for(kind: str) -> dict:
+    return ANGLES if kind == "character" else PLACE_VIEWS if kind == "location" else {}
 
 
 def _angle_done(r) -> dict[str, str]:
@@ -1034,25 +1051,32 @@ async def make_angles(project, user: auth.User, ref_id: str, only: list | None =
         raise HTTPException(400, f"{r['name']} needs its main picture first")
     src = [images.source_from_image(user, r["image_id"])]
     params = db.params_of(project)
-    angles = _jl(r["angles"], {})
-    for key in only or list(ANGLES):
-        if key == "face":
+    angles = {k: v for k, v in _jl(r["angles"], {}).items() if k != "_auto"}
+    views = views_for(r["kind"])
+    if not views:
+        raise HTTPException(400, f"{r['kind']} references have no extra views")
+    for key in [k for k in (only or list(views)) if k in views]:
+        if r["kind"] == "location":
+            text = (f"Same place as picture 1 ({r['name']}), but {views[key]}. Keep the same "
+                    "landmarks, colours, light and style. No characters.")
+        elif key == "face":
             text = (f"{ANGLES[key]}. The same character as in picture 1 ({r['name']}): exactly "
                     "the same face, colours and markings. Plain soft background.")
         else:
             text = (f"The same character as in picture 1: {r['name']}, {r['description']}. "
-                    f"{ANGLES[key]}. Exactly the same design, outfit, colours and proportions; "
+                    f"{views[key]}. Exactly the same design, outfit, colours and proportions; "
                     "plain soft background; character turnaround reference.")
         angles[key] = await images.create(user, text[:1900], src,
-                                          orientation=params.get("orientation", "portrait"))
+                                          orientation=params.get("orientation", "portrait"),
+                                          model=PLACE_VIEW_MODEL if r["kind"] == "location" else None)
     db.run("UPDATE prod_refs SET angles=? WHERE id=?", (json.dumps(angles), ref_id))
     _touch(pid)
     return angles
 
 
 def _want_angles(pid: str, ref_id: str) -> None:
-    """Mark a character for a turnaround once its main picture is ready (pending_loop)."""
-    db.run("UPDATE prod_refs SET angles=? WHERE id=? AND kind='character'",
+    """Mark a character or place for its views once its main picture is ready (pending_loop)."""
+    db.run("UPDATE prod_refs SET angles=? WHERE id=? AND kind IN ('character','location')",
            (json.dumps({"_auto": True}), ref_id))
 
 
@@ -1115,6 +1139,106 @@ async def picture_options(project, user: auth.User, shot_id: str, prompt: str = 
                                        orientation=params.get("orientation", "portrait"),
                                        model=model))
     return ids
+
+
+def prepare_render(project, user: auth.User, shot_ids: list[str] | None) -> tuple[list, list]:
+    """Split a render request: shots that can render now, and shots without a picture.
+    The latter go through the pipeline first (their references' pictures, then a picture
+    drawn from them, then the render), in the background (`_run_auto_shots`)."""
+    pid = project["id"]
+    shots = ordered_shots(pid)
+    want = list(shot_ids or []) or [s["id"] for s in shots
+                                    if s["status"] != "done" or not (s["clip_path"] and
+                                                                     Path(s["clip_path"]).exists())]
+    by_id = {s["id"]: s for s in shots}
+    now, later = [], []
+    for sid in want:
+        s = by_id.get(sid)
+        if s is None:
+            continue
+        (later if not s["asset_id"] and s["start_from"] != "prev_last" else now).append(sid)
+    # A continuous shot after a shot that waits for its picture has to wait with it.
+    for sid in list(now):
+        s = by_id[sid]
+        i = [x["id"] for x in shots].index(sid)
+        if s["start_from"] == "prev_last" and i > 0 and shots[i - 1]["id"] in later:
+            now.remove(sid)
+            later.append(sid)
+    if later:
+        params = db.params_of(project)
+        jobs = [j for j in params.get("_auto_shots") or [] if j["shot"] not in later]
+        jobs += [{"shot": sid, "user": user.id, "stage": "refs", "at": db.now()} for sid in later]
+        params["_auto_shots"] = jobs
+        db.set_params(pid, params)
+    return now, later
+
+
+async def _run_auto_shots() -> None:
+    """Advance shots waiting for a picture: references -> shot picture -> render."""
+    from app import agent
+    for project in db.query("SELECT * FROM projects WHERE mode='storyboard' AND "
+                            "params_json LIKE '%_auto_shots%'"):
+        pid = project["id"]
+        jobs = db.params_of(project).get("_auto_shots") or []
+        if not jobs:
+            continue
+        keep, to_render = [], {}
+        for j in jobs:
+            shot = db.one("SELECT * FROM shots WHERE id=?", (j["shot"],))
+            user = agent.load_user(j["user"])
+            if shot is None or user is None or db.now() - j.get("at", 0) > 12 * 3600:
+                continue
+            proj = db.one("SELECT * FROM projects WHERE id=?", (pid,))
+            try:
+                if j["stage"] == "refs":
+                    waiting = False
+                    for rid in _jl(shot["refs"], []):
+                        r = db.one("SELECT * FROM prod_refs WHERE id=?", (rid,))
+                        if r is None:
+                            continue
+                        if not r["image_id"]:
+                            await make_ref_picture(proj, user, rid)
+                            waiting = True
+                        elif not _img_done(r["image_id"]):
+                            row = db.one("SELECT status FROM images WHERE id=?", (r["image_id"],))
+                            if row and row["status"] not in images.TERMINAL:
+                                await images.refresh(r["image_id"])
+                                waiting = True
+                    if not waiting:
+                        j["stage"] = "picture"
+                if j["stage"] == "picture" and shot["asset_id"]:
+                    j["stage"] = "render"                  # the person set one meanwhile
+                elif j["stage"] == "picture" and not j.get("image"):
+                    j["image"] = (await picture_options(proj, user, shot["id"], "", 1))[0]
+                elif j["stage"] == "picture":
+                    row = await images.refresh(j["image"])
+                    if row["status"] == "succeeded":
+                        set_picture(proj, user, shot["id"], j["image"])
+                        j["stage"] = "render"
+                    elif row["status"] in ("failed", "cancelled"):
+                        log.warning("picture for %s failed; dropped", shot["id"])
+                        continue
+                if j["stage"] == "render":
+                    to_render.setdefault(j["user"], []).append(shot["id"])
+                    continue
+            except HTTPException as exc:
+                log.warning("auto shot %s: %s", j["shot"], exc.detail)
+                continue
+            keep.append(j)
+        proj = db.one("SELECT * FROM projects WHERE id=?", (pid,))
+        for uid, ids in to_render.items():
+            if service.is_rendering(proj):
+                keep += [{"shot": i, "user": uid, "stage": "render", "at": db.now()} for i in ids]
+                continue
+            try:
+                await render_shots(proj, agent.load_user(uid), ids)
+                log.info("auto-rendering %d shot(s) in %s", len(ids), pid)
+            except HTTPException as exc:
+                log.warning("auto render in %s: %s", pid, exc.detail)
+            proj = db.one("SELECT * FROM projects WHERE id=?", (pid,))
+        p2 = db.params_of(db.one("SELECT * FROM projects WHERE id=?", (pid,)))
+        p2["_auto_shots"] = keep
+        db.set_params(pid, p2)
 
 
 def render_shots(project, user: auth.User, shot_ids: list[str] | None = None):
@@ -1756,6 +1880,7 @@ def state(project, base: str) -> dict:
             "prompt": s["prompt"], "seconds": secs, "start": start, "framing": s["framing"],
             "make": s["make"] or "animate", "refs": _jl(s["refs"], []), "status": s["status"],
             "start_from": s["start_from"] or "",
+            "auto": next((j["stage"] for j in params.get("_auto_shots") or [] if j["shot"] == s["id"]), None),
             "error": s["error"], "picture": _asset_url(pid, s["asset_id"]),
             "clip": f"/api/editor/{pid}/shots/{s['id']}/clip?v={int(Path(s['clip_path']).stat().st_mtime)}"
                     if clip_ok else None})
@@ -1772,13 +1897,13 @@ def state(project, base: str) -> dict:
         ref_views.append({"id": r["id"], "kind": r["kind"], "name": r["name"],
                           "description": r["description"], "speaker": r["speaker"],
                           "image_id": r["image_id"],
-                          "image": base + service.signed_path("image", r["image_id"], 86400)
+                          "image": base + service.stable_signed_path("image", r["image_id"], 86400)
                           if r["image_id"] and _img_done(r["image_id"]) else None,
                           "image_pending": bool(r["image_id"]) and not _img_done(r["image_id"]),
                           "angles": [{"angle": k, "image_id": v,
                                       "status": (db.one("SELECT status FROM images WHERE id=?", (v,)) or
                                                  {"status": "gone"})["status"],
-                                      "url": base + service.signed_path("image", v, 86400)}
+                                      "url": base + service.stable_signed_path("image", v, 86400)}
                                      for k, v in _jl(r["angles"], {}).items() if isinstance(v, str)],
                           "angles_waiting": "_auto" in _jl(r["angles"], {}),
                           "voice": f"/api/editor/{pid}/refs/{r['id']}/voice"
@@ -1791,7 +1916,7 @@ def state(project, base: str) -> dict:
             im = db.one("SELECT status, progress FROM images WHERE id=?", (o,))
             opts.append({"image_id": o, "status": im["status"] if im else "gone",
                          "progress": im["progress"] if im else 0,
-                         "url": base + service.signed_path("image", o, 86400)})
+                         "url": base + service.stable_signed_path("image", o, 86400)})
         props.append({"id": p["id"], "shot_id": p["shot_id"], "title": p["title"],
                       "summary": p["summary"], "changes": _jl(p["changes"], []), "options": opts,
                       "created_at": p["created_at"]})
@@ -2052,7 +2177,7 @@ async def _t_ref_picture(user, args, base):
     row = await images.wait(image_id, 60)
     out = {"ref_id": args.get("ref_id"), "image_id": image_id, "status": row["status"]}
     if row["status"] == "succeeded":
-        out["image_url"] = base + service.signed_path("image", image_id, 86400)
+        out["image_url"] = base + service.stable_signed_path("image", image_id, 86400)
     return out
 
 
@@ -2074,17 +2199,19 @@ async def _t_picture_options(user, args, base):
     out = {"image_ids": ids, "proposal_id": pid,
            "status": "the person picks one; you can see them on review"}
     if done:
-        out["image_url"] = base + service.signed_path("image", done[0], 86400)
+        out["image_url"] = base + service.stable_signed_path("image", done[0], 86400)
         out["image_id"] = done[0]
     return out
 
 
 async def _t_render(user, args, base):
     project = _agent_project(user, args)
-    ids = args.get("shot_ids") or None
-    await render_shots(project, user, ids)
-    return {"project_id": project["id"], "status": "queued",
-            "rendering": ids or "every shot without an up-to-date clip"}
+    now, later = prepare_render(project, user, args.get("shot_ids") or None)
+    if now:
+        await render_shots(project, user, now)
+    return {"project_id": project["id"], "status": "queued", "rendering": len(now),
+            "making_pictures_first": len(later),
+            "note": "shots without a picture get one drawn from their references, then render"}
 
 
 async def _t_dialogue(user, args, base):
@@ -2478,8 +2605,10 @@ async def api_render(pid: str, request: Request):
     user = _user(request)
     project = production(user, pid)
     b = await _body(request)
-    await render_shots(project, user, b.get("shot_ids") or None)
-    return {"ok": True}
+    now, later = prepare_render(project, user, b.get("shot_ids") or None)
+    if now:
+        await render_shots(project, user, now)
+    return {"ok": True, "rendering": len(now), "making_pictures": len(later)}
 
 
 @router.post("/api/editor/{pid}/cancel")
@@ -2560,7 +2689,7 @@ async def api_ref_angles(pid: str, rid: str, request: Request):
     user = _user(request)
     project = production(user, pid)
     b = await _body(request)
-    only = [a for a in (b.get("only") or []) if a in ANGLES] or None
+    only = [a for a in (b.get("only") or []) if a in ANGLES or a in PLACE_VIEWS] or None
     return {"angles": await make_angles(project, user, rid, only)}
 
 
@@ -2592,7 +2721,7 @@ async def api_images(pid: str, request: Request, ids: str = ""):
             except Exception:                                  # noqa: BLE001
                 pass
         out.append({"image_id": i, "status": row["status"],
-                    "url": service.base_url(request) + service.signed_path("image", i, 86400)
+                    "url": service.base_url(request) + service.stable_signed_path("image", i, 86400)
                     if row["status"] == "succeeded" else None})
     return {"images": out}
 

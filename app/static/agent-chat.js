@@ -120,7 +120,7 @@ window.AgentChat = (() => {
         meta.steps.forEach((s) => { const d = document.createElement("div"); d.className = "ws-step pending";
           d.innerHTML = `<div class="r"><span class="ic"></span><span class="why">${esc(s.why || s.tool)}</span><span class="tool">${esc(s.tool)}</span></div>`;
           p.list.appendChild(d); p.placeholders.push(d); });
-        plans.set(m.seq, p); planProgress(p);
+        el.dataset.chatNode = "1"; plans.set(m.seq, p); planProgress(p);
       } else if (m.role === "step" || m.role === "result") {
         if (fresh) el = document.createElement("div");
         const open = el.classList.contains("open");
@@ -132,7 +132,7 @@ window.AgentChat = (() => {
           if (fresh) { const ph = p.placeholders.shift(); if (ph) ph.replaceWith(el); else p.list.appendChild(el); nodes.set(m.seq, el); }
           planProgress(p); return;
         }
-        if (fresh) { const wrap = document.createElement("div"); wrap.className = "ws-plan"; wrap.appendChild(el); nodes.set(m.seq, el); col.insertBefore(wrap, liveEl); }
+        if (fresh) { const wrap = document.createElement("div"); wrap.className = "ws-plan"; wrap.dataset.chatNode = "1"; wrap.appendChild(el); nodes.set(m.seq, el); col.insertBefore(wrap, liveEl); }
         return;
       } else if (m.role === "user") {
         if (!fresh) return;
@@ -150,7 +150,7 @@ window.AgentChat = (() => {
         el.className = "ws-note" + (m.role === "error" ? " err" : "") + (meta.command ? " cmd" : "");
         el.textContent = m.content;
       }
-      if (fresh) { nodes.set(m.seq, el); col.insertBefore(el, liveEl); }
+      if (fresh) { el.dataset.chatNode = "1"; nodes.set(m.seq, el); col.insertBefore(el, liveEl); }
     }
 
     // ---------------------------------------------------------------- status
@@ -294,7 +294,8 @@ window.AgentChat = (() => {
     function open(id) {
       current = id; since = 0; view = null; lastStatus = null;
       nodes.forEach((n) => n.remove()); nodes.clear(); plans.forEach((p) => p.el.remove()); plans.clear();
-      col.querySelectorAll(":scope > .ws-plan, :scope > div[style]").forEach((n) => n.remove());
+      // Only what this panel drew: the page's own welcome box and prompts stay.
+      col.querySelectorAll(":scope > [data-chat-node]").forEach((n) => n.remove());
       if ($("empty")) $("empty").hidden = !!id;
       if ($("del")) $("del").hidden = !id;
       if (page) { if ($("title")) $("title").textContent = id ? "…" : "New conversation"; history.replaceState(null, "", id ? "?t=" + id : location.pathname); }

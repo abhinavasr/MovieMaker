@@ -41,7 +41,9 @@
     clearTimeout(timer);
     try {
       const st = await api(`/api/editor/${PID}`);
-      const s2 = JSON.stringify({...st, now: 0, deleted_on: 0, days_left: 0});
+      // Signed links carry an expiry; they must not count as a change, or the whole editor
+      // is rebuilt every poll and clicks land on buttons that were just replaced.
+      const s2 = JSON.stringify({...st, now: 0, deleted_on: 0, days_left: 0}).replace(/\/\d{9,11}\/[0-9a-f]{12,}\//g, "/~/");
       const changed = s2 !== sig;
       S = st; sig = s2;
       if (!sel.scene || !sceneById(sel.scene)) sel.scene = S.scenes[0]?.id || null;
@@ -51,7 +53,7 @@
       if (changed || force) paint();
       else { paintRender(); if (S.proposals.some((p) => p.options.some((o) => !["succeeded", "failed", "gone"].includes(o.status)))) { if (!Player.playing && view !== "assets") paintStage(); if (!typing()) paintInspector(); } }
     } catch (e) { console.warn(e); }
-    const busy = S && (["running", "queued"].includes(S.status) || S.clips.some((c) => c.status === "pending") || S.export.status === "running" || S.proposals.some((p) => p.options.some((o) => !["succeeded", "failed", "gone"].includes(o.status))));
+    const busy = S && (["running", "queued"].includes(S.status) || S.shots.some((s) => s.auto) || S.clips.some((c) => c.status === "pending" || (c.status === "script" && c.auto)) || S.export.status === "running" || S.proposals.some((p) => p.options.some((o) => !["succeeded", "failed", "gone"].includes(o.status))));
     timer = setTimeout(load, busy ? 2000 : 6000);
   }
 
@@ -98,7 +100,17 @@
     if (ex.status === "running") { b.textContent = "⏳ Mixing…"; b.disabled = true; }
     else { b.disabled = false; b.textContent = ex.url ? "⤓ Export (ready)" : "⤓ Export"; }
   }
-  $("render-missing").onclick = async () => { try { await api(`/api/editor/${PID}/render`, {}); toast("Rendering the missing shots"); load(true); } catch (e) { toast(e.message); } };
+  // One door for every Render button: shots without a picture get one first (drawn from
+  // their references), then render; the toast says which.
+  async function renderShots(ids, what) {
+    try {
+      const r = await api(`/api/editor/${PID}/render`, ids ? {shot_ids: ids} : {});
+      toast(r.making_pictures ? `Making ${r.making_pictures} picture(s) from the characters first, then rendering` + (r.rendering ? ` · ${r.rendering} rendering now` : "")
+        : `Rendering ${what || r.rendering + " shot(s)"}`);
+      load(true); return r;
+    } catch (e) { toast(e.message); }
+  }
+  $("render-missing").onclick = () => renderShots(null, "the missing shots");
   $("export").onclick = () => openExport();
   $("del-prod").onclick = () => modal(`<h2>Delete “${esc(S.title)}”?</h2>
       <p style="font-size:.88rem">This deletes the whole production: ${S.scenes.length} scene(s), ${S.shots.length} shot(s) and their clips, the timeline audio, references, proposals, the exported film and the conversation with the assistant. It can't be undone.</p>
@@ -126,7 +138,7 @@
         ${missing.length ? `<button class="ed-btn" data-act="render" title="Uses the video model">▶ Render ${missing.length} missing first</button>` : ""}
         <button class="ed-btn gold" data-act="mix">${ex.url ? "Mix again" : "Mix the film"}</button>
         <button class="ed-btn ghost" data-act="close">Close</button></div>`, async (act) => {
-      if (act === "render") { try { await api(`/api/editor/${PID}/render`, {}); toast("Rendering the missing shots"); } catch (e) { toast(e.message); } return true; }
+      if (act === "render") { await renderShots(null, "the missing shots"); return true; }
       if (act === "mix") { try { await api(`/api/editor/${PID}/export`, {}); toast("Mixing the film…"); load(true); } catch (e) { toast(e.message); } return true; }
       return true;
     });
@@ -204,7 +216,7 @@
   function paintRefs() {
     $("refs").innerHTML = S.refs.length ? S.refs.map((r) => `<div class="ed-ref" data-ref="${r.id}">
       <div class="th">${r.image ? `<img src="${esc(r.image)}" alt="" loading="lazy">` : r.image_pending ? "⏳" : ({character: "👤", location: "🏛", prop: "🗝", style: "🎨", voice: "🎙"}[r.kind] || "📌")}</div>
-      <div><b>${esc(r.name)}</b><span>${esc(r.kind[0].toUpperCase() + r.kind.slice(1))}${r.description ? " · " + esc(r.description) : ""}</span>${r.voice ? `<span class="v">🎙 voice sample</span>` : r.speaker ? `<span class="v">🎙 ${esc(r.speaker)}</span>` : ""}${r.kind === "character" ? `<span class="v" style="color:var(--muted)">🔄 ${(r.angles || []).filter((a) => a.status === "succeeded").length}/4 angles${(r.angles || []).some((a) => !["succeeded", "failed", "gone"].includes(a.status)) || r.angles_waiting ? " · drawing" : ""}</span>` : ""}</div>
+      <div><b>${esc(r.name)}</b><span>${esc(r.kind[0].toUpperCase() + r.kind.slice(1))}${r.description ? " · " + esc(r.description) : ""}</span>${r.voice ? `<span class="v">🎙 voice sample</span>` : r.speaker ? `<span class="v">🎙 ${esc(r.speaker)}</span>` : ""}${r.kind === "character" || r.kind === "location" ? `<span class="v" style="color:var(--muted)">🔄 ${(r.angles || []).filter((a) => a.status === "succeeded").length}/4 ${r.kind === "location" ? "views" : "angles"}${(r.angles || []).some((a) => !["succeeded", "failed", "gone"].includes(a.status)) || r.angles_waiting ? " · drawing" : ""}</span>` : ""}</div>
       <span>⋮</span></div>`).join("") : `<div class="ed-note" style="padding:4px 6px">Characters, places and voices the film keeps coming back to. Shots that include them get them as references, so faces and voices stay consistent.</div>`;
   }
   $("refs").addEventListener("click", (e) => { const d = e.target.closest("[data-ref]"); if (d) refModal(refById(d.dataset.ref)); });
@@ -238,7 +250,7 @@
           </div>
         </div>
         <div class="ed-refopts" id="rf-opts"></div></div>
-      ${r && r.kind === "character" ? `<div class="ed-field">Turnaround — every angle, drawn from the main picture <div class="ed-turn" id="rf-turn"></div>
+      ${r && (r.kind === "character" || r.kind === "location") ? `<div class="ed-field">${r.kind === "location" ? "Views of the place" : "Turnaround — every angle"}, drawn from the main picture <div class="ed-turn" id="rf-turn"></div>
         <div style="display:flex;gap:6px;margin-top:6px"><button class="ed-btn sm" type="button" id="rf-angles">↻ Redraw all angles</button><span class="ed-note" id="rf-turn-note"></span></div></div>` : ""}
       <input type="file" id="rf-picfile" accept="image/*" hidden>
       <div class="ed-row2" id="rf-voicerow" ${voiced(r?.kind || "character") ? "" : "hidden"}><label class="ed-field">Preset voice<select id="rf-speaker"><option value="">— none —</option>${S.speakers.map((s) => `<option value="${esc(s)}" ${r?.speaker === s ? "selected" : ""}>${esc(voiceLabel(s))}</option>`).join("")}</select></label>
@@ -265,12 +277,12 @@
       return r;
     }
     $("rf-kind").onchange = () => { $("rf-voicerow").hidden = !voiced($("rf-kind").value); };
-    const ANG = {three_quarter: "¾ view", side: "Side", back: "Back", face: "Face"};
+    const ANG = r && r.kind === "location" ? {wide: "Wide", reverse: "Reverse", detail: "Detail", aerial: "Aerial"} : {three_quarter: "¾ view", side: "Side", back: "Back", face: "Face"};
     function paintTurn() {
       if (!$("rf-turn") || !r) return;
       const cur = S.refs.find((x) => x.id === r.id) || r;
       const by = Object.fromEntries((cur.angles || []).map((a) => [a.angle, a]));
-      $("rf-turn").innerHTML = `<div class="t main">${cur.image ? `<img src="${esc(cur.image)}" alt="">` : "—"}<span>Front</span></div>`
+      $("rf-turn").innerHTML = `<div class="t main">${cur.image ? `<img src="${esc(cur.image)}" alt="">` : "—"}<span>${cur.kind === "location" ? "Main" : "Front"}</span></div>`
         + Object.keys(ANG).map((k) => { const a = by[k];
           return `<button type="button" class="t" data-angle="${k}" title="Redraw the ${ANG[k]}">${a && a.status === "succeeded" ? `<img src="${esc(a.url)}" alt="">` : a && a.status !== "failed" ? `<i class="spin"></i>` : cur.angles_waiting ? "⏳" : "—"}<span>${ANG[k]}</span></button>`; }).join("");
       const pending = (cur.angles || []).filter((a) => !["succeeded", "failed", "cancelled", "gone"].includes(a.status)).length;
@@ -364,7 +376,7 @@
       const prev = S.shots[S.shots.findIndex((x) => x.id === sh.id) - 1];
       st.innerHTML = `<div class="empty"><b>⛓ Opens on the last frame of the previous shot</b><span>Taken from “${esc(prev?.title || "the previous shot")}” when this shot renders, so the two flow as one take.</span>
         <div class="row"><button class="ed-btn gold" id="stage-chain-render">▶ Render both</button></div></div>${mk}`;
-      $("stage-chain-render").onclick = async () => { try { await api(`/api/editor/${PID}/render`, {shot_ids: [prev?.id, sh.id].filter(Boolean)}); toast("Rendering both shots"); load(true); } catch (e) { toast(e.message); } };
+      $("stage-chain-render").onclick = () => renderShots([prev?.id, sh.id].filter(Boolean), "both shots");
     } else if (making) {
       const n = making.options.length, done = making.options.filter((o) => o.status === "succeeded").length;
       st.innerHTML = `<div class="gen"><span class="spin"></span><b>Making ${n} picture option${n === 1 ? "" : "s"}…</b><span class="ed-note">${done} of ${n} ready · ${Math.max(0, Math.round(S.now - making.created_at))} s · they appear in the panel on the right</span></div>${mk}`;
@@ -440,7 +452,7 @@
       ${s.start_from === "prev_last" ? `<span class="chain" title="Opens on the previous shot's last frame">⛓ continues</span>` : ""}
       <div class="th">${s.picture ? `<img src="${esc(s.picture)}" alt="" loading="lazy">` : s.start_from === "prev_last" ? "⛓ continues" : "no picture"}</div>
       <span class="mk">${{animate: "🎞", perform: "🎭", lipsync: "👄"}[s.make]} ${s.seconds}s</span>
-      ${(() => { const b = {done: "● clip", running: "⏳ rendering", failed: "failed", stale: "changed"}[s.status] || (s.status === "pending" && ["running", "queued"].includes(S.status) ? "queued" : ""); return b ? `<span class="st ${esc(s.status)}">${b}</span>` : ""; })()}
+      ${(() => { const b = s.auto ? {refs: "⏳ characters", picture: "🖼 making picture", render: "⏳ to render"}[s.auto] : {done: "● clip", running: "⏳ rendering", failed: "failed", stale: "changed"}[s.status] || (s.status === "pending" && ["running", "queued"].includes(S.status) ? "queued" : ""); return b ? `<span class="st ${s.auto ? "running" : esc(s.status)}">${b}</span>` : ""; })()}
       <div class="m"><b>Shot ${String(i + 1).padStart(2, "0")}</b><span class="f">${esc(s.framing)}</span><span>${esc(s.title || s.prompt || "untitled")}</span></div></div>`).join("")
       + `<button class="ed-card add" id="add-shot" type="button" title="Add a shot" aria-label="Add a shot">＋</button>`;
     $("add-shot").onclick = addShot;
@@ -757,7 +769,7 @@
       <div class="ed-row2"><label class="ed-field">Options<select id="g-count"><option>1</option><option selected>2</option><option>3</option><option>4</option></select></label>
       <label class="ed-field">Model<select id="g-model"><option value="">FLUX.2 klein (default)</option><option value="qwen-image-2.1-turbo">Qwen-Image turbo</option><option value="qwen-image-2.1">Qwen-Image</option></select></label></div>
       <div class="acts"><button class="ed-btn gold" data-go="image">Generate options</button></div><div class="ed-note">Uses this shot's references as source pictures. You pick one under Proposed changes.</div></div>`;
-    if (key === "video") return `<div class="ed-genform"><div class="ed-note">${MAKE[sh.make][0]} · ${sh.seconds} s · about ${Math.ceil(sh.seconds / 5 * 2)} min of GPU. ${!sh.picture && sh.start_from !== "prev_last" ? "<b style='color:var(--warn)'>Needs a picture first.</b>" : sh.start_from === "prev_last" ? "Opens on the previous shot's last frame." : ""} ${!sh.prompt ? "<b style='color:var(--warn)'>Needs a prompt.</b>" : ""}</div>
+    if (key === "video") return `<div class="ed-genform"><div class="ed-note">${MAKE[sh.make][0]} · ${sh.seconds} s · about ${Math.ceil(sh.seconds / 5 * 2)} min of GPU. ${!sh.picture && sh.start_from !== "prev_last" ? "No picture yet: one is drawn from its characters first, then it renders." : sh.start_from === "prev_last" ? "Opens on the previous shot's last frame." : ""} ${!sh.prompt ? "<b style='color:var(--warn)'>Needs a prompt.</b>" : ""}</div>
       <div class="acts"><button class="ed-btn" data-go="video-scene">Render whole scene</button><button class="ed-btn gold" data-go="video">Render this shot</button></div></div>`;
     if (key === "voice") { const sp = S.refs.filter((r) => ["character", "voice"].includes(r.kind) && sh.refs.includes(r.id)).concat(S.refs.filter((r) => ["character", "voice"].includes(r.kind) && !sh.refs.includes(r.id)));
       return `<div class="ed-genform"><label class="ed-field">Who<select id="g-ref">${sp.map((r) => `<option value="${r.id}">${esc(r.name)}</option>`).join("")}<option value="">Narrator / default voice</option></select></label>
@@ -901,8 +913,8 @@
     btn.disabled = true;
     try {
       if (what === "image") { await api(`/api/editor/${PID}/shots/${sh.id}/options`, {prompt: $("g-prompt").value, count: +$("g-count").value, model: $("g-model").value || null}); toast("Making picture options — they appear at the top of this panel"); setTimeout(() => { $("pane-shot").scrollTop = 0; }, 100); }
-      else if (what === "video") { await api(`/api/editor/${PID}/render`, {shot_ids: [sh.id]}); toast("Rendering this shot"); }
-      else if (what === "video-scene") { await api(`/api/editor/${PID}/render`, {shot_ids: sceneShots(sh.scene_id).map((s) => s.id)}); toast("Rendering the scene"); }
+      else if (what === "video") { await renderShots([sh.id], "this shot"); }
+      else if (what === "video-scene") { await renderShots(sceneShots(sh.scene_id).map((s) => s.id), "the scene"); }
       else if (what === "voice") { const text = $("g-text").value.trim(); if (!text) { toast("Write the line"); btn.disabled = false; return; }
         const lip = $("g-lip")?.checked;
         await api(`/api/editor/${PID}/clips`, {kind: "dialogue", ref_id: $("g-ref").value || null, text, instruct: $("g-inst").value, start_s: sh.start + 0.3, use_in_video: lip || $("g-vid").checked, lipsync_shot: lip ? sh.id : null});
@@ -1059,11 +1071,11 @@
       ? ["Define the shots this scene should have", "Make pictures for this scene's characters and places", "Give every shot in this scene a picture", "Score this scene", "Render this scene"]
       : ["Define all the scenes and their shots", "Understand the story and summarise it", "Make pictures for every character and place", "Score each scene and duck the music under dialogue", "Render every shot that isn't rendered"];
     $("quick").innerHTML = quick.map((q) => `<button type="button">${esc(q)}</button>`).join("");
-    $("quick-empty").innerHTML = $("quick").innerHTML;
+    if ($("quick-empty")) $("quick-empty").innerHTML = $("quick").innerHTML;
     paintInspectorHead();
   }
   ["story", "scene", "shot"].forEach((k) => $("scope-" + k).onclick = () => { scope = k; paintScope(); });
-  ["quick", "quick-empty"].forEach((id) => $(id).addEventListener("click", (e) => { const b = e.target.closest("button"); if (b) chatSend(b.textContent); }));
+  ["quick", "quick-empty"].forEach((id) => $(id)?.addEventListener("click", (e) => { const b = e.target.closest("button"); if (b) chatSend(b.textContent); }));
   $("applies").onchange = async () => { await api(`/api/editor/${PID}/settings`, {agent_applies: $("applies").checked}); toast($("applies").checked ? "The agent applies its edits directly" : "The agent proposes; you apply"); };
 
   let threadId = null, lastAgentStatus = null, threadP = null, chatP = null;
