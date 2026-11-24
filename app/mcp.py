@@ -88,7 +88,16 @@ get_voice_job for results.
 
 Everything made or uploaded here is deleted 90 days after it last changed (each result says \
 `deleted_on`). Tell the person to download anything they want to keep and save their own copy. \
-Trained voices and voice profiles are the exception and are kept until deleted."""
+Trained voices and voice profiles are the exception and are kept until deleted.
+
+Each storyboard scene has a use case, and each use case is made by the model built for it \
+(set_scenes `use_case`): animate (the default: the picture comes to life, MiniMax H3), perform \
+(references guide it), longtalk (the person talks or sings up to 60 s, InfiniteTalk; give the \
+voice with set_scene_voice), talk2 (two people in the picture talk, speaker 1 then 2; a voice \
+each), motion (the person copies a video's movements exactly, Wan Animate 2; give the video \
+with set_scene_video), recast (the person in the scene picture replaces someone in a video, \
+keeping its motion, place and sound, Viggle Remake; opts.who) and restyle (change a video's \
+look; opts.change). Talking, singing and remade scenes keep their sound in the film."""
 
 
 # --------------------------------------------------------------------------- views
@@ -104,12 +113,36 @@ def _video_url(project, base: str) -> str | None:
     return base + service.signed_path("video", project["id"], VIDEO_LINK_TTL)
 
 
+USE_CASES = {
+    "animate": "Bring the picture to life: camera moves and gentle action from the scene's picture (MiniMax H3 image-to-video). Silent. The default.",
+    "perform": "Keep characters true to references: the scene picture plus reference videos guide it (MiniMax H3 reference-to-video).",
+    "longtalk": "Talk or sing for longer (up to 60 s): the person in the picture says or sings the scene's voice (InfiniteTalk). Needs set_scene_voice.",
+    "talk2": "Two people talk: two people in the picture, speaker 1 then speaker 2, each with their own voice (InfiniteTalk). Needs set_scene_voice for both; opts.layout left_right (default) or right_left says who is speaker 1.",
+    "motion": "Copy a dance or movement: the person in the picture makes exactly the movements of a video (Wan Animate 2). Needs set_scene_video. Silent.",
+    "recast": "Recast a video: the person in the scene's picture replaces someone in a video, keeping its motion, camera, place and sound (Viggle Remake). The scene picture should be a frame of that video redrawn with the new person. Needs set_scene_video; opts.who names who is replaced. 4-14 s.",
+    "restyle": "Change a video's look: outfits, weather, setting, style (Viggle Remake edit). The scene picture should be a frame of the video with the change. Needs set_scene_video; opts.change says what changes. 4-14 s.",
+}
+
 def _scenes(project_id: str, images: list) -> list[dict]:
+    from app import editor
     number = {a["id"]: i + 1 for i, a in enumerate(images)}
-    return [{"scene": i + 1, "title": s["title"], "prompt": s["prompt"],
+    out = []
+    for i, s in enumerate(service.shots_of(project_id)):
+        d = {"scene": i + 1, "title": s["title"], "prompt": s["prompt"],
              "seconds": s["seconds"], "picture": number.get(s["asset_id"]),
-             "status": s["status"], **({"error": s["error"]} if s["error"] else {})}
-            for i, s in enumerate(service.shots_of(project_id))]
+             "use_case": s["make"] or "animate", "status": s["status"],
+             **({"error": s["error"]} if s["error"] else {})}
+        vids = editor._ref_video_items(project_id, s)
+        if vids:
+            d["video"] = vids[0][0]
+        opts = json.loads(s["opts"] or "{}")
+        if opts.get("speakers"):
+            d["voices"] = len([x for x in opts["speakers"] if x.get("clip")])
+        for k in ("layout", "who", "change"):
+            if opts.get(k):
+                d[k] = opts[k]
+        out.append(d)
+    return out
 
 
 def _describe(project_id: str, base: str) -> dict:
@@ -376,12 +409,88 @@ async def _plan_scenes(user, args, base):
 
 
 def _set_scenes(user, args, base):
+    from app import editor
     project = _project(user, args)
     scenes = args.get("scenes")
     if not isinstance(scenes, list) or not scenes or not all(isinstance(s, dict) for s in scenes):
         raise HTTPException(400, "scenes must be a list of {scene, prompt, title?, seconds?}")
-    service.set_scenes(project, scenes)
+    service.set_scenes(project, [{k: v for k, v in s.items() if k != "seconds" or not
+                                  s.get("use_case")} for s in scenes])
+    # Use cases: one model per job (the same list as the editor's "What happens in this shot?").
+    shots = service.shots_of(project["id"])
+    for s in scenes:
+        if s.get("use_case") is None and s.get("opts") is None:
+            continue
+        if s.get("use_case") is not None and s["use_case"] not in USE_CASES:
+            raise HTTPException(400, f"use_case must be one of {', '.join(USE_CASES)}")
+        shot = shots[int(s["scene"]) - 1]
+        fields = {}
+        if s.get("use_case"):
+            fields["make"] = s["use_case"]
+        if s.get("seconds") is not None:
+            fields["seconds"] = s["seconds"]
+        if isinstance(s.get("opts"), dict):
+            fields["opts"] = {k: v for k, v in s["opts"].items() if k in ("layout", "who", "change")}
+        editor.edit_shot(project, shot["id"], **fields)
     return _describe(project["id"], base)
+
+
+def _scene_shot(project, args):
+    shots = service.shots_of(project["id"])
+    try:
+        n = int(args.get("scene"))
+    except (TypeError, ValueError):
+        raise HTTPException(400, "scene must be a scene number")
+    if not 1 <= n <= len(shots):
+        raise HTTPException(400, f"there is no scene {n}; this project has {len(shots)}")
+    return shots[n - 1]
+
+
+async def _set_scene_video(user, args, base):
+    """The video a motion / recast / restyle / perform scene works from."""
+    from app import editor
+    project = _project(user, args)
+    shot = _scene_shot(project, args)
+    for i in reversed(range(len(json.loads(shot["ref_videos"] or "[]")))):
+        if shot["make"] in ("motion", "recast", "restyle"):
+            editor.remove_ref_video(project, shot["id"], i)       # these take one video
+    if args.get("from_scene"):
+        src = _scene_shot(project, {"scene": args["from_scene"]})
+        out = editor.add_ref_video(project, shot["id"], from_shot=src["id"])
+    elif args.get("video_url"):
+        name, _ctype, raw = await _fetch_public(str(args["video_url"]),
+                                                editor.REF_VIDEO_UPLOAD_MB * 1024 * 1024)
+        out = editor.add_ref_video(project, shot["id"], upload=(name or "video.mp4", raw))
+    else:
+        raise HTTPException(400, "give from_scene (a rendered scene's clip) or video_url")
+    return {**out, **_describe(project["id"], base)}
+
+
+async def _set_scene_voice(user, args, base):
+    """A voice or song for a longtalk / talk2 scene: a studio speech or music result, or a
+    public audio URL. It is added as a dialogue clip and the scene uses it."""
+    from app import editor
+    project = _project(user, args)
+    shot = _scene_shot(project, args)
+    index = 1 if int(args.get("speaker") or 1) == 2 else 0
+    if args.get("speech_id"):
+        row = db.one("SELECT path, text FROM speech WHERE id=? AND user_id=? AND status='succeeded'",
+                     (args["speech_id"], user.id))
+        if row is None or not row["path"]:
+            raise HTTPException(404, "no finished speech with that id")
+        name, raw = (row["text"] or "voice")[:60] + Path(row["path"]).suffix, Path(row["path"]).read_bytes()
+    elif args.get("music_id"):
+        row = db.one("SELECT path FROM music WHERE id=? AND user_id=? AND status='succeeded'",
+                     (args["music_id"], user.id))
+        if row is None or not row["path"]:
+            raise HTTPException(404, "no finished song with that id")
+        name, raw = "song" + Path(row["path"]).suffix, Path(row["path"]).read_bytes()
+    elif args.get("audio_url"):
+        name, _ctype, raw = await _fetch_public(str(args["audio_url"]), 100 * 1024 * 1024)
+    else:
+        raise HTTPException(400, "give speech_id, music_id or audio_url")
+    out = editor.set_speaker_audio(project, shot["id"], index, name or "voice.wav", raw)
+    return {**out, **_describe(project["id"], base)}
 
 
 async def _render_video(user, args, base):
@@ -913,19 +1022,56 @@ TOOLS = [
           "yourself with set_scenes.",
           _plan_scenes, _PID, ["project_id"], destructive=True),
     _tool("set_scenes", "Write scene prompts",
-          "Storyboard only. Set the prompt, title or length of scenes by number (scene 1 is "
-          "the first picture). Only the scenes listed change. A prompt should say what moves "
-          "and how the camera moves — not describe the still picture.",
+          "Storyboard only. Set the prompt, title, length or use_case of scenes by number "
+          "(scene 1 is the first picture). Only the scenes listed change. A prompt should say "
+          "what moves and how the camera moves — not describe the still picture. use_case "
+          "picks the model: animate (default), perform, longtalk, talk2, motion, recast, "
+          "restyle; then give the scene its video (set_scene_video) or voices "
+          "(set_scene_voice) when that use case needs them.",
           _set_scenes,
           {**_PID,
            "scenes": {"type": "array", "minItems": 1, "items": {
                "type": "object",
                "properties": {"scene": {"type": "integer", "minimum": 1},
                               "prompt": {"type": "string"}, "title": {"type": "string"},
-                              "seconds": {"type": "integer", "minimum": 1, "maximum": 11,
-                                          "description": "Scene length; the model's limit is 11 s."}},
+                              "seconds": {"type": "integer", "minimum": 1, "maximum": 60,
+                                          "description": "Scene length: up to 11 s for animate, "
+                                                         "15 s motion/perform, 14 s recast/"
+                                                         "restyle, 60 s talk (follows the voices)."},
+                              "use_case": {"type": "string", "enum": ["animate", "perform",
+                                           "longtalk", "talk2", "motion", "recast", "restyle"],
+                                           "description": "What happens in this scene; each "
+                                           "is made by the model built for it (see the server "
+                                           "instructions)."},
+                              "opts": {"type": "object", "description": "layout (talk2), who "
+                                       "(recast: who is replaced), change (restyle)",
+                                       "properties": {"layout": {"type": "string", "enum": [
+                                           "left_right", "right_left"]}, "who": {"type": "string"},
+                                           "change": {"type": "string"}},
+                                       "additionalProperties": False}},
                "required": ["scene"]}}},
           ["project_id", "scenes"]),
+    _tool("set_scene_video", "Give a scene its video",
+          "Storyboard only. The video a scene works from, for use_case motion (copy its "
+          "movements), recast (replace a person in it), restyle (change its look) or perform "
+          "(a loose motion/camera guide). Either another scene's rendered clip (from_scene) "
+          "or a public video URL (video_url, up to 95 MB).",
+          _set_scene_video,
+          {**_PID, "scene": {"type": "integer", "minimum": 1},
+           "from_scene": {"type": "integer", "minimum": 1},
+           "video_url": {"type": "string"}},
+          ["project_id", "scene"]),
+    _tool("set_scene_voice", "Give a scene its voice or song",
+          "Storyboard only. For use_case longtalk (one voice or song, up to 60 s) or talk2 "
+          "(speaker 1, then speaker 2). From a finished generate_speech result (speech_id), a "
+          "generate_music result (music_id) or a public audio URL. The scene's length follows "
+          "the voices.",
+          _set_scene_voice,
+          {**_PID, "scene": {"type": "integer", "minimum": 1},
+           "speaker": {"type": "integer", "enum": [1, 2], "description": "talk2: 1 or 2"},
+           "speech_id": {"type": "string"}, "music_id": {"type": "string"},
+           "audio_url": {"type": "string"}},
+          ["project_id", "scene"]),
     _tool("render_video", "Generate or regenerate the video",
           "Queue a render of the project as it now stands, replacing its previous video. "
           "Storyboard: renders every scene and joins them, or pass `scenes` to regenerate "

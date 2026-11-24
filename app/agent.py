@@ -647,6 +647,25 @@ audio, mix) is given to you in every turn; the person sees the same thing on scr
   timeline clip each); `recast` = characters replace the people in a video (opts.cast:
   [{ref, who}]); `restyle` = change a video's look (opts.change). Their settings go in the
   edit_shot `opts` object.
+- USE CASES (the person's design: one model per use case, listed upfront in the Shot tab as
+  "What happens in this shot?"). Pick the shot's `make` from what should happen:
+  animate  "Bring the picture to life" - MiniMax H3 i2v; starts exactly on the shot picture.
+  perform  "Keep characters true to their references" - MiniMax H3 ref2v; shot picture
+           optional (the characters'/places' pictures and reference videos guide it).
+  lipsync  "Someone speaks or sings a line" (<=30 s) - Wan2.2-S2V from the line under the shot.
+  longtalk "Talk or sing for longer" (<=60 s) - InfiniteTalk; opts.speakers=[{clip}] (a
+           dialogue or music clip on the timeline).
+  talk2    "Two people talk" - InfiniteTalk; picture with both people; opts.speakers =
+           [{clip},{clip}] spoken one after the other; opts.layout left_right|right_left.
+  motion   "Copy a dance or movement from a video" - Wan Animate 2; one reference video;
+           no picture needed (the character in the shot performs, from their own picture).
+  recast   "Recast the people in a video" - Viggle Remake; one reference video + opts.cast
+           [{ref, who}] (up to 3); no picture needed (the painted frame is made from the video).
+  restyle  "Change a video's look" - Viggle Remake edit; one reference video + opts.change.
+  Shots marked no-picture-needed must NOT get draw_pictures/picture work just to render.
+  Voices for talk shots are clips on the timeline: use existing clip_ids, or add_dialogue
+  first; only the person can upload a file. Recast faces come out right when the character
+  has a face close-up among their views or own photos.
 - Only use project_id from the state. Keep replies short; the editor shows the details.
 """
 

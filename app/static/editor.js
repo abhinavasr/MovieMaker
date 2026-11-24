@@ -117,8 +117,8 @@
       box.innerHTML = `<span class="bar"><i style="width:${S.progress}%"></i></span><span title="${esc(S.message)}">${esc(S.status === "queued" ? "waiting for the GPU" : S.message || "rendering")}</span>`;
     } else box.innerHTML = S.shots.length ? `<span>${done}/${S.shots.length} shots rendered</span>` : "";
     const busy = ["running", "queued"].includes(S.status);
-    const needPic = S.shots.filter((s) => !s.asset_id && s.start_from !== "prev_last").length;
-    const canVideo = S.shots.filter((s) => s.status !== "done" && (s.asset_id || s.start_from === "prev_last")).length;
+    const needPic = S.shots.filter((s) => !s.asset_id && s.start_from !== "prev_last" && s.needs_picture).length;
+    const canVideo = S.shots.filter((s) => s.status !== "done" && (s.asset_id || s.start_from === "prev_last" || !s.needs_picture)).length;
     const badge = (id, n) => { const b = $(id).querySelector(".n"); b.hidden = !n; b.textContent = n || ""; };
     $("draw-missing").disabled = !S.shots.length;
     badge("draw-missing", needPic);
@@ -463,6 +463,12 @@
     } else if (making) {
       const n = making.options.length, done = making.options.filter((o) => o.status === "succeeded").length;
       st.innerHTML = `<div class="gen"><span class="spin"></span><b>Making ${n} picture option${n === 1 ? "" : "s"}…</b><span class="ed-note">${done} of ${n} ready · ${Math.max(0, Math.round(S.now - making.created_at))} s · they appear in the panel on the right</span></div>${mk}`;
+    } else if (!sh.needs_picture) {
+      const why = {recast: "The action comes from the video: its frame is redrawn with your characters when the video is made (or now, with 🖼).", restyle: "The action comes from the video: its frame is redrawn with the change when the video is made (or now, with 🖼).", motion: "The moves come from the video and the character's own picture says who performs.", perform: "The video is made from the characters' and places' pictures (and reference videos)."}[sh.make] || "";
+      st.innerHTML = `<div class="empty"><b>No starting picture needed</b><span>${why} You can still add one.</span>
+        <div class="row"><button class="ed-btn" id="stage-gen">🖼 Make a picture anyway</button><button class="ed-btn" id="stage-up">⤒ Upload</button></div></div>${mk}`;
+      $("stage-gen").onclick = () => { setTab("shot"); genOpen = "image"; paintInspector(); $("pane-shot").scrollTop = 0; };
+      $("stage-up").onclick = () => uploadPicture(sh.id);
     } else {
       st.innerHTML = `<div class="empty"><b>No picture for this shot yet</b><span>Make options from its description and references, upload your own, or ask the agent.</span>
         <div class="row"><button class="ed-btn gold" id="stage-gen">🖼 Generate picture options</button><button class="ed-btn" id="stage-up">⤒ Upload</button></div></div>${mk}`;

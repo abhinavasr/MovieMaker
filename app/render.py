@@ -156,8 +156,44 @@ def _run(cmd: list[str]) -> None:
         raise RuntimeError("ffmpeg failed: " + " / ".join(tail))
 
 
+def _has_audio(path: Path) -> bool:
+    res = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "a", "-show_entries",
+                          "stream=index", "-of", "csv=p=0", str(path)], capture_output=True)
+    return bool(res.stdout.strip())
+
+
+def _concat_with_sound(clips: list[Path], out: Path, size: tuple[int, int] | None) -> None:
+    w, h = size or (480, 864)
+    cmd = ["ffmpeg", "-y"]
+    parts = []
+    for i, c in enumerate(clips):
+        cmd += ["-i", str(c)]
+    for i, c in enumerate(clips):
+        parts.append(f"[{i}:v]scale={w}:{h}:flags=lanczos,setsar=1,fps=24[v{i}]")
+        if _has_audio(c):
+            parts.append(f"[{i}:a]aresample=48000,aformat=channel_layouts=stereo[a{i}]")
+        else:
+            parts.append(f"anullsrc=r=48000:cl=stereo,atrim=duration="
+                         f"{_duration(c):.3f}[a{i}]")
+    parts.append("".join(f"[v{i}][a{i}]" for i in range(len(clips)))
+                 + f"concat=n={len(clips)}:v=1:a=1[v][a]")
+    cmd += ["-filter_complex", ";".join(parts), "-map", "[v]", "-map", "[a]",
+            "-c:v", "libx264", "-preset", "medium", "-crf", "20", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", str(out)]
+    _run(cmd)
+
+
+def _duration(path: Path) -> float:
+    res = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                          "-of", "csv=p=0", str(path)], capture_output=True, text=True)
+    try:
+        return float(res.stdout.strip())
+    except ValueError:
+        return 5.0
+
+
 def _concat(clips: list[Path], out: Path, audio: Path | None,
-            size: tuple[int, int] | None = None) -> None:
+            size: tuple[int, int] | None = None, keep_sound: bool = False) -> None:
     """Join clips, optionally laying an uploaded soundtrack over the result.
 
     Re-encoded rather than stream-copied. The clips all come from one model at
@@ -168,6 +204,11 @@ def _concat(clips: list[Path], out: Path, audio: Path | None,
     """
     listing = out.parent / "concat.txt"
     listing.write_text("".join(f"file '{c.as_posix()}'\n" for c in clips))
+    if audio is None and keep_sound and any(_has_audio(c) for c in clips):
+        # Talking, singing and remade scenes carry their sound (2026-11-24): join with it,
+        # giving silent clips a silent track so every piece has one.
+        _concat_with_sound(clips, out, size)
+        return
     cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(listing)]
     if audio is None:
         # Performance shots (ref2v) carry sound and animated ones don't; mixed
@@ -301,6 +342,16 @@ async def _render_storyboard(project_id: str, project, report) -> tuple[Path, bo
             # on screen means "this render", not "this clip".
             await report(int((_i + pct / 100) / total * 90), f"shot {_i + 1}/{total}: {msg}")
 
+        if shot.get("make") in ("recast", "restyle") and not shot.get("asset_id"):
+            # The painted frame is made here when step 1 was skipped (the action comes
+            # from the video; the person need not draw anything first).
+            from app import editor
+            await report_shot(0, "painting the frame the remake starts from")
+            aid = await editor.ensure_painted(db.one("SELECT * FROM projects WHERE id=?",
+                                                     (project_id,)), shot["id"])
+            if aid:
+                shot["asset_id"] = aid
+                assets[aid] = db.one("SELECT path FROM assets WHERE id=?", (aid,))["path"]
         await report_shot(0, "submitting")
         clips.append(await _render_shot(project_id, shot, assets, params, report_shot))
         prev_clip = clips[-1]
@@ -312,8 +363,11 @@ async def _render_storyboard(project_id: str, project, report) -> tuple[Path, bo
     out = cfg.outputs_dir / project_id / "final.mp4"
     audio = Path(audio_assets[0]["path"]) if audio_assets else None
     k = 2 if params.get("upscale") in ("latent", "refine") else 1
+    # Editor productions mix sound on export from the timeline; an MCP storyboard has no
+    # timeline, so its talking/singing/remade scenes keep their own sound in the film.
     _concat(clips, out, audio,
-            (int(params.get("width", 480)) * k, int(params.get("height", 864)) * k))
+            (int(params.get("width", 480)) * k, int(params.get("height", 864)) * k),
+            keep_sound=not params.get("editor"))
     return out, audio is not None
 
 

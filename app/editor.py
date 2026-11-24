@@ -1418,9 +1418,11 @@ def prepare_render(project, user: auth.User, shot_ids: list[str] | None,
         if s["start_from"] == "prev_last" and i > 0 and shots[i - 1]["id"] in later:
             now.remove(sid)
             later.append(sid)
-    # Pictures only: shots that already have their picture and references are done.
-    later = [sid for sid in later if not by_id[sid]["asset_id"] or sid in refs_needed
-             or by_id[sid]["scene_id"] in unchecked_scenes]
+    # Pictures only: shots that already have their picture and references are done, and
+    # shots whose action comes from a video need none (unless asked for by name).
+    later = [sid for sid in later if (not by_id[sid]["asset_id"] or sid in refs_needed
+                                      or by_id[sid]["scene_id"] in unchecked_scenes)
+             and (shot_ids or needs_picture(pid, by_id[sid]))]
     if later:
         params = db.params_of(project)
         jobs = [j for j in params.get("_auto_shots") or [] if j["shot"] not in later]
@@ -1429,6 +1431,75 @@ def prepare_render(project, user: auth.User, shot_ids: list[str] | None,
         params["_auto_shots"] = jobs
         db.set_params(pid, params)
     return [], later
+
+
+def _agent_shot_extras(pid: str, s) -> str:
+    """The use-case settings of a shot, for the assistant's view of the production."""
+    out = []
+    vids = _ref_video_items(pid, s)
+    if vids:
+        out.append("ref_videos=[" + "; ".join(label for label, _ in vids) + "]")
+    o = _jl(s["opts"], {})
+    if s["make"] in TALK_MAKES:
+        sp = [x.get("clip") or "none" for x in (o.get("speakers") or [])]
+        out.append(f"voices=[{', '.join(sp) or 'none yet'}]"
+                   + (f" first-speaker={'right' if o.get('layout') == 'right_left' else 'left'}"
+                      if s["make"] == "talk2" else ""))
+    if s["make"] == "recast":
+        out.append("cast=[" + "; ".join(f"{c['ref']} replaces '{c.get('who')}'"
+                                        for c in o.get("cast") or []) + "]")
+    if s["make"] == "restyle":
+        out.append(f"change='{(o.get('change') or '')[:160]}'")
+    return (" ".join(out) + " ") if out else ""
+
+
+def needs_picture(pid: str, shot) -> bool:
+    """Whether a shot's video is made FROM its own starting picture.
+
+    2026-11-24, the person: "if there is an action from reference video, why are we asking
+    for the starting image?" It isn't needed when the action comes from elsewhere:
+      recast / restyle -- the video; the painted frame is made during the render if absent
+      motion           -- the video; the character's own picture says who performs
+      perform          -- the reference model has no first frame; references are enough
+    """
+    make = shot["make"] or "animate"
+    if make in REMAKE_MAKES:
+        return False
+    if make == "motion":
+        return _performer_picture(pid, shot) is None
+    if make == "perform":
+        return not (_shot_ref_ids(shot) or _jl(shot["ref_videos"], []))
+    return True
+
+
+def _performer_picture(pid: str, shot) -> str | None:
+    """A motion shot without a picture: the first character in it (or its scene) performs,
+    as drawn in their main picture."""
+    for rid in _shot_ref_ids(shot):
+        r = db.one("SELECT * FROM prod_refs WHERE id=? AND project_id=?", (rid, pid))
+        if r and r["kind"] == "character" and r["image_id"] and _img_done(r["image_id"]):
+            row = db.one("SELECT path FROM images WHERE id=?", (r["image_id"],))
+            if row and row["path"] and Path(row["path"]).exists():
+                return row["path"]
+    return None
+
+
+async def ensure_painted(project, shot_id: str) -> str | None:
+    """A recast/restyle shot rendering without its painted frame: make one now and set it
+    as the shot's picture (so the person sees what the remake was drawn from)."""
+    from app import agent
+    pid = project["id"]
+    shot = _shot(pid, shot_id)
+    if shot["asset_id"]:
+        return None
+    user = agent.load_user(project["user_id"])
+    ids = await remake_picture_options(project, user, shot, 1)
+    row = await images.wait(ids[0], 300)
+    if row["status"] != "succeeded":
+        raise RuntimeError(f"{shot['title'] or 'this shot'}: the painted frame could not be "
+                           f"made ({row['error'] or row['status']})")
+    set_picture(project, user, shot_id, ids[0])
+    return _shot(pid, shot_id)["asset_id"]
 
 
 def _ready_for_video(shots, shot_ids: list[str] | None) -> tuple[list, list]:
@@ -1443,7 +1514,7 @@ def _ready_for_video(shots, shot_ids: list[str] | None) -> tuple[list, list]:
         s = by_id.get(sid)
         if s is None:
             continue
-        ok = bool(s["asset_id"])
+        ok = bool(s["asset_id"]) or not needs_picture(s["project_id"], s)
         if s["start_from"] == "prev_last":
             # Opens on the previous clip: fine if that clip exists or renders in this batch.
             i = order.index(sid)
@@ -1629,9 +1700,9 @@ def render_shots(project, user: auth.User, shot_ids: list[str] | None = None):
                 problems.append(f"{label} starts from the last frame of "
                                 f"{prev['title'] or 'the previous shot'}, which isn't rendered — "
                                 "render both")
-        elif not s["asset_id"]:
+        elif not s["asset_id"] and needs_picture(pid, s):
             problems.append(f"{label} has no picture")
-        if not (s["prompt"] or "").strip() and s["make"] not in ("lipsync",) + TALK_MAKES + REMAKE_MAKES:
+        if not (s["prompt"] or "").strip() and s["make"] not in ("lipsync", "motion") + TALK_MAKES + REMAKE_MAKES:
             problems.append(f"{label} has no prompt (what moves, how the camera moves)")
         cap = cap_seconds(s["make"])
         if int(s["seconds"] or 0) > cap:
@@ -1698,6 +1769,8 @@ def _clean_opts(pid: str, o: dict) -> dict:
         out["cast"] = cast
     if o.get("change"):
         out["change"] = str(o["change"])[:800]
+    if o.get("who"):
+        out["who"] = str(o["who"])[:200]          # MCP recast: who the picture's person replaces
     return out
 
 
@@ -1817,9 +1890,11 @@ def remake_prompt(pid: str, shot, frames: int) -> str:
             if r:
                 cast.append((i + 1, r["name"], (r["description"] or "").strip(),
                              c.get("who") or "a person"))
+        if not cast:      # no character list (an MCP scene): the person in the picture
+            cast.append((1, "the new person", "", opts.get("who") or "the main person"))
         subjects = "\n".join(
             f"<Subject {n}> is {name} in <Picture 1>{': ' + desc if desc else ''}. "
-            f"{name} replaces {who} in <Video 1>." for n, name, desc, who in cast)
+            f"{name[:1].upper() + name[1:]} replaces {who} in <Video 1>." for n, name, desc, who in cast)
         names = ", ".join(f"{who} becomes <Subject {n}>, {name}" for n, name, _, who in cast)
         keep = "; ".join(f"<Subject {n}> (appears in [Shot 1]): fully_preserved - {name}'s face, "
                          f"hair and clothes stay identical in every frame, exactly as in <Picture 1>."
@@ -2091,9 +2166,12 @@ def perform_payload(project_id: str, shot, image_path: str | None, params: dict)
         # video's movements, frame for frame (2026-11-24: "girl dancing like the man in
         # the video" -- the reference model barely copied the dance).
         vids = _ref_video_items(pid, shot)
+        image_path = image_path or _performer_picture(pid, db.one("SELECT * FROM shots WHERE id=?",
+                                                                  (shot["id"],)))
         if not image_path or not vids:
             raise RuntimeError(f"{shot.get('title') or 'this shot'} copies a video's motion: it "
-                               "needs a picture and a reference video")
+                               "needs the video, and a character (with a picture) in the shot "
+                               "or a picture of its own")
         label, moves = vids[0]
         w, h = int(params.get("width", 480)), int(params.get("height", 864))
         secs = min(cfg.MOTION_MAX_SECONDS, int(shot.get("seconds") or 5))
@@ -2685,6 +2763,7 @@ def state(project, base: str) -> dict:
             "make": s["make"] or "animate", "refs": _jl(s["refs"], []), "status": s["status"],
             "start_from": s["start_from"] or "",
             "opts": _jl(s["opts"], {}),
+            "needs_picture": needs_picture(pid, s),
             "ref_videos": [{"i": i, "label": lbl} for i, (lbl, _) in
                            enumerate(_ref_video_items(pid, s))],
             "auto": next((j["stage"] for j in params.get("_auto_shots") or [] if j["shot"] == s["id"]), None),
@@ -2789,8 +2868,9 @@ def describe_for_agent(project_id: str, focus_shot: str | None = None) -> str:
             lines.append(
                 f"  shot_id={s['id']} #{s['idx'] + 1} \"{s['title']}\" {s['framing'] or ''} "
                 f"{s['make']} {secs:g}s @{start:g}s status={s['status']}"
-                f"{' starts-from-previous-last-frame' if s['start_from'] == 'prev_last' else (' picture' if s['asset_id'] else ' NO PICTURE')} "
+                f"{' starts-from-previous-last-frame' if s['start_from'] == 'prev_last' else (' picture' if s['asset_id'] else (' NO PICTURE' if needs_picture(project_id, s) else ' no-picture-needed'))} "
                 f"refs=[{', '.join(names.get(r, r) for r in _jl(s['refs'], []))}] "
+                f"{_agent_shot_extras(project_id, s)}"
                 f"prompt: {(s['prompt'] or '')[:220]}{mark}")
     clips = db.query("SELECT * FROM prod_clips WHERE project_id=? ORDER BY track, start_s",
                      (project_id,))
