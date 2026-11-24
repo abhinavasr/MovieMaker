@@ -281,7 +281,13 @@ async def _submit_shot(project_id: str, shot, payload: dict, report) -> Path:
     _current["wis_job_id"] = None
     if job.status != "succeeded":
         label = shot.get("title") or f"shot {shot['idx'] + 1}"
-        raise RuntimeError(f"{label}: {job.message or job.status}")
+        err = job.raw.get("error") if isinstance(job.raw.get("error"), dict) else {}
+        if err.get("code") == "busy":
+            # 2026-11-24: the person saw a size hint for a size they had already picked.
+            raise RuntimeError(f"{label}: the GPU was too full to make this video — "
+                               f"{err.get('message') or 'another model was still loaded'}. "
+                               "Press 🎬 again; if it keeps happening, use ⋯ → 🧹 Free the GPU.")
+        raise RuntimeError(f"{label}: {err.get('message') or job.message or job.status}")
 
     data = await wis.download_artifact(job)
     # Named by shot id: editor shots move between positions.

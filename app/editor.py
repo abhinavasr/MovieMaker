@@ -1856,6 +1856,17 @@ def _recast_extras(pid: str, shot, limit: int = 3) -> list[tuple[int, str, str]]
     return out
 
 
+def _look_pictures(pid: str, shot, limit: int = 3) -> list[tuple[str, str, str]]:
+    """(name, description, image id) of the references a restyle shot should look like
+    (2026-11-24: "can the change-a-video's-look option also take a reference image?")."""
+    out = []
+    for rid in _jl(shot["refs"], []):
+        r = db.one("SELECT * FROM prod_refs WHERE id=? AND project_id=?", (rid, pid))
+        if r and r["image_id"] and _img_done(r["image_id"]) and len(out) < limit:
+            out.append((r["name"], (r["description"] or "").strip(), r["image_id"]))
+    return out
+
+
 def _canvas(params: dict) -> tuple[int, int]:
     """Viggle's own canvas (short edge 480), in the production's orientation."""
     w, h = int(params.get("width", 480)), int(params.get("height", 864))
@@ -1930,9 +1941,15 @@ The soundtrack of <Video 1>, unchanged.
 non_diegetic_music:
 N/A"""
     change = (opts.get("change") or what or "the look changes").strip()
+    looks = _look_pictures(pid, shot)
+    look_defs = "".join(f"\n<Picture {k + 2}> shows {name}{': ' + desc if desc else ''} - "
+                        f"the look to use." for k, (name, desc, _) in enumerate(looks))
+    if looks:
+        change += ", looking exactly like " + " and ".join(
+            f"<Picture {k + 2}>" for k in range(len(looks)))
     return f"""subject_definitions:
 <Video 1> is the source video for the target video edit.
-<Picture 1> is a frame of the target video, exactly as the target video shows it at that moment.
+<Picture 1> is a frame of the target video, exactly as the target video shows it at that moment.{look_defs}
 <Subject 1> is what changes in <Video 1>: {change}
 
 summary:
@@ -1991,10 +2008,16 @@ async def remake_picture_options(project, user: auth.User, shot, count: int) -> 
         text = ("The same photo as picture 1: same place, same poses and body positions, same "
                 "camera angle and framing, but " + "; ".join(parts) + ". Photorealistic.")
     else:
-        if not (opts.get("change") or "").strip():
-            raise HTTPException(400, "say what changes in the video")
+        looks = _look_pictures(pid, shot)
+        if not (opts.get("change") or "").strip() and not looks:
+            raise HTTPException(400, "say what changes in the video, or add a reference "
+                                     "picture of the look")
+        for _, _, i in looks:
+            sources.append(images.source_from_image(user, i))
+        like = "; ".join(f"{name} looks exactly as in picture {k + 2}"
+                         for k, (name, _, _) in enumerate(looks))
         text = (f"The same photo as picture 1: same framing, same people in the same poses, "
-                f"but {opts['change']}.")
+                f"but {opts.get('change') or 'restyled'}" + (f"; {like}" if like else "") + ".")
     ids = []
     for _ in range(max(1, min(4, count))):
         ids.append(await images.create(user, text[:1900], sources, orientation="landscape"
@@ -2150,8 +2173,14 @@ def perform_payload(project_id: str, shot, image_path: str | None, params: dict)
             _remake_source(vids[0][1], w, h, frames, src)
             video = wis.b64(src.read_bytes())
         row = db.one("SELECT * FROM shots WHERE id=?", (shot["id"],))
-        extras = _recast_extras(pid, row) if shot["make"] == "recast" else []
-        refs = [Path(image_path)] + [Path(p) for _, _, p in extras]
+        if shot["make"] == "recast":
+            extras = _recast_extras(pid, row)
+            extra_paths = [p for _, _, p in extras]
+        else:
+            extras = _look_pictures(pid, row)
+            extra_paths = [db.one("SELECT path FROM images WHERE id=?", (i,))["path"]
+                           for _, _, i in extras]
+        refs = [Path(image_path)] + [Path(p) for p in extra_paths if p and Path(p).exists()]
         out = {"model": cfg.RECAST_MODEL if shot["make"] == "recast" else cfg.RESTYLE_MODEL,
                "client_request_id": shot["id"], "width": w, "height": h, "length": frames,
                "prompt": remake_prompt(pid, row, frames)[:3990],
@@ -3989,6 +4018,40 @@ async def stop_all(project, user: auth.User) -> dict:
 
 
 _thread_locks: dict[str, asyncio.Lock] = {}
+
+
+_freeing = {"task": None}
+
+
+async def free_gpu() -> None:
+    """Unload every model the studio and WIS hold (2026-11-24: an image model left loaded
+    made a video run out of memory three times; the person asked for a force-clear).
+    The studio's own engines first, then a moment's GPU turn in WIS's queue: when it
+    starts, WIS's worker drops its models and ComfyUI frees the card. A job already
+    generating finishes first (Stop ends it)."""
+    from app import agent, gpuqueue, speech
+    try:
+        await speech.unload_kept()
+        await gpuqueue._drop_lease()
+        if not db.one("SELECT 1 FROM agent_threads WHERE status IN ('planning','executing')"):
+            await agent._unload(cfg.PLANNER_MODEL)
+        lease = await wis.lease_gpu("studio-free-the-gpu", 30)
+        if lease:
+            await wis.release_gpu(lease)
+        log.info("GPU freed on request")
+    except Exception as exc:                                   # noqa: BLE001
+        log.warning("free the GPU: %s", exc)
+
+
+@router.post("/api/editor/{pid}/free-gpu")
+async def api_free_gpu(pid: str, request: Request):
+    user = _user(request)
+    production(user, pid)
+    if _freeing["task"] is None or _freeing["task"].done():
+        _freeing["task"] = asyncio.create_task(free_gpu())
+    busy = db.one("SELECT COUNT(*) AS n FROM projects WHERE status='running'")["n"]
+    return {"ok": True, "message": ("Freeing the GPU after the video in progress finishes "
+                                    "(■ Stop ends it now)") if busy else "Freeing the GPU now"}
 
 
 @router.post("/api/editor/{pid}/stop-all")

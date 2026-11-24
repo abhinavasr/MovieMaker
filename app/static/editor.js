@@ -163,6 +163,7 @@
     $("stop-ai").hidden = !parts.length;
     $("stop-ai").title = parts.length ? "Stop: " + parts.join(" · ") : "";
   }
+  $("free-gpu").onclick = async () => { try { const d = await api(`/api/editor/${PID}/free-gpu`, {}); toast(d.message); } catch (e) { toast(e.message); } };
   $("stop-ai").onclick = () => {
     const parts = aiSummary();
     modal(`<h2>Stop all AI work in “${esc(S.title)}”?</h2>
@@ -828,7 +829,9 @@
       const cast = Object.fromEntries((o.cast || []).map((c) => [c.ref, c.who]));
       return `<div class="ed-group ed-opts"><h3>Who replaces whom</h3>${chars.length ? chars.map((r) => `<label class="ed-cast"><span>${esc(r.name)} replaces</span><input data-cast="${r.id}" value="${esc(cast[r.id] || "")}" placeholder="e.g. the man in the grey jacket"></label>`).join("") : `<div class="ed-note">Add your characters under References first.</div>`}
         <div class="ed-note">Up to 3 people. Leave a line empty to leave that character out. Their face close-up and own photos keep the face right.</div></div>`; }
-    if (sh.make === "restyle") return `<div class="ed-group ed-opts"><h3>What changes</h3><textarea id="opt-change" rows="3" placeholder="e.g. it is a rainy night with neon lights; everyone wears winter coats">${esc(o.change || "")}</textarea></div>`;
+    if (sh.make === "restyle") { const looks = S.refs.filter((r) => sh.refs.includes(r.id) && r.image);
+      return `<div class="ed-group ed-opts"><h3>What changes</h3><textarea id="opt-change" rows="3" placeholder="e.g. it is a rainy night with neon lights; everyone wears winter coats">${esc(o.change || "")}</textarea>
+      <div class="ed-note" style="margin-top:6px">${looks.length ? `Looks like: <b>${looks.slice(0, 3).map((r) => esc(r.name)).join(", ")}</b> (this shot's references).` : "To show the look with a picture (an outfit, a style, a place), add it to this shot's References below — up to 3 are used."}</div></div>`; }
     return "";
   }
   function bindUseOptions(sh, pane) {
