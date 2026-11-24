@@ -16,7 +16,7 @@
 
   let S = null, sig = "", view = "storyboard", tab = "shot", scope = "shot";
   let sel = {scene: null, shot: null, clip: null};
-  let genOpen = null, pickedOption = {}, chat = null;
+  let genOpen = null, pickedOption = {}, chat = null, preview = null, seenReady = new Set();
 
   // ------------------------------------------------------------------ util
   const api = A.api;
@@ -49,7 +49,7 @@
       if (!sel.shot) sel.shot = sceneShots(sel.scene)[0]?.id || null;
       if (sel.clip && !clipById(sel.clip)) sel.clip = null;
       if (changed || force) paint();
-      else paintRender();
+      else { paintRender(); if (S.proposals.some((p) => p.options.some((o) => !["succeeded", "failed", "gone"].includes(o.status)))) { if (!Player.playing && view !== "assets") paintStage(); if (!typing()) paintInspector(); } }
     } catch (e) { console.warn(e); }
     const busy = S && (["running", "queued"].includes(S.status) || S.clips.some((c) => c.status === "pending") || S.export.status === "running" || S.proposals.some((p) => p.options.some((o) => !["succeeded", "failed", "gone"].includes(o.status))));
     timer = setTimeout(load, busy ? 2000 : 6000);
@@ -149,9 +149,9 @@
   function refModal(r) {
     const kinds = ["character", "location", "prop", "style", "voice"];
     modal(`<h2>${r ? "Edit reference" : "New reference"}</h2>
-      <div class="ed-row2"><label class="ed-field">Name<input id="rf-name" value="${esc(r?.name || "")}" maxlength="80" placeholder="Kausalyā"></label>
+      <div class="ed-row2"><label class="ed-field">Name<input id="rf-name" value="${esc(r?.name || "")}" maxlength="80" placeholder="Name"></label>
       <label class="ed-field">Kind<select id="rf-kind">${kinds.map((k) => `<option ${r?.kind === k ? "selected" : ""}>${k}</option>`).join("")}</select></label></div>
-      <label class="ed-field">Description (used in prompts)<textarea id="rf-desc" rows="3" placeholder="Queen, mother of Rāma; silver-streaked hair, red-gold sari">${esc(r?.description || "")}</textarea></label>
+      <label class="ed-field">Description (used in prompts)<textarea id="rf-desc" rows="3" placeholder="How they look — used in every prompt they appear in">${esc(r?.description || "")}</textarea></label>
       <label class="ed-field">Picture<div class="ed-drop" id="rf-pic">${r?.image ? `<img src="${esc(r.image)}" alt="">` : ""}Click or drop a picture</div><input type="file" id="rf-picfile" accept="image/*" hidden></label>
       <div class="ed-row2"><label class="ed-field">Preset voice<select id="rf-speaker"><option value="">— none —</option>${S.speakers.map((s) => `<option ${r?.speaker === s ? "selected" : ""}>${esc(s)}</option>`).join("")}</select></label>
       <label class="ed-field">…or a voice sample to clone<div class="ed-drop" id="rf-voice">${r?.voice ? "🎙 sample saved — click to replace" : "5–30 s of clear speech"}</div><input type="file" id="rf-voicefile" accept="audio/*" hidden></label></div>
@@ -183,13 +183,23 @@
   }
   $("prev").onclick = () => stepShot(-1); $("next").onclick = () => stepShot(1);
   function stepShot(d) { const all = S.shots; const i = all.findIndex((s) => s.id === sel.shot); const n = all[i + d]; if (n) { selectShot(n.id); } }
-  function selectShot(id) { const sh = shotById(id); if (!sh) return; sel.shot = id; sel.scene = sh.scene_id; sel.clip = null; genOpen = null; Player.stop(); Player.t = sh.start; paint(); }
+  function selectShot(id) { const sh = shotById(id); if (!sh) return; if (!preview || preview.shot !== id) preview = null; sel.shot = id; sel.scene = sh.scene_id; sel.clip = null; genOpen = null; Player.stop(); Player.t = sh.start; paint(); }
 
   function paintStage(at) {
     const sh = at || shotById(sel.shot);
     const st = $("stage");
     if (!sh) { st.innerHTML = `<div class="empty"><b>This scene has no shots yet</b>Add one below, or ask the agent to break the scene into shots.<br><br><button class="ed-btn gold" id="stage-add">＋ Add a shot</button> <button class="ed-btn" id="stage-ask">✨ Ask the agent</button></div>`;
       $("stage-add").onclick = addShot; $("stage-ask").onclick = () => { setTab("agent"); scope = "story"; paintScope(); chatSend(`Break the scene "${sceneById(sel.scene)?.title}" into shots with framing, length and prompts.`); }; return; }
+    if (preview && preview.shot === sh.id) {
+      st.innerHTML = `<div class="ed-frame" id="frame"><img src="${esc(preview.url)}" alt="picture option"></div><span class="ed-badge">✦ Option ${preview.n} of ${preview.of} — preview</span>
+        <div class="use"><button class="ed-btn" id="pv-back">Back to the shot</button><button class="ed-btn gold" id="pv-use">Use this picture</button></div>`;
+      fitFrame();
+      $("pv-back").onclick = () => { preview = null; paintStage(); };
+      $("pv-use").onclick = async () => { const p = preview; preview = null;
+        try { await api(`/api/editor/${PID}/proposals/${p.prop}/apply`, {option: p.image_id}); toast("Picture set for this shot"); load(true); } catch (e) { toast(e.message); } };
+      return;
+    }
+    const making = S.proposals.find((p) => p.shot_id === sh.id && p.options.some((o) => !["succeeded", "failed", "gone"].includes(o.status)));
     const busy = ["running", "pending"].includes(sh.status) && ["running", "queued"].includes(S.status);
     const mk = `<span class="ed-badge">${{animate: "🎞", perform: "🎭", lipsync: "👄"}[sh.make]} ${MAKE[sh.make][0]}${sh.framing ? " · " + sh.framing : ""} · ${sh.seconds}s</span>`;
     const state = sh.status === "done" ? "clip ready" : sh.status === "stale" ? "changed since rendered" : sh.status === "failed" ? "failed" : sh.clip ? "" : "not rendered";
@@ -199,9 +209,13 @@
     } else if (sh.picture) {
       st.innerHTML = `<div class="ed-frame" id="frame"><img id="stage-i" src="${esc(sh.picture)}" alt="" class="${Player.playing ? "kb" : ""}"></div>${mk}<span class="ed-badge r">${esc(state)}</span>`;
       fitFrame();
+    } else if (making) {
+      const n = making.options.length, done = making.options.filter((o) => o.status === "succeeded").length;
+      st.innerHTML = `<div class="gen"><span class="spin"></span><b>Making ${n} picture option${n === 1 ? "" : "s"}…</b><span class="ed-note">${done} of ${n} ready · ${Math.max(0, Math.round(S.now - making.created_at))} s · they appear in the panel on the right</span></div>${mk}`;
     } else {
-      st.innerHTML = `<div class="empty"><b>No picture for this shot yet</b>Generate options with its references, upload one, or ask the agent.<br><br><button class="ed-btn gold" id="stage-gen">🖼 Generate picture options</button> <button class="ed-btn" id="stage-up">⤒ Upload</button></div>${mk}`;
-      $("stage-gen").onclick = () => { setTab("shot"); genOpen = "image"; paintInspector(); };
+      st.innerHTML = `<div class="empty"><b>No picture for this shot yet</b><span>Make options from its description and references, upload your own, or ask the agent.</span>
+        <div class="row"><button class="ed-btn gold" id="stage-gen">🖼 Generate picture options</button><button class="ed-btn" id="stage-up">⤒ Upload</button></div></div>${mk}`;
+      $("stage-gen").onclick = () => { setTab("shot"); genOpen = "image"; paintInspector(); $("pane-shot").scrollTop = 0; setTimeout(() => $("g-prompt")?.focus(), 50); };
       $("stage-up").onclick = () => uploadPicture(sh.id);
     }
     if (busy) st.insertAdjacentHTML("beforeend", `<div class="busy">⏳ ${esc(S.message || "rendering")}</div>`);
@@ -233,7 +247,7 @@
     $("strip").innerHTML = shots.map((s, i) => `<div class="ed-card ${s.id === sel.shot ? "on" : ""}" data-shot="${s.id}" draggable="true">
       <div class="th">${s.picture ? `<img src="${esc(s.picture)}" alt="" loading="lazy">` : "no picture"}</div>
       <span class="mk">${{animate: "🎞", perform: "🎭", lipsync: "👄"}[s.make]} ${s.seconds}s</span>
-      <span class="st ${esc(s.status)}">${{done: "● clip", running: "⏳", pending: S.status === "running" || S.status === "queued" ? "queued" : "—", failed: "failed", stale: "changed", cancelled: "—"}[s.status] || "—"}</span>
+      ${(() => { const b = {done: "● clip", running: "⏳ rendering", failed: "failed", stale: "changed"}[s.status] || (s.status === "pending" && ["running", "queued"].includes(S.status) ? "queued" : ""); return b ? `<span class="st ${esc(s.status)}">${b}</span>` : ""; })()}
       <div class="m"><b>Shot ${String(i + 1).padStart(2, "0")}</b><span class="f">${esc(s.framing)}</span><span>${esc(s.title || s.prompt || "untitled")}</span></div></div>`).join("")
       + `<button class="ed-card add" id="add-shot" type="button" title="Add a shot" aria-label="Add a shot">＋</button>`;
     $("add-shot").onclick = addShot;
@@ -297,7 +311,7 @@
     lanesEl.innerHTML = `<div></div><div class="ed-lane ruler" id="ruler">${ticks}</div>
       <div class="ed-lh"><span class="nm">🎞 Shots</span></div><div class="ed-lane shots">${shotsIn.map((s) => `<div class="ed-blk shot ${s.id === sel.shot ? "on" : ""} ${s.scene_id !== sel.scene && view !== "timeline" ? "other" : ""}" data-tshot="${s.id}" style="left:${x(s.start)}px;width:${s.seconds * TL.pps - 2}px">${esc(s.framing || "")} ${esc(s.title || "shot " + s.n)}</div>`).join("")}</div>
       ${["dialogue", "ambience", "music"].map((t) => lh(t) + `<div class="ed-lane" data-lane="${t}">${blocks(t)}</div>`).join("")}
-      ${lh("shot")}<div class="ed-lane" style="cursor:default">${shotSound}</div>
+      ${S.shots.some((s) => s.make !== "animate") ? lh("shot") + `<div class="ed-lane" style="cursor:default">${shotSound}</div>` : ""}
       <div class="ed-head" id="head" style="left:${TL.off + x(Player.t)}px"></div>`;
     paintWaves();
   }
@@ -322,6 +336,10 @@
     }
   }
   addEventListener("resize", () => S && paintTimeline());
+  const tlKey = "ed-tl-collapsed";
+  const setTl = (c) => { $("tl").classList.toggle("collapsed", c); $("tl-caret").textContent = c ? "▸" : "▾"; $("tl-toggle").setAttribute("aria-expanded", String(!c)); try { localStorage.setItem(tlKey, c ? "1" : ""); } catch { /* private mode */ } if (!c && S) paintTimeline(); };
+  $("tl-toggle").onclick = () => setTl(!$("tl").classList.contains("collapsed"));
+  try { if (localStorage.getItem(tlKey)) setTl(true); } catch { /* private mode */ }
   $("lanes").addEventListener("input", (e) => { const g = e.target.dataset.gain; if (g) { e.target.title = `${TRACK_NAME[g]} level ${e.target.value} dB`; } });
   $("lanes").addEventListener("change", async (e) => { const g = e.target.dataset.gain; if (!g) return;
     await api(`/api/editor/${PID}/settings`, {mix: {[g]: {gain_db: +e.target.value}}}); toast(`${TRACK_NAME[g]} ${e.target.value} dB`); load(true); });
@@ -424,11 +442,10 @@
     paintInspectorHead();
     if (tab !== "shot") return;
     const pane = $("pane-shot"), sh = shotById(sel.shot), c = clipById(sel.clip), sc = sceneById(sel.scene);
-    let html = "";
+    let html = proposalsHtml();
     if (c) html += clipInspector(c);
     if (sh) html += shotInspector(sh);
     else if (sc) html += sceneInspector(sc);
-    html += proposalsHtml();
     pane.innerHTML = html;
     wireInspector(sh, c, sc);
   }
@@ -446,13 +463,13 @@
     const lines = S.clips.filter((c) => c.track === "dialogue" && c.start_s < sh.start + sh.seconds && c.start_s + (c.duration_s || 0) > sh.start);
     const gen = (key, icon, label, small) => `<button type="button" data-gen="${key}"><span class="i">${icon}</span><span>${label}</span><span class="a">${genOpen === key ? "⌄" : "›"}</span>${small ? `<small>${small}</small>` : ""}</button>` + (genOpen === key ? genForm(key, sh) : "");
     return `<div class="ed-group">
-      <label class="ed-field">Title<input data-f="title" value="${esc(sh.title)}" maxlength="80" placeholder="Kausalyā by his side"></label></div>
+      <label class="ed-field">Title<input data-f="title" value="${esc(sh.title)}" maxlength="80" placeholder="Name this shot"></label></div>
       <div class="ed-row2">
         <label class="ed-field">Framing<select data-f="framing">${S.framings.map((f) => `<option value="${f}" ${f === sh.framing ? "selected" : ""}>${esc(f ? f + " · " + FRAMING[f] : "—")}</option>`).join("")}</select></label>
         <label class="ed-field">Seconds (max ${cap})<input data-f="seconds" type="number" min="1" max="${cap}" value="${sh.seconds}"></label></div>
       <div class="ed-group"><div class="ed-seg" role="radiogroup" aria-label="How the clip is made">${Object.keys(MAKE).map((m) => `<button type="button" data-make="${m}" class="${sh.make === m ? "on" : ""}">${{animate: "🎞", perform: "🎭", lipsync: "👄"}[m]} ${MAKE[m][0]}</button>`).join("")}</div>
         <div class="ed-note" style="margin-top:5px">${MAKE[sh.make][1]}${sh.make !== "animate" ? (lines.length ? ` Under it: ${lines.map((l) => esc(l.name)).join("; ")}${lines.some((l) => !l.use_in_video) ? " (some not marked “use in video”)" : ""}.` : " <b style='color:var(--warn)'>No dialogue under this shot yet</b> — click the Dialogue lane under it.") : ""}</div></div>
-      <label class="ed-field">Prompt — what moves, how the camera moves<textarea data-f="prompt" rows="4" placeholder="Slow push-in on Kausalyā as she grips his hand; candle flames tremble; her tears catch the light.">${esc(sh.prompt)}</textarea></label>
+      <label class="ed-field">Prompt — what moves, how the camera moves<textarea data-f="prompt" rows="4" placeholder="What moves, and how the camera moves…">${esc(sh.prompt)}</textarea></label>
       <div class="ed-group"><h3>References <span class="c ed-note">${sh.refs.length} in this shot</span></h3>
         ${S.refs.length ? `<div class="ed-chips">${refChips}</div>` : `<div class="ed-note">No references yet. <a href="#" id="ins-addref" style="color:var(--gold)">Add a character or place</a> so it stays consistent across shots.</div>`}</div>
       <div class="ed-group"><h3>Generate</h3><div class="ed-gen">
@@ -522,10 +539,15 @@
     const props = S.proposals.slice().sort((a, b) => (b.shot_id === sel.shot) - (a.shot_id === sel.shot));
     if (!props.length) return "";
     return `<div class="ed-group"><h3>✨ Proposed changes <span class="c ed-note">${props.length}</span></h3>` + props.map((p) => {
-      const opts = p.options.map((o) => `<button type="button" class="opt ${(pickedOption[p.id] || p.options.find((x) => x.status === "succeeded")?.image_id) === o.image_id ? "on" : ""}" data-opt="${o.image_id}" data-prop="${p.id}">${o.status === "succeeded" ? `<img src="${esc(o.url)}" alt="option">` : o.status === "failed" ? "failed" : "⏳"}</button>`).join("");
+      const pending = p.options.filter((o) => !["succeeded", "failed", "gone"].includes(o.status)).length;
+      const ready = p.options.length && !pending;
+      const fresh = ready && !seenReady.has(p.id); if (ready) seenReady.add(p.id);
+      const opts = p.options.map((o, i) => `<button type="button" class="opt ${(pickedOption[p.id] || p.options.find((x) => x.status === "succeeded")?.image_id) === o.image_id ? "on" : ""}" data-opt="${o.image_id}" data-prop="${p.id}" data-n="${i + 1}" data-of="${p.options.length}" data-url="${esc(o.url)}" ${o.status === "succeeded" ? 'title="Click to preview on the stage"' : ""}>${o.status === "succeeded" ? `<img src="${esc(o.url)}" alt="option ${i + 1}">` : o.status === "failed" ? "failed" : `<span>${o.status === "queued" ? "queued" : "drawing"}</span><span class="pg"><i></i></span>`}</button>`).join("");
       const sh = p.shot_id ? shotById(p.shot_id) : null;
-      return `<div class="ed-prop" data-p="${p.id}"><div class="h"><span class="s">✦</span><span style="flex:1">${esc(p.title)}</span>${sh ? `<button class="ed-btn ghost sm" data-goto="${sh.id}">${esc(sh.title || "shot " + sh.n)}</button>` : ""}</div>
-        ${p.summary ? `<div class="sum">${esc(p.summary)}</div>` : ""}
+      const live = pending ? `<div class="live"><span class="spin"></span>Making ${p.options.length} picture${p.options.length === 1 ? "" : "s"} · ${p.options.length - pending} ready · ${Math.max(0, Math.round(S.now - p.created_at))} s</div>`
+        : ready ? `<div class="ed-note">Click an option to preview it on the stage, then use it.</div>` : "";
+      return `<div class="ed-prop ${fresh && p.options.length ? "fresh" : ""}" data-p="${p.id}"><div class="h"><span class="s">✦</span><span style="flex:1">${esc(p.title)}</span>${sh ? `<button class="ed-btn ghost sm" data-goto="${sh.id}">${esc(sh.title || "shot " + sh.n)}</button>` : ""}</div>
+        ${p.summary ? `<div class="sum">${esc(p.summary)}</div>` : ""}${live}
         ${p.changes.length ? `<ul>${p.changes.map((c) => `<li>${describeChange(c)}</li>`).join("")}</ul>` : ""}
         ${opts ? `<div class="opts">${opts}</div>` : ""}
         <div class="acts three"><button class="ed-btn ghost" data-dismiss="${p.id}" title="Dismiss">✕</button><button class="ed-btn" data-apply="${p.id}">Apply</button><button class="ed-btn gold" data-applygen="${p.id}" title="Apply, then render the shots it touches">Apply & generate</button></div></div>`;
@@ -560,7 +582,11 @@
       el.addEventListener("change", () => change([{op: "edit_clip", clip_id: c.id, [k]: el.type === "checkbox" ? el.checked : k === "track" ? el.value : +el.value}],
         k === "use_in_video" ? (el.checked ? "Used for video generation" : "Mix only — not used for video") : "Saved"));
     });
-    pane.querySelectorAll("[data-opt]").forEach((b) => b.onclick = () => { pickedOption[b.dataset.prop] = b.dataset.opt; paintInspector(); });
+    pane.querySelectorAll("[data-opt]").forEach((b) => b.onclick = () => {
+      pickedOption[b.dataset.prop] = b.dataset.opt;
+      const p = S.proposals.find((x) => x.id === b.dataset.prop), o = p?.options.find((x) => x.image_id === b.dataset.opt);
+      if (o && o.status === "succeeded" && p.shot_id) { if (sel.shot !== p.shot_id) selectShot(p.shot_id); preview = {shot: p.shot_id, prop: p.id, image_id: o.image_id, url: o.url, n: +b.dataset.n, of: +b.dataset.of}; paintStage(); }
+      paintInspector(); });
     pane.querySelectorAll("[data-goto]").forEach((b) => b.onclick = () => selectShot(b.dataset.goto));
     pane.querySelectorAll("[data-dismiss]").forEach((b) => b.onclick = async () => { await api(`/api/editor/${PID}/proposals/${b.dataset.dismiss}/dismiss`, {}); load(true); });
     const apply = async (id, render) => {
@@ -577,7 +603,7 @@
   async function runGen(what, sh, btn) {
     btn.disabled = true;
     try {
-      if (what === "image") { await api(`/api/editor/${PID}/shots/${sh.id}/options`, {prompt: $("g-prompt").value, count: +$("g-count").value, model: $("g-model").value || null}); toast("Making picture options — pick one under Proposed changes"); }
+      if (what === "image") { await api(`/api/editor/${PID}/shots/${sh.id}/options`, {prompt: $("g-prompt").value, count: +$("g-count").value, model: $("g-model").value || null}); toast("Making picture options — they appear at the top of this panel"); setTimeout(() => { $("pane-shot").scrollTop = 0; }, 100); }
       else if (what === "video") { await api(`/api/editor/${PID}/render`, {shot_ids: [sh.id]}); toast("Rendering this shot"); }
       else if (what === "video-scene") { await api(`/api/editor/${PID}/render`, {shot_ids: sceneShots(sh.scene_id).map((s) => s.id)}); toast("Rendering the scene"); }
       else if (what === "voice") { const text = $("g-text").value.trim(); if (!text) { toast("Write the line"); btn.disabled = false; return; }

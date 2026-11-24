@@ -1284,8 +1284,9 @@ def state(project, base: str) -> dict:
                       "ORDER BY created_at", (pid,)):
         opts = []
         for o in _jl(p["options"], []):
-            im = db.one("SELECT status FROM images WHERE id=?", (o,))
+            im = db.one("SELECT status, progress FROM images WHERE id=?", (o,))
             opts.append({"image_id": o, "status": im["status"] if im else "gone",
+                         "progress": im["progress"] if im else 0,
                          "url": base + service.signed_path("image", o, 86400)})
         props.append({"id": p["id"], "shot_id": p["shot_id"], "title": p["title"],
                       "summary": p["summary"], "changes": _jl(p["changes"], []), "options": opts,
@@ -1571,10 +1572,25 @@ async def api_create(request: Request):
     return {"id": pid}
 
 
+async def refresh_pending(pid: str) -> None:
+    """Studio pictures learn they are finished only when someone asks WIS; the
+    page asks through here, or picture options would wait forever (2026-11-24)."""
+    for p in db.query("SELECT options FROM proposals WHERE project_id=? AND status='open'", (pid,)):
+        for o in _jl(p["options"], []):
+            row = db.one("SELECT status FROM images WHERE id=?", (o,))
+            if row and row["status"] not in images.TERMINAL:
+                try:
+                    await images.refresh(o)
+                except Exception:                              # noqa: BLE001
+                    log.warning("could not refresh picture %s", o)
+
+
 @router.get("/api/editor/{pid}")
 async def api_state(pid: str, request: Request):
     user = _user(request)
-    return state(production(user, pid), service.base_url(request))
+    project = production(user, pid)
+    await refresh_pending(pid)
+    return state(project, service.base_url(request))
 
 
 @router.post("/api/editor/{pid}/settings")
