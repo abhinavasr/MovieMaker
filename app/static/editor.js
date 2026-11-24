@@ -9,10 +9,18 @@
   const $ = (id) => document.getElementById(id);
   const TRACK_COLOR = {dialogue: "var(--dlg)", ambience: "var(--amb)", music: "var(--mus)", shot: "var(--sht)"};
   const TRACK_NAME = {dialogue: "Dialogue", ambience: "Ambience", music: "Music", shot: "Shot sound"};
-  const MAKE = {animate: ["Picture only", "The video starts exactly on the shot's picture. Silent; sound comes from the timeline."],
-    perform: ["Picture + references", "The video model gets the shot's picture plus its characters' and places' pictures (the shot's and its scene's), so faces and places stay truer; the opening may shift a little. Any sound it makes is muted in the mix; voices come from the dialogue lane."],
-    lipsync: ["Lip-sync", "The picture speaks or sings the dialogue line under the shot, mouth in sync (Wan2.2-S2V)."],
-    motion: ["Copy motion", "The person in the shot's picture makes exactly the movements of a reference video — a dance, a gesture — frame for frame (Wan Animate 2). Add the video under “Reference videos”. One person copies one person; silent."]};
+  // The use cases, listed upfront; each one is made by the model that does it best
+  // (2026-11-24: "We should use different models for different use cases. and list the use
+  // cases upfront"). MAKE[make] = [short label for badges, one-line description].
+  const USES = [
+    {make: "animate", icon: "🎞", title: "Bring the picture to life", what: "Camera moves and gentle action, starting exactly on the shot's picture. Silent; sound comes from the timeline.", model: "MiniMax H3 image-to-video"},
+    {make: "perform", icon: "🧩", title: "Keep characters true to their references", what: "The video also sees the characters' and places' pictures, so faces and places stay consistent; the opening may shift a little. Its own sound is muted.", needs: "characters or places in the shot", model: "MiniMax H3 reference-to-video"},
+    {make: "lipsync", icon: "👄", title: "Someone speaks or sings a line", what: "The line is voiced first in their voice; the video is made from that voice, mouth in sync.", needs: "a dialogue line under the shot", model: "Wan2.2-S2V"},
+    {make: "motion", icon: "🕺", title: "Copy a dance or movement from a video", what: "The person in the picture makes exactly the movements of a video you add, frame for frame. One person; silent.", needs: "the video to copy", model: "Wan Animate 2"},
+  ];
+  const ICON = Object.fromEntries(USES.map((u) => [u.make, u.icon]));
+  const MAKE = {animate: ["Bring to life", USES[0].what], perform: ["With references", USES[1].what],
+    lipsync: ["Speaks / sings", USES[2].what], motion: ["Copies motion", USES[3].what]};
   const FRAMING = {"": "—", EWS: "Extreme wide", WS: "Wide", MS: "Medium", MCU: "Medium close-up", CU: "Close-up", ECU: "Extreme close-up", OTS: "Over the shoulder", POV: "Point of view", "2S": "Two-shot", INSERT: "Insert"};
 
   let S = null, sig = "", view = "storyboard", tab = "shot", scope = "shot";
@@ -416,7 +424,7 @@
     }
     const making = S.proposals.find((p) => p.shot_id === sh.id && p.options.some((o) => !["succeeded", "failed", "gone"].includes(o.status)));
     const busy = ["running", "pending"].includes(sh.status) && ["running", "queued"].includes(S.status);
-    const mk = `<span class="ed-badge">${{animate: "🖼", perform: "🧩", lipsync: "👄", motion: "🕺"}[sh.make]} ${MAKE[sh.make][0]}${sh.framing ? " · " + sh.framing : ""} · ${sh.seconds}s</span>`;
+    const mk = `<span class="ed-badge">${ICON[sh.make]} ${MAKE[sh.make][0]}${sh.framing ? " · " + sh.framing : ""} · ${sh.seconds}s</span>`;
     const state = sh.status === "done" ? "clip ready" : sh.status === "stale" ? "changed since rendered" : sh.status === "failed" ? "failed" : sh.clip ? "" : "not rendered";
     if (sh.clip && Player.mode !== "stage-img") {
       const snd = soundUnder(sh);
@@ -512,7 +520,7 @@
     $("strip").innerHTML = shots.map((s, i) => `<div class="ed-card ${s.id === sel.shot ? "on" : ""}" data-shot="${s.id}" draggable="true" title="Drag to reorder, or onto a scene on the left to move it there">
       ${s.start_from === "prev_last" ? `<span class="chain" title="Opens on the previous shot's last frame">⛓ continues</span>` : ""}
       <div class="th">${s.picture ? `<img src="${esc(s.picture)}" alt="" loading="lazy">` : s.start_from === "prev_last" ? "" : "no picture"}</div>
-      <span class="mk" title="${MAKE[s.make][0]}">${{animate: "🖼", perform: "🧩", lipsync: "👄", motion: "🕺"}[s.make]} ${s.seconds}s</span>
+      <span class="mk" title="${MAKE[s.make][0]}">${ICON[s.make]} ${s.seconds}s</span>
       ${(() => { const b = s.auto ? {continuity: "🔗 checking continuity", refs: "⏳ characters & places", picture: "🖼 making picture", render: s.start_from === "prev_last" ? "⛓ after previous" : "⏳ to render"}[s.auto] : {done: "● clip", running: "⏳ rendering", failed: "failed", stale: "changed"}[s.status] || (s.status === "pending" && ["running", "queued"].includes(S.status) ? "queued" : ""); return b ? `<span class="st ${s.auto ? "running" : esc(s.status)}">${b}</span>` : ""; })()}
       <div class="m"><b>Shot ${String(i + 1).padStart(2, "0")}</b><span class="f">${esc(s.framing)}</span><span>${esc(s.title || s.prompt || "untitled")}</span></div></div>`).join("")
       + `<button class="ed-card add" id="add-shot" type="button" title="Add a shot" aria-label="Add a shot">＋</button>`;
@@ -802,7 +810,9 @@
     const inScene = sceneShots(sh.scene_id), idx = inScene.findIndex((x) => x.id === sh.id);
     const moveRow = `<div class="ed-move"><label class="ed-field">Scene<select id="mv-scene">${S.scenes.map((sc, i) => `<option value="${sc.id}" ${sc.id === sh.scene_id ? "selected" : ""}>${i + 1}. ${esc(sc.title || "Untitled scene")}</option>`).join("")}</select></label>
       <button class="ed-btn icon" id="mv-up" type="button" title="Move earlier (Alt+←)" aria-label="Move earlier">◀</button><span class="ed-note" style="padding-bottom:9px;white-space:nowrap">${idx + 1} of ${inScene.length}</span><button class="ed-btn icon" id="mv-down" type="button" title="Move later (Alt+→)" aria-label="Move later">▶</button></div>`;
-    return silentCard + `<div class="ed-group">
+    const picker = `<div class="ed-group"><h3>What happens in this shot?</h3><div class="ed-uses" role="radiogroup" aria-label="What happens in this shot">${USES.map((u) => `<button type="button" role="radio" aria-checked="${sh.make === u.make}" data-make="${u.make}" class="ed-use ${sh.make === u.make ? "on" : ""}"><span class="i">${u.icon}</span><span class="b"><b>${u.title}</b><small>${u.what}</small><small class="m">${u.needs ? "Needs " + u.needs + " · " : ""}${u.model}</small></span></button>`).join("")}</div>
+        <div class="ed-note" style="margin-top:6px">${sh.make === "motion" ? (sh.ref_videos.length ? `<b>Copies ${esc(sh.ref_videos[0].label)}.</b>` : ` <b style='color:var(--warn)'>Add the video to copy under “Reference videos” below.</b>`) : ""}${sh.make === "perform" ? ` <b>${(sh.refs.length ? sh.refs.length + " reference(s) in this shot" : "No references in this shot")}</b>, plus its scene's.` : ""}${sh.make === "lipsync" ? (lines.length ? ` Under it: ${lines.map((l) => esc(l.name)).join("; ")}${lines.some((l) => !l.use_in_video) ? " (some not marked “use in video”)" : ""}.` : " <b style='color:var(--warn)'>No dialogue under this shot yet</b> — click the Dialogue lane under it.") : ""}</div></div>`;
+    return picker + silentCard + `<div class="ed-group">
       <label class="ed-field">Title<input data-f="title" value="${esc(sh.title)}" maxlength="80" placeholder="Name this shot"></label></div>${moveRow}
       <div class="ed-row2">
         <label class="ed-field">Framing<select data-f="framing">${S.framings.map((f) => `<option value="${f}" ${f === sh.framing ? "selected" : ""}>${esc(f ? f + " · " + FRAMING[f] : "—")}</option>`).join("")}</select></label>
@@ -810,15 +820,13 @@
       <label class="ed-field">Opening picture<select data-f="start_from">
         <option value="" ${sh.start_from ? "" : "selected"}>Its own picture</option>
         <option value="prev_last" ${sh.start_from === "prev_last" ? "selected" : ""} ${S.shots[0]?.id === sh.id ? "disabled" : ""}>Last frame of the previous shot (continuous)</option></select></label>
-      <div class="ed-group"><div class="ed-field" style="margin-bottom:5px">Video from</div><div class="ed-seg" role="radiogroup" aria-label="Video from">${Object.keys(MAKE).map((m) => `<button type="button" data-make="${m}" class="${sh.make === m ? "on" : ""}">${{animate: "🖼", perform: "🧩", lipsync: "👄", motion: "🕺"}[m]} ${MAKE[m][0]}</button>`).join("")}</div>
-        <div class="ed-note" style="margin-top:5px">${MAKE[sh.make][1]}${sh.make === "motion" ? (sh.ref_videos.length ? ` <b>Copies ${esc(sh.ref_videos[0].label)}.</b>` : ` <b style='color:var(--warn)'>Add the video to copy under “Reference videos” below.</b>`) : ""}${sh.make === "perform" ? ` <b>${(sh.refs.length ? sh.refs.length + " reference(s) in this shot" : "No references in this shot")}</b>, plus its scene's.` : ""}${sh.make === "lipsync" ? (lines.length ? ` Under it: ${lines.map((l) => esc(l.name)).join("; ")}${lines.some((l) => !l.use_in_video) ? " (some not marked “use in video”)" : ""}.` : " <b style='color:var(--warn)'>No dialogue under this shot yet</b> — click the Dialogue lane under it.") : ""}</div></div>
       <label class="ed-field">Prompt — what moves, how the camera moves<textarea data-f="prompt" rows="4" placeholder="What moves, and how the camera moves…">${esc(sh.prompt)}</textarea></label>
       <div class="ed-group"><h3>References <span class="c ed-note">${sh.refs.length} in this shot</span></h3>
         ${S.refs.length ? `<div class="ed-chips">${refChips}</div>` : `<div class="ed-note">No references yet. <a href="#" id="ins-addref" style="color:var(--gold)">Add a character or place</a> so it stays consistent across shots.</div>`}</div>
       ${sh.make === "lipsync" ? "" : `<div class="ed-group"><h3>${sh.make === "motion" ? "The video to copy" : "Reference videos"} <span class="c ed-note">${sh.ref_videos.length} of ${sh.make === "motion" ? 1 : 3}</span></h3>
         ${sh.ref_videos.length ? `<div class="ed-rvids">${sh.ref_videos.map((v) => `<div class="ed-rvid"><span>🎞 &lt;Video ${v.i + 1}&gt; ${esc(v.label)}</span><button type="button" data-rvdel="${v.i}" aria-label="Remove">✕</button></div>`).join("")}</div>` : ""}
         ${sh.ref_videos.length < (sh.make === "motion" ? 1 : 3) ? `<div class="ed-rvadd"><select id="rv-shot" aria-label="Use a shot's clip"><option value="">＋ A shot's clip…</option>${S.shots.filter((x) => x.clip && x.id !== sh.id && !sh.ref_videos.some((v) => v.label.includes("“" + (x.title || "shot " + x.n) + "”"))).map((x) => `<option value="${x.id}">${x.n}. ${esc(x.title || "Shot " + x.n)}</option>`).join("")}</select><button class="ed-btn sm" id="rv-upload" type="button">⤒ Upload video</button></div>` : ""}
-        <div class="ed-note">${sh.make === "motion" ? "The person in the shot's picture makes these exact movements. Up to 15 s is used; a shorter video loops." : "A loose guide for motion and camera. For an exact copy of a dance or gesture, choose “🕺 Copy motion” above. Up to 15 s is used."}</div></div>`}
+        <div class="ed-note">${sh.make === "motion" ? "The person in the shot's picture makes these exact movements. Up to 15 s is used; a shorter video loops." : "A loose guide for motion and camera. For an exact copy of a dance or gesture, choose “🕺 Copy a dance or movement from a video” at the top. Up to 15 s is used."}</div></div>`}
       <div class="ed-group"><h3>Generate</h3><div class="ed-gen">
         ${gen("image", "🖼", "Image", sh.picture ? "new picture options (keeps the references)" : "this shot has no picture yet")}
         ${gen("video", "🎬", "Video", sh.status === "done" ? "clip ready — render again" : sh.status === "stale" ? "changed since rendered" : "render this shot's clip")}
@@ -921,7 +929,7 @@
     pane.querySelectorAll("[data-sound]").forEach((b) => b.onclick = async () => {
       const k = b.dataset.sound;
       if (k === "model") {
-        if (!confirm("The video model will invent this shot's sound (it won't be the character's own voice). Switch this shot to “Picture + references” and turn its sound on in the mix?")) return;
+        if (!confirm("The video model will invent this shot's sound (it won't be the character's own voice). Switch this shot to “Keep characters true to their references” (that model makes sound) and turn its sound on in the mix?")) return;
         await change([{op: "edit_shot", shot_id: sh.id, make: "perform"}, {op: "set_mix", shot: {mute: false}}], "Its own sound is on; render it to hear it");
         genOpen = "video"; paintInspector(); return;
       }
@@ -930,7 +938,7 @@
     });
     pane.querySelectorAll("[data-go]").forEach((b) => b.onclick = () => runGen(b.dataset.go, sh, b));
     if ($("ins-upload")) $("ins-upload").onclick = () => uploadPicture(sh.id);
-    const rvDone = (r) => { toast("Reference video added" + (r.switched ? " — this shot now uses “Picture + references”" : "") + ". Remake its video with 🎬."); load(true); };
+    const rvDone = (r) => { toast("Reference video added" + (r.switched ? " — this shot now uses “Keep characters true to their references”" : "") + ". Remake its video with 🎬."); load(true); };
     if ($("rv-shot")) $("rv-shot").onchange = async () => { const v = $("rv-shot").value; if (!v) return;
       try { rvDone(await api(`/api/editor/${PID}/shots/${sh.id}/ref-videos`, {from_shot: v})); } catch (e) { toast(e.message); } };
     if ($("rv-upload")) $("rv-upload").onclick = () => { const inp = document.createElement("input"); inp.type = "file"; inp.accept = "video/*";

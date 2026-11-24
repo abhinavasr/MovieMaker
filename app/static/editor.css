@@ -433,3 +433,14 @@ body:has(.ed) footer, body:has(.ed) .retention-note { display: none; }
 .ed-turn .t .tt { position: absolute; top: 3px; right: 3px; display: flex; gap: 2px; opacity: .92; }
 .ed-turn .t .tt button { width: 22px; height: 22px; border-radius: 6px; border: 0; background: rgba(0,0,0,.65); color: #fff; font-size: .72rem; cursor: pointer; padding: 0; }
 .ed-turn .t .tt button:hover { background: var(--gold); color: var(--accent-ink); }
+
+.ed-uses { display: grid; gap: 6px; }
+.ed-use { display: flex; gap: 10px; align-items: flex-start; text-align: left; font: inherit; color: var(--ink); background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; cursor: pointer; }
+.ed-use:hover { border-color: var(--gold); }
+.ed-use.on { border-color: var(--gold); background: color-mix(in srgb, var(--gold) 12%, var(--panel-2)); }
+.ed-use .i { font-size: 1.15rem; line-height: 1.3; flex: none; }
+.ed-use .b { display: grid; gap: 2px; min-width: 0; }
+.ed-use b { font-size: .84rem; font-weight: 600; }
+.ed-use small { font-size: .72rem; color: var(--muted); line-height: 1.35; }
+.ed-use small.m { color: var(--faint, var(--muted)); font-size: .68rem; }
+.ed-use:not(.on) small:not(.m) { display: none; }

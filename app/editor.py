@@ -1701,12 +1701,12 @@ def add_ref_video(project, sid: str, from_shot: str | None = None,
     shot = _shot(pid, sid)
     if shot["make"] == "lipsync":
         raise HTTPException(400, "a lip-sync shot is made from its voice; switch it to "
-                                 "“Picture + references” to use reference videos")
+                                 "“Keep characters true to their references” or “Copy a dance or movement” to use reference videos")
     items = _jl(shot["ref_videos"], [])
     if len(items) >= MAX_REF_VIDEOS:
         raise HTTPException(409, f"a shot takes at most {MAX_REF_VIDEOS} reference videos")
     if shot["make"] == "motion" and items:
-        raise HTTPException(409, "a “Copy motion” shot copies one video; remove "
+        raise HTTPException(409, "a “Copy a dance or movement” shot copies one video; remove "
                                  "the current one first")
     if from_shot:
         src = db.one("SELECT id, clip_path FROM shots WHERE id=? AND project_id=?", (from_shot, pid))
