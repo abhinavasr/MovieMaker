@@ -281,7 +281,8 @@ def _build_tools() -> dict:
         "description": "Re-queue a FAILED speech clip, song or voice job unchanged. Only for "
                        "failures that were not caused by the request itself (e.g. GPU full)."}
     for name, t in editor.AGENT_TOOLS.items():
-        out[name] = {**t, "editor": True}
+        # research tools serve the general assistant too; the rest need a production
+        out[name] = {**t, "editor": name not in ("web_search", "read_web_page")}
     return out
 
 
@@ -305,10 +306,24 @@ def _arg_line(name: str, prop: dict, required: bool) -> str:
     return f"    {name}{'*' if required else ''}: {kind}" + (f" -- {desc}" if desc else "")
 
 
+# Tools of the older project (MCP) workflow that a production never uses; leaving them out of
+# a production's catalogue saves ~4,500 tokens per planner call (2026-11-25: a production's
+# prompt had grown to 30,056 tokens in a 32,768 window, leaving the planner no room to think).
+NOT_IN_PRODUCTION = {
+    "create_project", "update_project", "get_project", "list_projects", "render_video",
+    "cancel_render", "get_status", "plan_scenes", "set_scenes", "set_scene_video",
+    "set_scene_voice", "add_file", "add_media", "generate_music", "get_music",
+    "generate_speech", "get_speech", "list_speech", "sing_song", "resing_song",
+    "speak_as_voice", "train_voice", "get_voice_job",
+}
+
+
 def catalogue(production: bool = False) -> str:
     lines = []
     for name, t in tools().items():
         if t.get("editor") and not production:
+            continue
+        if production and name in NOT_IN_PRODUCTION:
             continue
         desc = " ".join(t["description"].split())[:420]
         lines.append(f"- {name}: {desc}")
@@ -423,6 +438,46 @@ async def _unload(model: str) -> None:
 
 # qwen3.8:27b Q4 at a 32k context: measured ~20 GB on the card.
 PLANNER_VRAM_MB = 20500
+
+PRODUCTION_ABOUT = ("Story Studio makes films on one local GPU: pictures (FLUX.2 klein, Qwen-Image), "
+                    "video clips per shot (the model of each shot's use case), voices (Qwen3-TTS; "
+                    "VoxCPM2 for Burmese and Hindi voices), music and ambience (ACE-Step). Work "
+                    "only through the production tools below; files are kept 90 days.")
+
+# The planner's context window. Measured 2026-11-25 on the RTX 4090 with qwen3.8:27b
+# (hybrid attention: ~1.1 GB per extra 32k tokens, but Ollama's placement reserve grows too):
+#   40960 -> fully on the GPU, 116 tok/s      49152 -> 15.8/17.0 GB on GPU, 94 tok/s
+#   57344+ -> part on the CPU, ~35 tok/s      forcing num_gpu at 65536 ran out of memory.
+# So each call takes the SMALLEST window that holds its prompt plus the thinking budget.
+PLANNER_WINDOWS = (40960, 49152, 65536)
+PLANNER_THINK_TOKENS = 20000          # num_predict: thinking + the JSON plan. A whole-episode
+                                      # breakdown used 18.5k; at 12k its first try was cut off.
+CHARS_PER_TOKEN = 3.0                 # measured 3.29 on a Sanskrit-heavy production; err high
+
+
+def _est_tokens(messages: list[dict]) -> int:
+    n = sum(len(m.get("content") or "") for m in messages) / CHARS_PER_TOKEN
+    return int(n + 800 * sum(len(m.get("images") or []) for m in messages) + 50 * len(messages))
+
+
+def _fit_window(messages: list[dict]) -> tuple[list[dict], int, int]:
+    """(messages, num_ctx, estimated prompt tokens): the smallest measured window that holds
+    the prompt + PLANNER_THINK_TOKENS; if none does, the oldest history (never the system
+    prompt, the latest message or the person's last three messages) is dropped until it fits.
+    Ollama would otherwise cut the START of the prompt silently -- the rules."""
+    msgs = list(messages)
+    margin = 1024
+    while True:
+        est = _est_tokens(msgs)
+        for ctx in PLANNER_WINDOWS:
+            if est + PLANNER_THINK_TOKENS + margin <= ctx:
+                return msgs, ctx, est
+        last = len(msgs) - 1
+        keep = {0, last} | set([i for i, m in enumerate(msgs[:last]) if m["role"] == "user"][-3:])
+        drop = next((i for i in range(1, last) if i not in keep), None)
+        if drop is None:
+            return msgs, PLANNER_WINDOWS[-1], est
+        msgs.pop(drop)
 
 
 class GpuTurn:
@@ -617,8 +672,32 @@ audio, mix) is given to you in every turn; the person sees the same thing on scr
   the mix (export_film mixes on the CPU in seconds): no render_shots for those.
 - To lay out a story as scenes and shots use build_storyboard (nested scenes -> shots, plus
   characters as refs); for a long film call it once per 1-3 scenes so each answer stays short.
+  Follow the story's OWN scene list (its headings, its order, its count): never invent, merge
+  or rename scenes. Later calls ADD the next scenes; never redo scenes already in the state.
+- THE WHOLE STORY IS IN THE STATE ("Story (complete, N characters)"). Read it all: its cast
+  table, its scenes, every line. Never "reconstruct" dialogue or descriptions, and never say it
+  is truncated unless the state says so.
+- REFERENCES (characters, places) -- the person reviews these first, so get them right:
+  * ONE reference per character, named exactly as the story names them. A name already in the
+    references is that same reference: never add it again (refs may be named instead of ids).
+  * Its description is the story's own description of that character, COMPLETE: age, build,
+    skin, face, hair, costume and colours, emblems, manner. Copy it; do not shorten or invent.
+  * A character shown at DIFFERENT AGES (newborn, child, teen, adult, old) gets one reference
+    PER AGE ("Newborn Rāma", "Teenage Rāma"), each described only at that age, and each shot
+    uses the age it shows. Do this for every such character at once, not one at a time.
+  * When the story leaves out how a well-known figure looks (a deity, a historical person, an
+    epic's hero, a period costume or weapon), web_search it and follow the traditional look
+    (e.g. Viṣṇu is blue-skinned, not golden). Say in one line what you looked up.
+  * The story's description ALWAYS wins. The state lists same-named characters from the
+    person's other productions: reuse one (add_ref{from_ref_id, description}) only when its
+    look agrees with this story; pass the story's description anyway. If it disagrees (age,
+    skin, hair, costume), add a fresh reference instead.
+  * make_ref_picture takes the reference's NAME (ref), so it works right after you add it.
 - When the person says to apply / approve / go ahead with your proposal(s), call apply_proposals
   (and then carry on with the next stage). Never apply on your own initiative.
+- When the state says you may apply directly, your edits take effect at once: CARRY ON through
+  the stages without asking for approval (the person can stop you or undo by asking). Ask only
+  when something essential is genuinely unclear in the story.
 - Other story, scene, shot, reference, audio-clip and mix EDITS go through propose_changes: the
   person reviews and applies them (unless the state says you may apply directly). One
   proposal per coherent idea, with a clear title; for a whole-story breakdown, one proposal
@@ -686,7 +765,8 @@ def _system_prompt(user_id: str, first_step: int, production: bool = False,
                         "another story.)")
     today = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     return (f"{rules}\nNow: {today}.\n\nThe person's standing lessons:\n{lessons_txt}\n\n"
-            f"About the studio:\n{mcp.INSTRUCTIONS}\n\nTools (* = required):\n"
+            f"About the studio:\n{PRODUCTION_ABOUT if production else mcp.INSTRUCTIONS}\n\n"
+            f"Tools (* = required):\n"
             f"{catalogue(production)}")
 
 
@@ -927,6 +1007,8 @@ async def _plan(thread, trigger: str, turn: GpuTurn) -> dict:
         final["images"] = [base64.b64encode(p).decode() for p in pics] + \
                           [base64.b64encode(jpg).decode() for _, jpg in views]
     messages.append(final)
+    messages, num_ctx, est = _fit_window(messages)
+    log.info("planner %s: prompt ~%d tokens, window %d", thread["id"], est, num_ctx)
     _activity(thread["id"], "planning", "planning")
     for attempt in range(3):
         await turn.renew()
@@ -934,7 +1016,7 @@ async def _plan(thread, trigger: str, turn: GpuTurn) -> dict:
         result = await _stream_plan(thread["id"], {
             "model": cfg.PLANNER_MODEL, "messages": messages,
             "think": True, "format": _plan_schema(), "keep_alive": "10m",
-            "options": {"num_ctx": cfg.PLANNER_CTX, "num_predict": 12000,
+            "options": {"num_ctx": num_ctx, "num_predict": PLANNER_THINK_TOKENS,
                         "temperature": 0.6 if attempt == 0 else 0.8}})
         out = _parse_json(result.get("content", ""))
         log.info("planner %s: %.1fs, %s tokens, ok=%s", thread["id"], time.monotonic() - t0,
@@ -1640,7 +1722,7 @@ async def api_message(thread_id: str, request: Request):
 
 
 async def _say(user, row, text: str, file_ids: list, focus: dict | None = None) -> dict:
-    text = text[:8000]
+    text = text[:60000]          # a whole script can be pasted (was 8,000; 2026-11-25)
     last = db.one("SELECT content, created_at FROM agent_messages WHERE thread_id=? AND role='user' "
                   "ORDER BY seq DESC LIMIT 1", (row["id"],))
     if last and not file_ids and last["content"] == text and _now() - last["created_at"] < 5:

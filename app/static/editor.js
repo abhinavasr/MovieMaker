@@ -291,6 +291,7 @@
   }
   $("refs").addEventListener("click", (e) => { const d = e.target.closest("[data-ref]"); if (d) refModal(refById(d.dataset.ref)); });
   $("add-ref").onclick = () => refModal(null);
+  if ($("refs-lib")) $("refs-lib").onclick = () => libraryModal("");
   $("refs-gen").onclick = async () => {
     const missing = S.refs.filter((r) => !r.image && !r.image_pending).length;
     if (!missing) { toast("Every reference already has a picture"); return; }
@@ -302,9 +303,15 @@
 
   const HINDI = new Set(["Meera", "Anaya", "Arjun", "Vikram"]), BURMESE = new Set(["Thiri", "Nandar", "Kyaw", "U_Ba"]);
   const voiceLabel = (s) => HINDI.has(s) ? `${s} — Hindi-native (other languages: her/his voice, cloned)` : BURMESE.has(s) ? `${s} — Burmese only` : s === "Vagdhenu" ? `${s} — Sanskrit chant` : s;
+  // Each open of the reference dialog gets a number; timers and polls of an earlier dialog
+  // stop as soon as another one opens (2026-11-25: with Nārada open, the views of a character
+  // opened earlier kept being painted into it every 3 s, so another character's pictures
+  // appeared in Nārada's dialog).
+  let refGen = 0;
   function refModal(r) {
     const kinds = ["character", "location", "prop", "style", "voice"];
     let pickedImage = null, polling = null;
+    const gen = ++refGen, live = () => gen === refGen && !$("modal").hidden;
     const voiced = (k) => k === "character" || k === "voice";
     modal(`<h2>${r ? "Edit reference" : "New reference"}</h2>
       <div class="ed-row2"><label class="ed-field">Name<input id="rf-name" value="${esc(r?.name || "")}" maxlength="80" placeholder="Name"></label>
@@ -312,9 +319,11 @@
       <label class="ed-field">Description (used in prompts)<textarea id="rf-desc" rows="3" placeholder="How they look — used in every prompt they appear in">${esc(r?.description || "")}</textarea></label>
       <div class="ed-field">Picture
         <div class="ed-refpic">
-          <div class="ed-drop" id="rf-pic">${r?.image ? `<img src="${esc(r.image)}" alt="">` : r?.image_pending ? "⏳ being drawn…" : ""}Click or drop a picture</div>
+          <div class="ed-drop" id="rf-pic">${r?.image ? `<img src="${esc(r.image)}" alt="">` : r?.image_pending ? "⏳ being drawn…" : ""}Click, drop or paste (Ctrl/⌘+V) a picture</div>
           <div class="ed-refgen">
             <button class="ed-btn gold" type="button" id="rf-gen">✨ Generate picture</button>
+            <button class="ed-btn sm" type="button" id="rf-paste" title="Use the picture you copied">📋 Paste picture</button>
+            <button class="ed-btn sm" type="button" id="rf-lib" title="A character, place or voice from your other productions">⤓ From my characters</button>
             <label class="ed-note">Options <select id="rf-count"><option>1</option><option selected>2</option><option>3</option><option>4</option></select></label>
             <label class="ed-note">Model <select id="rf-model">${modelOptions("")}</select></label>
             <details><summary class="ed-note">Edit the prompt</summary><textarea id="rf-prompt" rows="3" placeholder="Empty = from the name, kind and description, in the film's style"></textarea></details>
@@ -351,7 +360,7 @@
     $("rf-kind").onchange = () => { $("rf-voicerow").hidden = !voiced($("rf-kind").value); };
     const ANG = r && r.kind === "location" ? {wide: "Wide", reverse: "Reverse", detail: "Detail", aerial: "Aerial"} : {three_quarter: "¾ view", side: "Side", back: "Back", face: "Face"};
     function paintTurn() {
-      if (!$("rf-turn") || !r) return;
+      if (!live() || !$("rf-turn") || !r) return;
       const cur = S.refs.find((x) => x.id === r.id) || r;
       const by = Object.fromEntries((cur.angles || []).map((a) => [a.angle, a]));
       const mine = new Set(cur.mine || []), skipped = new Set(cur.skipped || []);
@@ -364,7 +373,7 @@
       $("rf-turn-note").textContent = !cur.image ? "Set the main picture first; the angles follow automatically." : cur.angles_waiting ? "Waiting for the main picture to finish…" : pending ? `Drawing ${pending} angle(s)…` : "";
     }
     paintTurn();
-    const turnTimer = setInterval(async () => { if ($("modal").hidden || !$("rf-turn")) { clearInterval(turnTimer); return; } await load(); paintTurn(); }, 3000);
+    const turnTimer = setInterval(async () => { if (!live() || !$("rf-turn")) { clearInterval(turnTimer); return; } await load(); paintTurn(); }, 3000);
     const vmodel = () => ($("rf-vmodel") && $("rf-vmodel").value) || null;
     if ($("rf-angles")) $("rf-angles").onclick = async () => { try { await api(`/api/editor/${PID}/refs/${r.id}/angles`, {model: vmodel()}); toast("Drawing every view again (your own photos are kept)"); await load(true); paintTurn(); } catch (e) { toast(e.message); } };
     const pickPhotos = (multiple, slot) => { const inp = document.createElement("input"); inp.type = "file"; inp.accept = "image/*"; inp.multiple = multiple;
@@ -387,7 +396,7 @@
         $("rf-opts").innerHTML = ids.map((id, i) => `<button type="button" class="opt" data-img="${id}"><span>drawing ${i + 1}…</span><span class="pg"><i></i></span></button>`).join("");
         const t0 = Date.now();
         const poll = async () => {
-          if ($("modal").hidden || !$("rf-opts")) return;
+          if (!live() || !$("rf-opts")) return;
           const st = await api(`/api/editor/${PID}/images?ids=${ids.join(",")}`);
           for (const im of st.images) {
             const el = $("rf-opts").querySelector(`[data-img="${im.image_id}"]`); if (!el) continue;
@@ -409,8 +418,58 @@
     });
     const hook = (drop, input, show) => { $(drop).onclick = () => $(input).click(); $(input).onchange = () => show($(input).files[0]);
       $(drop).ondragover = (e) => e.preventDefault(); $(drop).ondrop = (e) => { e.preventDefault(); const f = e.dataTransfer.files[0]; if (!f) return; const dt = new DataTransfer(); dt.items.add(f); $(input).files = dt.files; show(f); }; };
-    hook("rf-pic", "rf-picfile", (f) => { pickedImage = null; $("rf-pic").innerHTML = `<img src="${URL.createObjectURL(f)}" alt="">${esc(f.name)}`; });
+    const showPic = (f) => { pickedImage = null; $("rf-pic").innerHTML = `<img src="${URL.createObjectURL(f)}" alt="">${esc(f.name || "pasted picture")} — Save to keep it`; };
+    hook("rf-pic", "rf-picfile", showPic);
     hook("rf-voice", "rf-voicefile", (f) => { $("rf-voice").textContent = "🎙 " + f.name; });
+    // Paste a picture straight in (the person, 2026-11-25: "simply paste the character
+    // references instead of only drop or select"). Text still pastes into the fields.
+    const usePicture = (f) => { if (!f) return; const dt = new DataTransfer(); dt.items.add(new File([f], f.name || "pasted.png", {type: f.type || "image/png"})); $("rf-picfile").files = dt.files; showPic($("rf-picfile").files[0]); toast("Picture pasted — Save to use it"); };
+    const onPaste = (e) => {
+      if (!live()) { document.removeEventListener("paste", onPaste); return; }
+      const f = [...(e.clipboardData?.items || [])].find((i) => i.kind === "file" && i.type.startsWith("image/"));
+      if (!f) return;
+      e.preventDefault(); usePicture(f.getAsFile());
+    };
+    document.addEventListener("paste", onPaste);
+    $("rf-paste").onclick = async () => {
+      try {
+        for (const item of await navigator.clipboard.read()) {
+          const t = item.types.find((x) => x.startsWith("image/"));
+          if (t) { usePicture(await item.getType(t)); return; }
+        }
+        toast("No picture on the clipboard — copy one first");
+      } catch { toast("Press Ctrl+V (⌘V on a Mac) to paste the picture"); }
+    };
+    $("rf-lib").onclick = () => libraryModal(r ? r.name : $("rf-name").value.trim());
+  }
+
+  // Characters from the person's other productions (2026-11-25: "allow users see all their
+  // previous characters in the character reference and add them here for consistency").
+  async function libraryModal(query) {
+    refGen++;                                     // the reference dialog underneath is closed
+    modal(`<h2>My characters</h2>
+      <p class="ed-note">Characters, places and voices from your other productions. Pick any to add them here with their pictures, views and voice; a name that is already here is filled in, not doubled.</p>
+      <input id="lib-q" placeholder="Search by name or description" value="${esc(query || "")}" style="width:100%">
+      <div class="ed-lib" id="lib-list"><div class="ed-note">Loading…</div></div>
+      <div class="acts"><button class="ed-btn ghost" data-act="close">Close</button><button class="ed-btn gold" data-act="add" id="lib-add" disabled>Add</button></div>`,
+      async (act) => {
+        if (act !== "add") return true;
+        const ids = [...document.querySelectorAll("#lib-list .on")].map((x) => x.dataset.lib);
+        if (!ids.length) return false;
+        try { const d = await api(`/api/editor/${PID}/refs/import`, {ref_ids: ids}); toast(`Added ${d.ids.length} to this production`); await load(true); return true; }
+        catch (e) { toast(e.message); return false; }
+      });
+    const paint = async () => {
+      let items = [];
+      try { items = (await api(`/api/editor/${PID}/library?q=${encodeURIComponent($("lib-q").value.trim())}`)).items; } catch (e) { toast(e.message); }
+      $("lib-list").innerHTML = items.length ? items.map((x) => `<button type="button" class="ed-libitem" data-lib="${x.ref_id}">
+          <span class="th">${x.image ? `<img src="${esc(x.image)}" alt="" loading="lazy">` : ({character: "👤", location: "🏛", prop: "🗝", style: "🎨", voice: "🎙"}[x.kind] || "📌")}</span>
+          <span class="tx"><b>${esc(x.name)}</b>${x.here ? ` <i>· already here (fills it in)</i>` : ""}<small>${esc(x.production)} · ${esc(x.kind)}${x.voice ? " · 🎙" : ""}</small><small>${esc((x.description || "").slice(0, 140))}</small></span></button>`).join("")
+        : `<div class="ed-note">${$("lib-q").value.trim() ? "Nothing matches." : "No characters in your other productions yet."}</div>`;
+    };
+    let t = null; $("lib-q").oninput = () => { clearTimeout(t); t = setTimeout(paint, 250); };
+    $("lib-list").onclick = (e) => { const b = e.target.closest("[data-lib]"); if (!b) return; b.classList.toggle("on"); const n = document.querySelectorAll("#lib-list .on").length; $("lib-add").disabled = !n; $("lib-add").textContent = n ? `Add ${n}` : "Add"; };
+    paint();
   }
 
   // ------------------------------------------------------------------ center: crumbs, stage, strip

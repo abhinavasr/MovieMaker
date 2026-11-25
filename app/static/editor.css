@@ -551,3 +551,13 @@ body:has(.ed) footer, body:has(.ed) .retention-note { display: none; }
   .ed-sheet.review { width: 100%; max-height: none; height: 100dvh; border-radius: 0; border: 0; }
   .rv-opts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
+
+/* My characters (library from other productions) */
+.ed-lib { display: grid; gap: 6px; max-height: min(60vh, 520px); overflow: auto; margin: 8px 0; }
+.ed-libitem { display: grid; grid-template-columns: 56px minmax(0, 1fr); gap: 10px; align-items: center; text-align: left; padding: 6px; border-radius: 10px; border: 2px solid transparent; background: var(--panel-3); color: inherit; cursor: pointer; font: inherit; }
+.ed-libitem.on { border-color: var(--gold); }
+.ed-libitem .th { width: 56px; height: 72px; border-radius: 8px; overflow: hidden; display: grid; place-items: center; background: var(--panel-2, #222); font-size: 1.4rem; }
+.ed-libitem .th img { width: 100%; height: 100%; object-fit: cover; }
+.ed-libitem .tx { display: grid; gap: 2px; min-width: 0; }
+.ed-libitem .tx small { color: var(--muted); font-size: .72rem; overflow: hidden; text-overflow: ellipsis; }
+.ed-libitem .tx i { color: var(--muted); font-style: normal; font-size: .72rem; }

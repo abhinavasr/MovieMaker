@@ -35,6 +35,7 @@ import asyncio
 import json
 import logging
 import math
+import re
 import shutil
 import subprocess
 import tempfile
@@ -212,6 +213,11 @@ def create(user: auth.User, title: str, story: str = "", aspect: str = "9:16") -
     project = db.one("SELECT * FROM projects WHERE id=?", (pid,))
     params = db.params_of(project)
     params["editor"] = True
+    # The assistant applies its own edits in a new production; the person can switch to
+    # reviewing proposals (⋯ menu). 2026-11-25: every storyboard batch waited for "apply"
+    # (34 and 19 minutes in the first real session) and plans built on unapplied batches
+    # went wrong; the person asked to minimise their involvement.
+    params["agent_applies"] = True
     db.set_params(pid, params)
     set_aspect(db.one("SELECT * FROM projects WHERE id=?", (pid,)), aspect)
     _new_scene(pid, "Scene 1", "", 0)
@@ -636,6 +642,115 @@ def delete_ref(project, ref_id: str) -> None:
                    (json.dumps([r for r in refs if r != ref_id]), s["id"]))
     db.run("UPDATE prod_clips SET ref_id=NULL WHERE ref_id=?", (ref_id,))
     _touch(pid)
+
+
+def name_key(name: str) -> str:
+    """One spelling for a name: "Daśaratha", "dasaratha" and "The  Dasaratha" match
+    (2026-11-25: two storyboard batches each added Vālmīki, Nārada and Daśaratha, and
+    the person had to delete the copies while their pictures were already drawing)."""
+    import unicodedata
+    s = unicodedata.normalize("NFKD", str(name or ""))
+    s = "".join(ch for ch in s if not unicodedata.combining(ch)).casefold()
+    s = re.sub(r"[^\w]+", " ", s).strip()
+    return re.sub(r"^(the|a|an) ", "", s)
+
+
+def ref_by_name(pid: str, name: str):
+    k = name_key(name)
+    if not k:
+        return None
+    for r in db.query("SELECT * FROM prod_refs WHERE project_id=? ORDER BY idx", (pid,)):
+        if name_key(r["name"]) == k:
+            return r
+    return None
+
+
+def resolve_ref(pid: str, v) -> str | None:
+    """A reference given by id or by name (the planner often only knows the name of a
+    reference it has just added)."""
+    if not isinstance(v, str) or not v.strip():
+        return None
+    if db.one("SELECT 1 FROM prod_refs WHERE id=? AND project_id=?", (v, pid)):
+        return v
+    r = ref_by_name(pid, v)
+    return r["id"] if r else None
+
+
+def library(user, exclude_pid: str | None = None, query: str = "",
+            limit: int = 60) -> list[dict]:
+    """The person's characters, places and voices from their other productions, newest
+    first, one per name and picture (2026-11-25, the person: "allow users see all their
+    previous characters ... and add them here for consistency across stories")."""
+    q = name_key(query)
+    rows = db.query(
+        "SELECT r.*, p.title AS production, p.updated_at AS p_updated FROM prod_refs r "
+        "JOIN projects p ON p.id=r.project_id WHERE p.user_id=? AND p.id!=? "
+        "ORDER BY p.updated_at DESC, r.idx",
+        (user if isinstance(user, str) else user.id, exclude_pid or ""))
+    out, seen = [], set()
+    for r in rows:
+        k = (name_key(r["name"]), r["image_id"] or "", r["kind"])
+        if k in seen:
+            continue
+        if q and q not in name_key(r["name"]) and q not in name_key(r["description"] or ""):
+            continue
+        seen.add(k)
+        out.append({"ref_id": r["id"], "kind": r["kind"], "name": r["name"],
+                    "description": r["description"] or "", "image_id": r["image_id"],
+                    "has_picture": bool(r["image_id"] and _img_done(r["image_id"])),
+                    "voice": bool(r["voice_path"]) or bool(r["speaker"]),
+                    "production": r["production"]})
+        if len(out) >= limit:
+            break
+    return out
+
+
+def library_matches(project, refs=None, limit: int = 12) -> list[dict]:
+    """Library entries whose name appears in this production's story (or its references):
+    the only ones worth the planner's context (2026-11-25: listing every character by name
+    alone, the planner imported a whole broken earlier attempt of the same story)."""
+    text = " " + name_key((project["story"] or "") + " " +
+                          " ".join(r["name"] for r in (refs or []))) + " "
+    out = []
+    for x in library(project["user_id"], project["id"], limit=200):
+        k = name_key(x["name"])
+        words = [w for w in k.split() if len(w) >= 4]
+        if f" {k} " in text or (words and f" {words[-1]} " in text):
+            out.append(x)
+            if len(out) >= limit:
+                break
+    return out
+
+
+def import_ref(project, user: auth.User, src_ref_id: str) -> str:
+    """Copy one of the person's references from another production into this one:
+    look, pictures and views, voice. The same name already here is filled in, not doubled."""
+    pid = project["id"]
+    src = db.one("SELECT r.* FROM prod_refs r JOIN projects p ON p.id=r.project_id "
+                 "WHERE r.id=? AND p.user_id=?", (src_ref_id, user.id))
+    if src is None:
+        raise HTTPException(404, "no such character in your productions")
+    have = ref_by_name(pid, src["name"])
+    rid = have["id"] if have else db.new_id("ref")
+    voice_path = None
+    if src["voice_path"] and Path(src["voice_path"]).exists():
+        dest = cfg.uploads_dir / pid / "voices"
+        dest.mkdir(parents=True, exist_ok=True)
+        voice_path = str(dest / f"{rid}{Path(src['voice_path']).suffix}")
+        shutil.copyfile(src["voice_path"], voice_path)
+    if have:
+        db.run("UPDATE prod_refs SET kind=?, description=?, image_id=?, angles=?, speaker=?, "
+               "voice_path=COALESCE(?, voice_path) WHERE id=?",
+               (src["kind"], src["description"], src["image_id"], src["angles"] or "{}",
+                src["speaker"], voice_path, rid))
+    else:
+        idx = (db.one("SELECT MAX(idx) AS m FROM prod_refs WHERE project_id=?", (pid,))["m"] or 0) + 1
+        db.run("INSERT INTO prod_refs (id, project_id, idx, kind, name, description, image_id, "
+               "voice_path, speaker, created_at, angles) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+               (rid, pid, idx, src["kind"], src["name"], src["description"] or "", src["image_id"],
+                voice_path, src["speaker"], db.now(), src["angles"] or "{}"))
+    _touch(pid)
+    return rid
 
 
 # --------------------------------------------------------------------------- audio clips
@@ -2635,8 +2750,20 @@ def propose(project, title: str, summary: str, changes: list, shot_id: str | Non
 
 
 OPS = {"set_story", "add_scene", "edit_scene", "delete_scene", "add_shot", "edit_shot",
-       "delete_shot", "edit_clip", "delete_clip", "set_mix", "add_ref", "edit_ref", "use_frame",
-       "add_line"}
+       "delete_shot", "edit_clip", "delete_clip", "set_mix", "add_ref", "edit_ref", "delete_ref",
+       "use_frame", "add_line"}
+
+# The fields each edit op can change. An edit naming none of them changes nothing; it is
+# reported as failed, never as applied (2026-11-25: "remove the old scenes" was proposed
+# as three edit_scene items with only a scene_id, applied twice, and the scenes stayed).
+EDIT_FIELDS = {
+    "edit_scene": ("title", "summary", "position", "refs", "locked"),
+    "edit_shot": ("title", "prompt", "seconds", "framing", "refs", "make", "position",
+                  "start_from", "opts", "scene_id", "image_id"),
+    "edit_ref": ("name", "description", "kind", "image_id", "speaker"),
+    "edit_clip": ("start_s", "trim_s", "duration_s", "gain_db", "fade_in", "fade_out",
+                  "use_in_video", "track", "name"),
+}
 
 
 def _guess_op(c: dict) -> str | None:
@@ -2732,6 +2859,15 @@ def apply_changes(project, user: auth.User, changes: list, guard: bool = False) 
     def rid(v):
         return keys.get(v, v) if isinstance(v, str) else v
 
+    def rref(v):
+        """A reference by key, id or name."""
+        if not isinstance(v, str):
+            return v
+        return keys.get(v) or resolve_ref(pid, v) or v
+
+    def rrefs(vs):
+        return [x for x in dict.fromkeys(rref(r) for r in vs or []) if x]
+
     done, failed = [], []
     for n, c in enumerate(changes):
       try:
@@ -2742,23 +2878,38 @@ def apply_changes(project, user: auth.User, changes: list, guard: bool = False) 
             locked = _locked_target(pid, c)
             if locked:
                 raise HTTPException(409, f"the scene “{locked}” is locked by you; left as it is")
+        if op in EDIT_FIELDS and not any(k in c for k in EDIT_FIELDS[op]):
+            what = op.split("_")[1]
+            raise HTTPException(400, f"nothing to change in this {op} (give the fields to change; "
+                                     f"to remove the {what}, use delete_{what})")
+        if op == "add_scene" and c.get("fill_empty"):
+            # The first scene of a breakdown fills the untouched "Scene 1" a new production
+            # starts with -- decided now, at apply, not when the proposal was written: two
+            # batches written against the same empty production both claimed it (2026-11-25).
+            only = scenes_of(pid)
+            if len(only) == 1 and not db.one("SELECT 1 FROM shots WHERE scene_id=?", (only[0]["id"],)) \
+                    and not (only[0]["summary"] or "").strip():
+                c = {**c, "op": "edit_scene", "scene_id": only[0]["id"]}
+                op = "edit_scene"
+                if c.get("key"):
+                    keys[c["key"]] = only[0]["id"]
         if op == "set_story":
             set_story(project, title=c.get("title"), story=c.get("story"), aspect=c.get("aspect"))
         elif op == "add_scene":
             keys[c.get("key") or f"scene{len(keys)}"] = add_scene(
                 project, c.get("title", ""), c.get("summary", ""), c.get("position"),
-                [rid(r) for r in c.get("refs") or []])
+                rrefs(c.get("refs")))
         elif op == "edit_scene":
             edit_scene(project, rid(c.get("scene_id")), c.get("title"), c.get("summary"),
                        c.get("position"),
-                       [rid(r) for r in c["refs"]] if isinstance(c.get("refs"), list) else None,
+                       rrefs(c["refs"]) if isinstance(c.get("refs"), list) else None,
                        c.get("locked") if not guard else None)
         elif op == "delete_scene":
             delete_scene(project, rid(c.get("scene_id")))
         elif op == "add_shot":
             keys[c.get("key") or f"shot{len(keys)}"] = add_shot(
                 project, rid(c.get("scene_id")), c.get("title", ""), c.get("prompt", ""),
-                c.get("seconds"), c.get("framing", ""), [rid(r) for r in c.get("refs") or []],
+                c.get("seconds"), c.get("framing", ""), rrefs(c.get("refs")),
                 c.get("make") or ("perform" if db.params_of(project).get("video_refs")
                                   else "animate"), c.get("position"), c.get("image_id"), user,
                 c.get("start_from", ""))
@@ -2768,7 +2919,7 @@ def apply_changes(project, user: auth.User, changes: list, guard: bool = False) 
             if "scene_id" in c:
                 fields["scene_id"] = rid(c["scene_id"])
             if fields.get("refs") is not None:
-                fields["refs"] = [rid(r) for r in fields["refs"]]
+                fields["refs"] = rrefs(fields["refs"])
             edit_shot(project, rid(c.get("shot_id")), **fields)
             if c.get("image_id"):
                 set_picture(project, user, rid(c["shot_id"]), c["image_id"])
@@ -2776,7 +2927,7 @@ def apply_changes(project, user: auth.User, changes: list, guard: bool = False) 
             delete_shot(project, rid(c.get("shot_id")))
         elif op == "add_line":
             add_script(project, rid(c.get("shot_id")), c.get("text", ""),
-                       rid(c.get("ref_id")) if c.get("ref_id") else None,
+                       rref(c.get("ref_id")) if c.get("ref_id") else None,
                        c.get("instruct") or c.get("delivery") or "", c.get("offset_s"))
         elif op == "use_frame":
             r = use_frame(project, user, rid(c.get("from_shot_id")), c.get("at", "last"),
@@ -2794,13 +2945,37 @@ def apply_changes(project, user: auth.User, changes: list, guard: bool = False) 
             set_mix(project, **{k: c.get(k) for k in ("dialogue", "ambience", "music", "shot",
                                                       "duck_db") if k in c})
         elif op == "add_ref":
-            keys[c.get("key") or f"ref{len(keys)}"] = add_ref(
-                project, c.get("kind", "character"), c.get("name", ""), c.get("description", ""),
-                c.get("image_id"), c.get("speaker"), user=user)
+            key = c.get("key") or f"ref{len(keys)}"
+            src = c.get("from_ref_id") or c.get("from_ref")
+            have = ref_by_name(pid, c.get("name", "")) if c.get("name") else None
+            if src:
+                keys[key] = import_ref(project, user, str(src))
+                # The story's own description wins over the copied one.
+                fix = {k: c[k] for k in ("description", "name") if c.get(k)}
+                if fix:
+                    edit_ref(project, keys[key], user=user, **fix)
+            elif have:
+                # Already here (another batch added it, or the person did): use that one and
+                # only fill what it lacks; the person's edits win.
+                keys[key] = have["id"]
+                fill = {k: c[k] for k in ("description", "speaker", "image_id")
+                        if c.get(k) and not have[k]}
+                if fill:
+                    edit_ref(project, have["id"], user=user, **fill)
+                done.append("add_ref(existing)")
+                continue
+            else:
+                keys[key] = add_ref(
+                    project, c.get("kind", "character"), c.get("name", ""),
+                    c.get("description", ""), c.get("image_id"), c.get("speaker"), user=user)
         elif op == "edit_ref":
-            edit_ref(project, rid(c.get("ref_id")), user=user,
+            target = rref(c.get("ref_id") or c.get("name"))
+            edit_ref(project, target, user=user,
                      **{k: c.get(k) for k in ("name", "description", "kind", "image_id",
-                                              "speaker") if k in c})
+                                              "speaker") if k in c and not
+                        (k == "name" and not c.get("ref_id"))})
+        elif op == "delete_ref":
+            delete_ref(project, rref(c.get("ref_id") or c.get("name")))
         done.append(op)
       except HTTPException as exc:
         failed.append(f"change {n + 1} ({c.get('op')}): {exc.detail}")
@@ -2942,6 +3117,23 @@ def state(project, base: str) -> dict:
     }
 
 
+STORY_FOR_AGENT = 60000     # characters; a 9:40 episode with its cast table is ~10,000
+
+
+def _story_for_agent(story: str | None) -> str:
+    """The WHOLE story for the planner (2026-11-25: it was cut at 2,500 characters, so the
+    planner never saw most of the script or the cast table: it invented three scenes,
+    "reconstructed" dialogue, drew Visnu golden-brown where the script said water-blue, and
+    the person had to paste the script into the chat)."""
+    text = (story or "").strip()
+    if not text:
+        return "Story: (none yet)"
+    if len(text) <= STORY_FOR_AGENT:
+        return f"Story (complete, {len(text)} characters):\n{text}\n(end of story)"
+    return (f"Story (the first {STORY_FOR_AGENT} of {len(text)} characters; ask the person "
+            f"for the rest if a scene you need is past this point):\n{text[:STORY_FOR_AGENT]}")
+
+
 def describe_for_agent(project_id: str, focus_shot: str | None = None) -> str:
     """The production as the planner reads it, compactly, with every id it needs."""
     project = db.one("SELECT * FROM projects WHERE id=?", (project_id,))
@@ -2955,7 +3147,7 @@ def describe_for_agent(project_id: str, focus_shot: str | None = None) -> str:
              f"{', rendered 16:9 and cropped to scope: keep action in the middle band' if aspect_of(params) == '2.39:1' else ''}"
              f", render: {project['status']} "
              f"{project['progress']}% {project['message'] or ''})",
-             f"Story: {(project['story'] or '(none yet)')[:2500]}"]
+             _story_for_agent(project["story"])]
     refs = db.query("SELECT * FROM prod_refs WHERE project_id=? ORDER BY idx", (project_id,))
     if refs:
         lines.append("References:")
@@ -2964,7 +3156,7 @@ def describe_for_agent(project_id: str, focus_shot: str | None = None) -> str:
                     "voice sample" if r["voice_path"] else
                     (f"speaker {r['speaker']}" if r["speaker"] else "no voice")]
             lines.append(f"- ref_id={r['id']} {r['kind']} \"{r['name']}\": "
-                         f"{r['description'][:200]} [{', '.join(bits)}]")
+                         f"{r['description'][:700]} [{', '.join(bits)}]")
     shots = ordered_shots(project_id)
     names = {r["id"]: r["name"] for r in refs}
     for sc in scenes_of(project_id):
@@ -2995,6 +3187,18 @@ def describe_for_agent(project_id: str, focus_shot: str | None = None) -> str:
     lines.append("Mix: " + ", ".join(f"{t} {mix[t]['gain_db']:g}dB{' muted' if mix[t]['mute'] else ''}"
                                      for t in ("dialogue", "ambience", "music", "shot")) +
                  f", music/ambience duck {mix['duck_db']:g}dB under dialogue")
+    try:
+        lib = library_matches(project, refs)
+    except Exception:                                              # noqa: BLE001
+        lib = []
+    if lib:
+        lines.append("Characters/places of the SAME NAME in the person's OTHER productions. Reuse "
+                     "one (add_ref{from_ref_id, description: the story's}) only if its look AGREES "
+                     "with this story (age, skin, hair, costume); otherwise add a fresh reference:")
+        for x in lib:
+            lines.append(f"- from_ref_id={x['ref_id']} \"{x['name']}\" ({x['kind']}, from "
+                         f"\"{x['production'][:40]}\"{', has picture' if x['has_picture'] else ''}): "
+                         f"{x['description'][:220]}")
     props = db.query("SELECT id, title FROM proposals WHERE project_id=? AND status='open'",
                      (project_id,))
     if props:
@@ -3046,16 +3250,16 @@ def storyboard_changes(project_id: str, args: dict) -> list:
     if args.get("story") or args.get("title"):
         changes.append({"op": "set_story", **({"story": args["story"]} if args.get("story") else {}),
                         **({"title": args["title"]} if args.get("title") else {})})
-    names: dict[str, str] = {r["name"].lower(): r["id"] for r in
+    names: dict[str, str] = {name_key(r["name"]): r["id"] for r in
                              db.query("SELECT id, name FROM prod_refs WHERE project_id=?",
                                       (project_id,))}
     for i, r in enumerate(args.get("refs") or args.get("characters") or []):
         if not isinstance(r, dict) or not r.get("name"):
             continue
-        if r["name"].lower() in names:
+        if name_key(r["name"]) in names:
             continue
         key = f"ref{i}"
-        names[r["name"].lower()] = key
+        names[name_key(r["name"])] = key
         kind = str(r.get("kind") or r.get("type") or "").lower()
         kind = {"place": "location", "setting": "location", "environment": "location",
                 "set": "location", "background": "location", "object": "prop", "item": "prop",
@@ -3063,27 +3267,23 @@ def storyboard_changes(project_id: str, args: dict) -> list:
         changes.append({"op": "add_ref", "key": key, "name": r["name"],
                         "kind": kind if kind in REF_KINDS else "character",
                         "description": r.get("description", ""),
+                        **({"from_ref_id": r["from_ref_id"]} if r.get("from_ref_id") else {}),
                         **({"speaker": r["speaker"]} if r.get("speaker") in speech.SPEAKERS else {})})
-    existing = scenes_of(project_id)
-    empty_first = existing and len(existing) == 1 and not db.one(
-        "SELECT 1 FROM shots WHERE scene_id=?", (existing[0]["id"],))
     for si, sc in enumerate(args.get("scenes") or []):
         if not isinstance(sc, dict):
             continue
-        cast = [names.get(str(n).lower(), n) for n in
+        cast = [names.get(name_key(n), n) for n in
                 (sc.get("refs") or sc.get("assets") or sc.get("characters") or [])]
-        if si == 0 and empty_first:
-            key = existing[0]["id"]               # fill the empty "Scene 1" instead of adding one
-            changes.append({"op": "edit_scene", "scene_id": key, "title": sc.get("title", ""),
-                            "summary": sc.get("summary", ""), "refs": cast})
-        else:
-            key = f"scene{si}"
-            changes.append({"op": "add_scene", "key": key, "title": sc.get("title", ""),
-                            "summary": sc.get("summary", ""), "refs": cast})
+        key = f"scene{si}"
+        # fill_empty: if, when this is APPLIED, the production still has only its untouched
+        # "Scene 1", that scene is used; otherwise the scene is added after the others.
+        changes.append({"op": "add_scene", "key": key, "title": sc.get("title", ""),
+                        "summary": sc.get("summary", ""), "refs": cast,
+                        **({"fill_empty": True} if si == 0 else {})})
         for hi, sh in enumerate(sc.get("shots") or []):
             if not isinstance(sh, dict):
                 continue
-            refs = [names.get(str(n).lower(), n) for n in sh.get("refs") or sh.get("characters") or []] \
+            refs = [names.get(name_key(n), n) for n in sh.get("refs") or sh.get("characters") or []] \
                 or cast
             lines = [d for d in (sh.get("dialogue") or sh.get("lines") or []) if isinstance(d, dict)
                      and (d.get("text") or d.get("line"))]
@@ -3098,7 +3298,7 @@ def storyboard_changes(project_id: str, args: dict) -> list:
                 who = str(d.get("speaker") or d.get("character") or "")
                 spoken += len(str(d.get("text") or d.get("line")).split()) / 2.6 + 0.7
             # A character speaking on camera: voice first, then the video from it.
-            on_camera = any(names.get(str(d.get("speaker") or d.get("character") or "").lower())
+            on_camera = any(names.get(name_key(d.get("speaker") or d.get("character") or ""))
                             in shot["refs"] for d in lines)
             if lines and on_camera:
                 shot["make"] = "lipsync"     # voice first, video from the voice (the person's rule)
@@ -3106,7 +3306,7 @@ def storyboard_changes(project_id: str, args: dict) -> list:
                 shot["seconds"] = min(30 if shot.get("make") == "lipsync" else 11, round(spoken + 0.5))
             changes.append(shot)
             for d in lines:
-                who = str(d.get("speaker") or d.get("character") or "").lower()
+                who = name_key(d.get("speaker") or d.get("character") or "")
                 changes.append({"op": "add_line", "shot_id": f"s{si}_{hi}",
                                 "ref_id": names.get(who), "text": d.get("text") or d.get("line"),
                                 "instruct": d.get("delivery") or d.get("instruct") or ""})
@@ -3183,10 +3383,23 @@ async def make_ref_picture(project, user: auth.User, ref_id: str, prompt: str = 
 
 async def _t_ref_picture(user, args, base):
     project = _agent_project(user, args)
-    image_id = await make_ref_picture(project, user, str(args.get("ref_id") or ""),
+    # By id or by NAME: a reference added earlier in the same plan has no id the planner knew
+    # (2026-11-25: "draw Teenage Bharata" was given newborn Bharata's id, so the newborn got a
+    # teenager's picture and the person saw "two characters in one").
+    want = str(args.get("ref") or args.get("name") or "").strip()
+    ref_id = resolve_ref(project["id"], want) if want else None
+    given = str(args.get("ref_id") or "")
+    if given and want and ref_id and given != ref_id:
+        given = ref_id                         # the name the planner meant wins over a stale id
+    ref_id = ref_id or resolve_ref(project["id"], given)
+    if not ref_id:
+        raise HTTPException(404, f"no reference called {want or given!r} in this production yet "
+                                 "(add it first, e.g. with propose_changes add_ref)")
+    image_id = await make_ref_picture(project, user, ref_id,
                                       str(args.get("prompt") or ""), args.get("model"))
     row = await images.wait(image_id, 60)
-    out = {"ref_id": args.get("ref_id"), "image_id": image_id, "status": row["status"]}
+    out = {"ref_id": ref_id, "name": _ref(project["id"], ref_id)["name"], "image_id": image_id,
+           "status": row["status"]}
     if row["status"] == "succeeded":
         out["image_url"] = base + service.stable_signed_path("image", image_id, 86400)
     return out
@@ -3288,15 +3501,13 @@ def _t_lines(user, args, base):
     """The script's lines onto existing shots, voiced automatically."""
     project = _agent_project(user, args)
     pid = project["id"]
-    names = {r["name"].lower(): r["id"] for r in
-             db.query("SELECT id, name FROM prod_refs WHERE project_id=?", (pid,))}
     added, problems, lipsync = 0, [], set()
     for i, ln in enumerate(args.get("lines") or []):
         if not isinstance(ln, dict) or not (ln.get("text") or ln.get("line")) or not ln.get("shot_id"):
             problems.append(f"line {i + 1}: needs shot_id and text")
             continue
         who = str(ln.get("speaker") or ln.get("character") or "").strip()
-        ref_id = names.get(who.lower())
+        ref_id = resolve_ref(pid, who)
         try:
             shot = _shot(pid, str(ln["shot_id"]))
             add_script(db.one("SELECT * FROM projects WHERE id=?", (pid,)), shot["id"],
@@ -3336,6 +3547,32 @@ def _t_apply(user, args, base):
     return {"applied": done, **({"skipped": problems[:10]} if problems else {})}
 
 
+async def _t_search(user, args, base):
+    from app import websearch
+    try:
+        return await websearch.search(str(args.get("query") or ""), args.get("count") or 6)
+    except Exception as exc:                                   # noqa: BLE001
+        raise HTTPException(502, f"search failed: {exc}")
+
+
+async def _t_read_page(user, args, base):
+    from app import websearch
+    try:
+        return await websearch.read_page(str(args.get("url") or ""), args.get("max_chars") or 6000)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    except Exception as exc:                                   # noqa: BLE001
+        raise HTTPException(502, f"could not read that page: {exc}")
+
+
+def _t_my_characters(user, args, base):
+    project = _agent_project(user, args)
+    found = library(user, project["id"], str(args.get("query") or ""), 30)
+    return {"characters": found,
+            "use": "add_ref {from_ref_id, name} (propose_changes or build_storyboard refs) copies "
+                   "one into this production with its pictures, views and voice"}
+
+
 async def _t_export(user, args, base):
     project = _agent_project(user, args)
     await export(project)
@@ -3369,8 +3606,12 @@ AGENT_TOOLS = {
                         "delete_shot{shot_id}; edit_clip{clip_id,start_s,trim_s,duration_s,"
                         "gain_db,fade_in,fade_out,use_in_video,track}; delete_clip{clip_id}; "
                         "set_mix{dialogue:{gain_db,mute},ambience:{..},music:{..},shot:{..},"
-                        "duck_db}; add_ref{key,kind,name,description,image_id,speaker}; "
-                        "edit_ref{ref_id,...}; add_line{shot_id,ref_id,text,instruct}. A new "
+                        "duck_db}; add_ref{key,kind,name,description,image_id,speaker,from_ref_id "
+                        "(copy one of the person's characters from another production)}; "
+                        "edit_ref{ref_id,...}; delete_ref{ref_id}; add_line{shot_id,ref_id,text,"
+                        "instruct}. REMOVING something is delete_scene/delete_shot/delete_ref/"
+                        "delete_clip -- an edit_* with no fields to change does nothing and fails. "
+                        "refs and ref_id may be given by the reference's NAME. A new "
                         "scene/shot/ref may be given a `key` and "
                         "used as its id later in the same list. framing: " +
                         "|".join(f for f in FRAMINGS if f) + ". make: animate (silent, picture "
@@ -3402,8 +3643,10 @@ AGENT_TOOLS = {
                        "this for breakdowns; one call per 1-3 scenes keeps each answer short."},
     "make_ref_picture": {
         "handler": _t_ref_picture,
-        "schema": {"type": "object", "required": ["project_id", "ref_id"], "properties": {
-            **_PID, "ref_id": {"type": "string"},
+        "schema": {"type": "object", "required": ["project_id"], "properties": {
+            **_PID, "ref": {"type": "string", "description": "the reference's NAME (preferred) "
+                                                           "or ref_id"},
+            "ref_id": {"type": "string"},
             "prompt": {"type": "string", "description": "default: from its name, kind, description"},
             "model": {"type": "string"}}},
         "description": "Make the picture for a character/place reference (its look for every "
@@ -3489,6 +3732,26 @@ AGENT_TOOLS = {
         "description": "Apply open proposals ONLY when the person has just said so in their own "
                        "words (\"apply\", \"approve\", \"go ahead\", \"yes, do it\"). Never on your "
                        "own initiative."},
+    "web_search": {
+        "handler": _t_search, "light": True,
+        "schema": {"type": "object", "required": ["query"], "properties": {
+            "query": {"type": "string"}, "count": {"type": "integer", "description": "1-10"}}},
+        "description": "Search the web (titles, links, snippets). Use it to check facts the "
+                       "story relies on but does not spell out: how a deity, historical figure, "
+                       "costume, weapon, place or period traditionally looks, a name's spelling, "
+                       "a custom. Then read_web_page for detail."},
+    "read_web_page": {
+        "handler": _t_read_page, "light": True,
+        "schema": {"type": "object", "required": ["url"], "properties": {
+            "url": {"type": "string"}, "max_chars": {"type": "integer"}}},
+        "description": "The text of one public web page (e.g. a web_search result)."},
+    "my_characters": {
+        "handler": _t_my_characters, "light": True,
+        "schema": {"type": "object", "required": ["project_id"], "properties": {
+            **_PID, "query": {"type": "string", "description": "a name or words of a description"}}},
+        "description": "The person's characters, places and voices from their OTHER productions "
+                       "(name, description, picture, which production). Reuse one with add_ref "
+                       "{from_ref_id} to keep a character the same across stories."},
     "export_film": {
         "handler": _t_export,
         "schema": {"type": "object", "required": ["project_id"], "properties": {**_PID}},
@@ -3729,6 +3992,31 @@ async def api_clip(pid: str, sid: str, request: Request):
     if not shot["clip_path"] or not Path(shot["clip_path"]).exists():
         raise HTTPException(404, "no clip yet")
     return FileResponse(shot["clip_path"], media_type="video/mp4")
+
+
+@router.get("/api/editor/{pid}/library")
+async def api_library(pid: str, request: Request, q: str = ""):
+    """The person's characters/places/voices from their other productions."""
+    user = _user(request)
+    production(user, pid)
+    base = service.base_url(request)
+    out = library(user, pid, q, 120)
+    for x in out:
+        x["image"] = (base + service.stable_signed_path("image", x["image_id"], 86400)
+                      if x["has_picture"] else None)
+        x["here"] = bool(ref_by_name(pid, x["name"]))
+    return {"items": out}
+
+
+@router.post("/api/editor/{pid}/refs/import")
+async def api_import_ref(pid: str, request: Request):
+    user = _user(request)
+    project = production(user, pid)
+    b = await _body(request)
+    ids = b.get("ref_ids") or ([b["ref_id"]] if b.get("ref_id") else [])
+    if not ids:
+        raise HTTPException(400, "pick at least one character")
+    return {"ids": [import_ref(project, user, str(i)) for i in ids[:30]]}
 
 
 @router.post("/api/editor/{pid}/refs")
