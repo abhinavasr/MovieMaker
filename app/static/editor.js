@@ -78,10 +78,33 @@
     timer = setTimeout(load, busy ? 2000 : 6000);
   }
 
+  // A visible "something is happening" while pictures are made (2026-11-25: "you need to show
+  // something going on! user will get frustrated and cancel everything").
+  function paintProgress() {
+    let el = $("progress-card");
+    const p = S.progress;
+    if (!p) { if (el) el.remove(); return; }
+    if (!el) { el = document.createElement("div"); el.id = "progress-card"; el.className = "ed-progress"; el.setAttribute("role", "status"); document.body.appendChild(el); }
+    const looks = (p.waiting_for_looks || []).length;
+    const fracShots = p.shots_total ? p.shots_done / p.shots_total : 0;
+    const allPics = p.pictures_done + p.pictures_pending;
+    const frac = Math.max(fracShots, allPics ? p.pictures_done / allPics : 0);
+    const st = p.stages || {};
+    const what = looks ? `⚠ Waiting for you to choose ${looks === 1 ? "a character" : "the characters"}: ${esc(p.waiting_for_looks.join(", "))}`
+      : (st.continuity || st.refs) && !p.pictures_done ? "🖼 Preparing — characters, places and the plan for each shot"
+      : "🖼 Drawing shot pictures";
+    const eta = p.eta_s ? (p.eta_s < 90 ? "about a minute left" : `about ${Math.round(p.eta_s / 60)} min left`) : "";
+    const since = p.since ? Math.max(0, Math.round((S.now - p.since) / 60)) : null;
+    el.innerHTML = `<div class="t">${what}</div>
+      <div class="bar ${looks ? "" : "live"}"><i style="width:${Math.round(Math.max(0.04, frac) * 100)}%"></i></div>
+      <div class="m">${p.shots_done} of ${p.shots_total} shots ready · ${p.pictures_done} picture${p.pictures_done === 1 ? "" : "s"} drawn${eta && !looks ? " · " + eta : ""}${p.queue > 1 && !looks ? ` · the GPU is working through ${p.queue} jobs` : ""}${since != null ? ` · started ${since} min ago` : ""}</div>
+      ${looks ? `<button type="button" class="ed-btn sm gold" id="pc-looks">Choose looks</button>` : ""}`;
+    if ($("pc-looks")) $("pc-looks").onclick = () => { const r = S.refs.find((x) => p.waiting_for_looks.includes(x.name)); if (r) refModal(r); };
+  }
   function paint() {
     if (document.activeElement !== $("ptitle")) $("ptitle").value = S.title;
     if (document.activeElement !== $("aspect")) $("aspect").value = S.aspect;
-    paintStory(); paintScenes(); paintRefs(); paintRender(); paintStopAI();
+    paintStory(); paintScenes(); paintRefs(); paintRender(); paintStopAI(); paintProgress();
     if (view === "assets") paintAssets();
     else { paintCrumbs(); if (!Player.playing) paintStage(); paintStrip(); }
     paintTimeline();

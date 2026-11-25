@@ -590,3 +590,13 @@ body:has(.ed) footer, body:has(.ed) .retention-note { display: none; }
 .ed-quick.pop button:hover { background: var(--panel-2); }
 #pane-agent .ws-status.idle { display: none; }
 @media (max-width: 520px) { .ed-scopebar .lbl { display: none; } }
+
+/* Progress card: visible whenever pictures are being made */
+.ed-progress { position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%); z-index: 60; width: min(520px, calc(100vw - 24px)); padding: 10px 14px; border-radius: 14px; background: var(--panel); border: 1px solid var(--gold); box-shadow: 0 14px 40px rgba(0,0,0,.5); font-size: .82rem; display: grid; gap: 6px; }
+.ed-progress .t { font-weight: 650; }
+.ed-progress .m { color: var(--muted); font-size: .76rem; }
+.ed-progress .bar { height: 6px; border-radius: 6px; background: var(--panel-3); overflow: hidden; position: relative; }
+.ed-progress .bar i { display: block; height: 100%; background: var(--gold); border-radius: 6px; transition: width .6s; }
+.ed-progress .bar.live::after { content: ""; position: absolute; inset: 0; background: linear-gradient(90deg, transparent, rgba(255,255,255,.25), transparent); animation: ws-ind 1.6s linear infinite; }
+.ed-progress button { justify-self: start; }
+@media (max-width: 780px) { .ed-progress { bottom: 74px; } }

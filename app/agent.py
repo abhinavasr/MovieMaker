@@ -216,7 +216,16 @@ def _studio_status(user, args, base):
             failed.append({"kind": label, key: r["id"], "error": (r["error"] or "")[:300]})
     queued = {t: db.one(f"SELECT COUNT(*) AS n FROM {t} WHERE status IN ('queued','generating')")
               ["n"] for t in gpuqueue.TABLES}
+    drawing = {}
+    for p in db.query("SELECT id, title FROM projects WHERE user_id=? AND params_json LIKE "
+                      "'%_auto_shots%'", (user.id,)):
+        prog = editor.drawing_progress(p["id"])
+        if prog:
+            drawing[p["title"]] = prog
     return {"video_renders_waiting": render.queue_depth(), "speech_music_voice_queue": queued,
+            # pictures being drawn per production (the GPU works through them one by one; do
+            # not ask again -- 2026-11-25 the planner re-triggered twice thinking nothing ran)
+            "pictures_being_drawn": drawing,
             "your_failures_last_24h": failed,
             "advice": "Read each error. Fix the cause (shorter scene, other model, smaller size, "
                       "missing picture) and re-run with the corrected call; retry_job re-queues a "

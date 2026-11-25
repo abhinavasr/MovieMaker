@@ -2079,12 +2079,67 @@ def prepare_render(project, user: auth.User, shot_ids: list[str] | None,
              and (shot_ids or needs_picture(pid, by_id[sid]))]
     if later:
         params = db.params_of(project)
-        jobs = [j for j in params.get("_auto_shots") or [] if j["shot"] not in later]
-        jobs += [{"shot": sid, "user": user.id, "stage": "continuity", "at": db.now(),
-                  "until": "picture"} for sid in later]
+        old = params.get("_auto_shots") or []
+        busy = {j["shot"] for j in old}
+        # A shot already being drawn keeps going: asking again used to restart it and throw
+        # away the pictures already queued (2026-11-25: the assistant asked three times).
+        jobs = list(old) + [{"shot": sid, "user": user.id, "stage": "continuity",
+                             "at": db.now(), "until": "picture"} for sid in later if sid not in busy]
         params["_auto_shots"] = jobs
+        new = [sid for sid in later if sid not in busy]
+        batch = params.get("_draw_batch") or {}
+        if new:
+            if not old:                       # a fresh batch: progress counts from here
+                batch = {"total": 0, "started": db.now()}
+            batch["total"] = int(batch.get("total") or 0) + len(new)
+            params["_draw_batch"] = batch
         db.set_params(pid, params)
     return [], later
+
+
+SECONDS_PER_PICTURE = 25          # measured on the 4090: ~10-30 s per klein / Qwen picture
+_wis_q = {"at": 0.0, "n": 0}
+
+
+def drawing_progress(pid: str) -> dict | None:
+    """What is being made for this production right now, for the person (a progress bar) and
+    the assistant (so it does not ask again). 2026-11-25, the person: "you need to show
+    something going on! user will get frustrated and cancel everything"."""
+    params = db.params_of(db.one("SELECT * FROM projects WHERE id=?", (pid,)))
+    jobs = params.get("_auto_shots") or []
+    if not jobs:
+        return None
+    stages: dict[str, int] = {}
+    pics_total = pics_done = 0
+    for j in jobs:
+        stages[j.get("stage") or "?"] = stages.get(j.get("stage") or "?", 0) + 1
+        for i in j.get("images") or []:
+            pics_total += 1
+            row = db.one("SELECT status FROM images WHERE id=?", (i,))
+            pics_done += bool(row and row["status"] == "succeeded")
+    batch = params.get("_draw_batch") or {}
+    total = max(int(batch.get("total") or 0), len(jobs))
+    pending_pics = sum(2 for j in jobs if j.get("stage") in ("continuity", "refs", "picture")
+                       and not j.get("images")) + (pics_total - pics_done)
+    waiting_looks = sorted({n for j in jobs for n in j.get("waiting_for") or []})
+    return {"shots_total": total, "shots_done": max(0, total - len(jobs)),
+            "stages": stages, "pictures_done": pics_done, "pictures_pending": pending_pics,
+            "queue": _wis_q["n"], "waiting_for_looks": waiting_looks,
+            "eta_s": int((_wis_q["n"] + pending_pics) * SECONDS_PER_PICTURE) if pending_pics else 0,
+            "since": batch.get("started")}
+
+
+async def refresh_wis_queue() -> None:
+    """WIS's queue length, at most every 10 s (shown as "the GPU is busy with N others")."""
+    if db.now() - _wis_q["at"] < 10:
+        return
+    _wis_q["at"] = db.now()
+    try:
+        h = await wis.health()
+        q = h.get("queue") or {}
+        _wis_q["n"] = int(q.get("running", 0)) + int(q.get("queued", 0))
+    except Exception:                                          # noqa: BLE001
+        pass
 
 
 def _agent_shot_extras(pid: str, s) -> str:
@@ -3702,6 +3757,7 @@ def state(project, base: str) -> dict:
         "mix": _mix(project), "duration": sum(s["seconds"] for s in shot_views),
         "proposals": props, "export": export_view, "ai": ai_activity(project),
         "agent_applies": bool(params.get("agent_applies")),
+        "progress": drawing_progress(pid),
         "image_model": params.get("image_model") or "",
         "wait_for_cast": params.get("wait_for_cast", True) is not False,
         "planner": cfg.PLANNER_MODEL,
@@ -3825,6 +3881,14 @@ def describe_for_agent(project_id: str, focus_shot: str | None = None, compact: 
     if props:
         lines.append("Open proposals (waiting for the person): " +
                      "; ".join(f"{p['id']} {p['title']}" for p in props))
+    prog = drawing_progress(project_id)
+    if prog:
+        lines.append(f"BEING MADE NOW (do NOT start it again; tell the person the progress): "
+                     f"{prog['shots_done']} of {prog['shots_total']} shot pictures done, "
+                     f"{prog['pictures_done']} pictures drawn, ~{prog['pictures_pending']} to go"
+                     + (f", about {max(1, prog['eta_s'] // 60)} min" if prog['eta_s'] else "")
+                     + (f"; waiting for the person to choose {', '.join(prog['waiting_for_looks'])}"
+                        if prog["waiting_for_looks"] else ""))
     if params.get("image_model"):
         lines.append(f"Pictures are drawn with {params['image_model']} (the person's choice for this "
                      "production): don't pass another model unless they ask.")
@@ -4095,8 +4159,12 @@ async def _t_refvid(user, args, base):
 
 async def _t_draw(user, args, base):
     project = _agent_project(user, args)
+    before = {j["shot"] for j in db.params_of(project).get("_auto_shots") or []}
     _, later = prepare_render(project, user, args.get("shot_ids") or None, "pictures")
+    already = [s for s in later if s in before]
     return {"project_id": project["id"], "drawing": len(later),
+            **({"already_in_progress": len(already),
+                "progress": drawing_progress(project["id"])} if already else {}),
             "note": "characters' and places' pictures and views, then each shot's picture; "
                     "no videos are made (render_shots is a separate step the person asks for)"}
 
@@ -4547,6 +4615,7 @@ async def api_state(pid: str, request: Request):
     project = production(user, pid)
     await refresh_pending(pid)
     await _refresh_refs(pid)
+    await refresh_wis_queue()
     return state(project, service.base_url(request))
 
 
