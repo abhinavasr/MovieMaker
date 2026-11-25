@@ -1255,7 +1255,8 @@ def _shot_context(pid: str, shot) -> str:
 
 
 async def picture_options(project, user: auth.User, shot_id: str, prompt: str = "",
-                          count: int = 2, model: str | None = None) -> list[str]:
+                          count: int = 2, model: str | None = None,
+                          check: bool = True) -> list[str]:
     """Pictures for a shot, made with its references as sources so characters stay
     the same people. The person picks one (or the assistant does)."""
     pid = project["id"]
@@ -1263,15 +1264,26 @@ async def picture_options(project, user: auth.User, shot_id: str, prompt: str = 
     count = max(1, min(4, int(count or 2)))
     if shot["make"] in REMAKE_MAKES and not prompt.strip():
         return await remake_picture_options(project, user, shot, count)
+    from app import shotpics
+    plan = None
+    if not prompt.strip():
+        # The local planner writes the picture as a STILL and says who is in it (shotpics).
+        plan = shotpics.cached(pid, shot)
+        if plan is None and cfg.PROMPT_POLISH:
+            try:
+                await shotpics.plan_many(pid, [shot_id])
+            except Exception as exc:                           # noqa: BLE001
+                log.warning("picture plan for %s: %s", shot_id, exc)
+            plan = shotpics.cached(pid, _shot(pid, shot_id))
     framing = {"EWS": "extreme wide shot", "WS": "wide shot", "MS": "medium shot",
                "MCU": "medium close-up", "CU": "close-up", "ECU": "extreme close-up",
                "OTS": "over-the-shoulder shot", "POV": "point-of-view shot",
                "2S": "two-shot", "INSERT": "insert shot"}.get(shot["framing"], "")
-    text = prompt.strip() or " ".join(x for x in (framing, shot["title"], shot["prompt"],
-                                                  _shot_context(pid, shot)) if x)
+    text = prompt.strip() or (plan or {}).get("prompt") or " ".join(
+        x for x in (framing, shot["prompt"], _shot_context(pid, shot)) if x)
     if not text:
         raise HTTPException(400, "describe the picture, or give the shot a title and prompt")
-    sources, who = _ref_sources(user, pid, _jl(shot["refs"], []))
+    sources, who = shotpics.sources_for(user, pid, shot, plan, text)
     if who:
         text += " " + who
     params = db.params_of(project)
@@ -1279,8 +1291,34 @@ async def picture_options(project, user: auth.User, shot_id: str, prompt: str = 
     for i in range(count):
         ids.append(await images.create(user, text[:1900], sources,
                                        orientation=params.get("orientation", "portrait"),
-                                       model=model))
+                                       model=shotpics.option_model(i, model), seed=shotpics.seed()))
+    if check and cfg.PROMPT_POLISH:
+        asyncio.create_task(_check_options_later(pid, shot_id, ids))
     return ids
+
+
+async def _check_options_later(pid: str, shot_id: str, ids: list[str]) -> None:
+    """When the options are drawn, the planner looks at them; its verdict goes on the
+    proposal ("⭐ option 2 fits best ...") so the person sees it beside the pictures."""
+    from app import shotpics
+    try:
+        for i in ids:
+            await images.wait(i, 600)
+        res = await shotpics.judge(pid, _shot(pid, shot_id), ids)
+        if not res:
+            return
+        n = ids.index(res["best"]) + 1
+        bits = [f"⭐ The assistant's pick: option {n} ({res['scores'][res['best']]:.0f}/10)"]
+        for k, i in enumerate(ids):
+            if i != res["best"] and res["fails"].get(i):
+                bits.append(f"option {k + 1}: {'; '.join(res['fails'][i][:2])}")
+        prop = db.one("SELECT id FROM proposals WHERE project_id=? AND options LIKE ?",
+                      (pid, f"%{ids[0]}%"))
+        if prop:
+            db.run("UPDATE proposals SET summary=? WHERE id=?", (" · ".join(bits)[:500], prop["id"]))
+            _touch(pid)
+    except Exception as exc:                                   # noqa: BLE001
+        log.warning("checking picture options for %s: %s", shot_id, exc)
 
 
 CONTINUITY_RULES = """You are a film editor. For each shot after the first, decide whether it is
@@ -1537,6 +1575,19 @@ async def _run_auto_shots() -> None:
         keep, to_render = [], {}
         checked: set = set()
         drawing: set = set()
+        if cfg.PROMPT_POLISH:
+            # Plan every waiting shot's picture in ONE turn of the planner model, rather
+            # than loading it once per shot (shotpics.plan_many skips planned ones).
+            need = [j["shot"] for j in jobs if (row := db.one(
+                "SELECT asset_id, make, start_from FROM shots WHERE id=?", (j["shot"],)))
+                and not row["asset_id"] and row["make"] not in REMAKE_MAKES
+                and row["start_from"] != "prev_last"]
+            if need:
+                from app import shotpics
+                try:
+                    await shotpics.plan_many(pid, need)
+                except Exception as exc:                       # noqa: BLE001
+                    log.warning("planning pictures for %s: %s", pid, exc)
         for j in jobs:
             shot = db.one("SELECT * FROM shots WHERE id=?", (j["shot"],))
             user = agent.load_user(j["user"])
@@ -1580,16 +1631,31 @@ async def _run_auto_shots() -> None:
                         j["stage"] = "picture" if not shot["asset_id"] else "render"
                 if j["stage"] == "picture" and shot["asset_id"]:
                     j["stage"] = "render"                  # the person set one meanwhile
-                elif j["stage"] == "picture" and not j.get("image"):
-                    j["image"] = (await picture_options(proj, user, shot["id"], "", 1))[0]
+                elif j["stage"] == "picture" and not j.get("images"):
+                    # Two options from two models, the planner picks (shotpics).
+                    j["images"] = await picture_options(proj, user, shot["id"], "", 2, check=False)
                 elif j["stage"] == "picture":
-                    row = await images.refresh(j["image"])
-                    if row["status"] == "succeeded":
-                        set_picture(proj, user, shot["id"], j["image"])
-                        j["stage"] = "render"
-                    elif row["status"] in ("failed", "cancelled"):
-                        log.warning("picture for %s failed; dropped", shot["id"])
+                    rows = [await images.refresh(i) for i in j["images"]]
+                    if any(r["status"] not in images.TERMINAL for r in rows):
+                        pass                                    # still drawing
+                    elif not any(r["status"] == "succeeded" for r in rows):
+                        log.warning("pictures for %s failed; dropped", shot["id"])
                         continue
+                    else:
+                        from app import shotpics
+                        res = await shotpics.judge(pid, shot, j["images"]) if cfg.PROMPT_POLISH else None
+                        best = res["best"] if res else next(r["id"] for r in rows
+                                                            if r["status"] == "succeeded")
+                        if res and res["scores"][best] < shotpics.PASS_SCORE and not j.get("retried"):
+                            # Neither fits: two more, and the best of all four is kept.
+                            j["retried"] = 1
+                            j["images"] = j["images"] + await picture_options(
+                                proj, user, shot["id"], "", 2, check=False)
+                        else:
+                            set_picture(proj, user, shot["id"], best)
+                            log.info("picture for %s: %s%s", shot["id"], best,
+                                     f" ({res['scores'][best]:.0f}/10)" if res else "")
+                            j["stage"] = "render"
                 if j["stage"] == "render":
                     if j.get("until") == "picture":
                         continue                   # step 1 only: the person starts the videos

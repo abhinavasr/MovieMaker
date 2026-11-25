@@ -968,6 +968,71 @@
     }
   }
 
+  // ------------------------------------------------------------------ review a proposal
+  // 2026-11-25, the person: "clicking on review should simply launch a clear place to review
+  // the change" -- it used to jump to the Shot tab, where the proposal often wasn't shown.
+  const FIELD = {title: "Title", prompt: "What happens", seconds: "Seconds", framing: "Framing", make: "Use case",
+    refs: "Characters & places", start_from: "Opening picture", scene_id: "Scene", position: "Position", opts: "Settings"};
+  const showVal = (k, v) => k === "make" ? (USES.find((u) => u.make === v)?.title || v)
+    : k === "refs" ? (v || []).map((r) => refById(r)?.name || r).join(", ") || "none"
+    : k === "framing" ? (v ? v + " · " + (FRAMING[v] || "") : "—")
+    : k === "start_from" ? (v === "prev_last" ? "last frame of the previous shot" : "its own picture")
+    : k === "scene_id" ? (sceneById(v)?.title || v) : typeof v === "object" ? JSON.stringify(v) : String(v ?? "");
+  function reviewChanges(p) {
+    const keyTitle = {};                       // new scenes, by their key, for grouping
+    p.changes.forEach((c) => { if (c.op === "add_scene" && c.key) keyTitle[c.key] = c.title; });
+    const groups = [], byScene = {};
+    const group = (name) => byScene[name] || (byScene[name] = (groups.push({name, items: []}), groups[groups.length - 1]));
+    for (const c of p.changes) {
+      if (c.op === "add_scene") { group(`🎬 New scene: ${c.title || "untitled"}`).items.push(
+        `<div class="rv-sum">${esc(c.summary || "")}${(c.refs || []).length ? `<div class="rv-meta">With: ${esc((c.refs || []).map((r) => refById(r)?.name || r).join(", "))}</div>` : ""}</div>`); continue; }
+      if (c.op === "add_shot") {
+        const g = keyTitle[c.scene_id] ? `🎬 New scene: ${keyTitle[c.scene_id]}` : `🎬 ${sceneById(c.scene_id)?.title || "Shots"}`;
+        group(g).items.push(`<div class="rv-shot"><div class="rv-h"><b>${esc(c.title || "New shot")}</b><span>${esc([c.framing, c.seconds ? c.seconds + " s" : "", c.make && c.make !== "animate" ? MAKE[c.make]?.[0] : ""].filter(Boolean).join(" · "))}</span></div>
+          ${c.prompt ? `<div class="rv-p">${esc(c.prompt)}</div>` : ""}${(c.dialogue || []).length ? `<div class="rv-meta">Lines: ${(c.dialogue || []).map((d) => `<i>${esc(d.speaker || "")}</i> “${esc(d.text || d.line || "")}”`).join(" · ")}</div>` : ""}</div>`); continue; }
+      if (c.op === "edit_shot") {
+        const sh = shotById(c.shot_id);
+        const rows = Object.keys(c).filter((k) => !["op", "shot_id", "key"].includes(k)).map((k) =>
+          `<tr><th>${FIELD[k] || esc(k)}</th><td class="was">${esc(sh ? showVal(k, sh[k]) : "")}</td><td class="now">${esc(showVal(k, c[k]))}</td></tr>`).join("");
+        group(`✏️ Shot “${sh ? sh.title || "shot " + sh.n : c.shot_id}”`).items.push(`<table class="rv-diff"><thead><tr><th></th><th>Now</th><th>Proposed</th></tr></thead><tbody>${rows}</tbody></table>`); continue; }
+      if (c.op === "add_ref") { group("👤 New characters & places").items.push(`<div class="rv-shot"><div class="rv-h"><b>${esc(c.name)}</b><span>${esc(c.kind || "")}</span></div><div class="rv-p">${esc(c.description || "")}</div></div>`); continue; }
+      group("Other changes").items.push(`<div class="rv-p">${describeChange(c)}</div>`);
+    }
+    return groups.map((g) => `<section class="rv-group"><h3>${esc(g.name)}</h3>${g.items.join("")}</section>`).join("");
+  }
+  function openReview(id) {
+    const p = S.proposals.find((x) => x.id === id);
+    if (!p) { toast("That proposal has already been applied or dismissed"); return; }
+    const pick = () => pickedOption[p.id] || p.options.find((o) => o.status === "succeeded")?.image_id;
+    const sh = p.shot_id ? shotById(p.shot_id) : null;
+    const optsHtml = () => p.options.length ? `<div class="rv-opts">${p.options.map((o, i) => `<button type="button" class="rv-opt ${pick() === o.image_id ? "on" : ""}" data-rvopt="${o.image_id}" ${o.status !== "succeeded" ? "disabled" : ""}>
+        ${o.status === "succeeded" ? `<img src="${esc(o.url)}" alt="option ${i + 1}">` : `<span>${o.status === "failed" ? "failed" : "drawing…"}</span>`}<em>Option ${i + 1}</em></button>`).join("")}</div>
+        <div class="ed-note">Tap the picture to use.</div>` : "";
+    const n = p.changes.length;
+    modal(`<div class="rv"><div class="rv-top"><h2>✦ ${esc(p.title)}</h2><button class="ed-btn ghost icon" data-act="close" aria-label="Close">✕</button></div>
+      ${sh ? `<div class="rv-meta">For shot “${esc(sh.title || "shot " + sh.n)}”</div>` : ""}
+      ${p.summary ? `<div class="rv-sumtop">${esc(p.summary)}</div>` : ""}
+      ${optsHtml()}
+      ${n ? `<div class="rv-count">${n} change${n === 1 ? "" : "s"}</div>${reviewChanges(p)}` : ""}
+      <div class="acts rv-acts"><button class="ed-btn ghost" data-act="dismiss">Dismiss</button><span style="flex:1"></span>
+        <button class="ed-btn" data-act="apply">Apply</button><button class="ed-btn gold" data-act="applygen" title="Apply, then make the videos of the shots it touches">Apply & make videos</button></div></div>`,
+      async (act) => {
+        if (act === "close") return true;
+        if (act === "dismiss") { await api(`/api/editor/${PID}/proposals/${p.id}/dismiss`, {}); toast("Dismissed"); load(true); return true; }
+        if (act === "apply" || act === "applygen") {
+          const opt = pick() || null;
+          if (p.options.length && !opt) { toast("The pictures are still being made"); return false; }
+          try { const r = await api(`/api/editor/${PID}/proposals/${p.id}/apply`, {option: opt, render: act === "applygen"});
+            toast((r.rendering ? `Applied — making ${r.rendering.length} video(s)` : "Applied") + (r.failed?.length ? ` · ${r.failed.length} skipped: ${r.failed[0]}` : "")); load(true); return true;
+          } catch (e) { toast(e.message); return false; }
+        }
+        return false;
+      });
+    $("sheet").classList.add("wide", "review");
+    $("sheet").addEventListener("click", (e) => { const b = e.target.closest("[data-rvopt]"); if (!b) return;
+      pickedOption[p.id] = b.dataset.rvopt; $("sheet").querySelectorAll("[data-rvopt]").forEach((x) => x.classList.toggle("on", x === b)); });
+  }
+
   function proposalsHtml() {
     const props = S.proposals.slice().sort((a, b) => (b.shot_id === sel.shot) - (a.shot_id === sel.shot));
     if (!props.length) return "";
@@ -983,7 +1048,7 @@
         ${p.summary ? `<div class="sum">${esc(p.summary)}</div>` : ""}${live}
         ${p.changes.length ? `<ul>${p.changes.map((c) => `<li>${describeChange(c)}</li>`).join("")}</ul>` : ""}
         ${opts ? `<div class="opts">${opts}</div>` : ""}
-        <div class="acts three"><button class="ed-btn ghost" data-dismiss="${p.id}" title="Dismiss">✕</button><button class="ed-btn" data-apply="${p.id}">Apply</button><button class="ed-btn gold" data-applygen="${p.id}" title="Apply, then render the shots it touches">Apply & generate</button></div></div>`;
+        <div class="acts three"><button class="ed-btn ghost" data-dismiss="${p.id}" title="Dismiss">✕</button><button class="ed-btn" data-review="${p.id}">Review</button><button class="ed-btn gold" data-applygen="${p.id}" title="Apply, then render the shots it touches">Apply & generate</button></div></div>`;
     }).join("") + "</div>";
   }
 
@@ -1047,6 +1112,7 @@
       paintInspector(); });
     pane.querySelectorAll("[data-goto]").forEach((b) => b.onclick = () => selectShot(b.dataset.goto));
     pane.querySelectorAll("[data-dismiss]").forEach((b) => b.onclick = async () => { await api(`/api/editor/${PID}/proposals/${b.dataset.dismiss}/dismiss`, {}); load(true); });
+    pane.querySelectorAll("[data-review]").forEach((b) => b.onclick = () => openReview(b.dataset.review));
     const apply = async (id, render) => {
       const p = S.proposals.find((x) => x.id === id);
       const opt = pickedOption[id] || p.options.find((o) => o.status === "succeeded")?.image_id || null;
@@ -1102,7 +1168,7 @@
 
   // ------------------------------------------------------------------ modal helper
   function modal(html, onAct) {
-    $("sheet").innerHTML = html; $("sheet").classList.remove("wide"); $("modal").hidden = false;
+    $("sheet").innerHTML = html; $("sheet").classList.remove("wide", "review"); $("modal").hidden = false;
     $("sheet").onclick = async (e) => { const b = e.target.closest("[data-act]"); if (!b) return; const done = await onAct(b.dataset.act); if (done !== false) $("modal").hidden = true; };
   }
   $("modal").addEventListener("click", (e) => { if (e.target === $("modal")) $("modal").hidden = true; });
@@ -1201,7 +1267,7 @@
   }
   $("propbar").addEventListener("click", async (e) => {
     const rv = e.target.closest("[data-pb-review]"), ap = e.target.closest("[data-pb-apply]"), all = e.target.closest("[data-pb-all]");
-    if (rv) { setTab("shot"); $("pane-shot").scrollTop = 0; document.querySelector(`.ed-prop[data-p="${rv.dataset.pbReview}"]`)?.scrollIntoView({block: "start"}); return; }
+    if (rv) { openReview(rv.dataset.pbReview); return; }
     const ids = all ? S.proposals.map((p) => p.id) : ap ? [ap.dataset.pbApply] : [];
     if (!ids.length) return;
     e.target.disabled = true; let done = 0; const failed = [];
