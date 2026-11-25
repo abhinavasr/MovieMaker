@@ -1130,8 +1130,13 @@ sentence why, without calling the tool."""
 
 
 async def _executor_fix(thread_id: str, step: dict, schema: dict, draft: dict,
-                        problem: str, results: dict) -> dict | None:
-    """Ask the small CPU model for a corrected call. None = it gave up."""
+                        problem: str, results: dict, turn: "GpuTurn | None" = None
+                        ) -> tuple[dict | None, str]:
+    """A corrected call: by the planner itself on the GPU while this turn still holds it
+    (2026-11-25: a set_scenes repair took ~35 s on the CPU model while the 27B had just been
+    unloaded), otherwise by the small CPU model. Returns (args or None, model used)."""
+    on_gpu = bool(turn and turn.held)
+    model = cfg.PLANNER_MODEL if on_gpu else cfg.EXECUTOR_MODEL
     name = step["tool"]
     earlier = "\n".join(f"#{n}: {_digest(r, 500)}" for n, r in sorted(results.items())[-8:])
     files = ", ".join(f"F{f['num']}={f['name']} ({f['kind']})"
@@ -1140,20 +1145,26 @@ async def _executor_fix(thread_id: str, step: dict, schema: dict, draft: dict,
               f"Step: {step.get('why', '')}\nTool: {name}\nDraft arguments: "
               f"{json.dumps(draft, ensure_ascii=False)}\nProblem: {problem}\n\n"
               f"Earlier results:\n{earlier or '(none)'}")
-    _activity(thread_id, f"executor ({cfg.EXECUTOR_MODEL}, CPU) is working out {name}")
+    _activity(thread_id, f"{'planner' if on_gpu else 'executor'} ({model}, "
+                         f"{'GPU' if on_gpu else 'CPU'}) is working out {name}")
+    options = ({"num_ctx": 16384, "temperature": 0.2} if on_gpu else
+               {"num_gpu": 0, "num_thread": cfg.EXECUTOR_THREADS,
+                "num_ctx": cfg.EXECUTOR_CTX, "temperature": 0.2})
     try:
+        if on_gpu:
+            await turn.renew()
         result = await _ollama("/api/chat", {
-            "model": cfg.EXECUTOR_MODEL, "stream": False, "think": False, "keep_alive": "5m",
+            "model": model, "stream": False, "think": False,
+            "keep_alive": "10m" if on_gpu else "5m",
             "messages": [{"role": "system", "content": EXECUTOR_RULES},
                          {"role": "user", "content": prompt}],
             "tools": [{"type": "function", "function": {
                 "name": name, "description": tools()[name]["description"][:1500],
                 "parameters": schema}}],
-            "options": {"num_gpu": 0, "num_thread": cfg.EXECUTOR_THREADS,
-                        "num_ctx": cfg.EXECUTOR_CTX, "temperature": 0.2}}, timeout=600)
+            "options": options}, timeout=600)
     except Exception as exc:                                   # noqa: BLE001
-        log.warning("executor failed: %s", exc)
-        return None
+        log.warning("executor (%s) failed: %s", model, exc)
+        return None, model
     for call in (result.get("message") or {}).get("tool_calls") or []:
         fn = call.get("function") or {}
         if fn.get("name") == name:
@@ -1161,8 +1172,8 @@ async def _executor_fix(thread_id: str, step: dict, schema: dict, draft: dict,
             if isinstance(args, str):
                 args = _parse_json(args)
             if isinstance(args, dict):
-                return args
-    return None
+                return args, model
+    return None, model
 
 
 def _watch_key(name: str, args: dict, result: dict) -> tuple[str, str] | None:
@@ -1232,8 +1243,12 @@ def _see(thread_id: str, kind: str, item_id: str, preview: bytes | None = None) 
         _views[thread_id].append((label, preview))
 
 
-async def _execute(thread, user, steps: list[dict], plan_seq: int = 0) -> tuple[int, bool]:
-    """Run planned steps. Returns (failed_count, produced_results_to_review)."""
+async def _execute(thread, user, steps: list[dict], plan_seq: int = 0,
+                   turn: "GpuTurn | None" = None) -> tuple[int, bool]:
+    """Run planned steps. Returns (failed_count, produced_results_to_review).
+    The GPU turn is handed back just before the first HEAVY step (they queue in WIS behind
+    the planner's own lease otherwise); until then a step that needs fixing is fixed by the
+    planner on the GPU."""
     tid = thread["id"]
     results = _step_results(tid)
     tracked = _tracked(_thread(tid))
@@ -1247,6 +1262,9 @@ async def _execute(thread, user, steps: list[dict], plan_seq: int = 0) -> tuple[
                   result={"error": f"there is no tool called {name}"})
             failed += 1
             continue
+        if name in HEAVY and turn is not None and turn.held:
+            _activity(tid, "handing the GPU back for the work")
+            await turn.release()
         schema = tools()[name]["schema"]
         draft = _resolve(step.get("args") or {}, results)
         if tools()[name].get("editor") and thread["project_id"] and not draft.get("project_id"):
@@ -1265,12 +1283,13 @@ async def _execute(thread, user, steps: list[dict], plan_seq: int = 0) -> tuple[
                 result = {"error": "; ".join(problems)[:1500]}
                 break
             if problems:
-                fixed = await _executor_fix(tid, step, schema, args, "; ".join(problems), results)
+                fixed, model = await _executor_fix(tid, step, schema, args, "; ".join(problems),
+                                                   results, turn)
                 if fixed is None:
                     result = {"error": "the executor could not build a valid call: "
                                        + "; ".join(problems)}
                     break
-                fixed_by = cfg.EXECUTOR_MODEL
+                fixed_by = model
                 args, problems = _validate(_resolve(fixed, results), schema)
                 if problems:
                     continue
@@ -1391,10 +1410,7 @@ async def _turn(thread_id: str) -> None:
                 break
             plan_seq = _post(thread_id, "plan", "", steps=[
                 {"tool": s.get("tool"), "why": s.get("why", "")} for s in steps])
-            if any(s.get("tool") in HEAVY for s in steps):
-                _activity(thread_id, "handing the GPU back for the work")
-                await turn.release()
-            failed, produced = await _execute(thread, user, steps, plan_seq)
+            failed, produced = await _execute(thread, user, steps, plan_seq, turn)
             if failed:
                 fixes = (_thread(thread_id)["corrections"] or 0) + 1
                 _set(thread_id, corrections=fixes)
