@@ -600,10 +600,17 @@ body:has(.ed) footer, body:has(.ed) .retention-note { display: none; }
 .ed-progress .bar.live::after { content: ""; position: absolute; inset: 0; background: linear-gradient(90deg, transparent, rgba(255,255,255,.25), transparent); animation: ws-ind 1.6s linear infinite; }
 .ed-progress button { justify-self: start; }
 @media (max-width: 780px) { .ed-progress { bottom: 74px; } }
-/* Phone: the progress card is a slim strip just above the tab bar, not covering the controls */
+/* Small pill unless opened (tap / ✕): it never blocks the view ("Blocked view on mobile") */
+.ed-progress { cursor: pointer; }
+.ed-progress .mini { display: none; }
+.ed-progress:not(.open) { width: auto; left: auto; right: 12px; transform: none; padding: 5px 12px; border-radius: 999px; }
+.ed-progress:not(.open) .full { display: none; }
+.ed-progress:not(.open) .mini { display: inline; font-size: .76rem; font-weight: 600; white-space: nowrap; }
+.ed-progress .t { display: flex; justify-content: space-between; gap: 10px; }
+.ed-progress .x { color: var(--muted); font-weight: 400; }
 @media (max-width: 780px) {
-  .ed-progress { top: calc(var(--hdr, 50px) + 52px); bottom: auto; width: calc(100vw - 16px); padding: 6px 10px; gap: 4px; border-radius: 10px; font-size: .74rem; opacity: .97; }
-  .ed-progress .m { font-size: .68rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .ed-progress .bar { height: 4px; }
+  .ed-progress { top: calc(var(--hdr, 50px) + 56px); bottom: auto; }
+  .ed-progress.open { width: calc(100vw - 16px); font-size: .74rem; }
+  .ed-progress:not(.open) { right: 8px; padding: 4px 10px; }
 }
 .ed-stage .empty .spin { display: inline-block; width: 26px; height: 26px; border-radius: 50%; border: 3px solid var(--line); border-top-color: var(--gold); animation: ws-spin .9s linear infinite; }
