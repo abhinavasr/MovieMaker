@@ -41,6 +41,13 @@ UPLOAD_LINK_TTL = 3600
 
 INSTRUCTIONS = """Story Studio turns pictures plus a story into a video on a single GPU.
 
+CHARACTERS FIRST (storyboards): set_characters (each with the story's description, a voice \
+brief, and goes_with = their outfit/object props and the film's style) -> draw_characters -> \
+show the person the pictures and let them choose (choose_looks; their own picture also counts) \
+-> set_scenes with each scene's `characters` (and `wear` where an outfit or object changes) -> \
+draw_scene_pictures -> render_video. Nothing is made with a character before their look is \
+chosen. edit_picture changes part of a picture and keeps the rest.
+
 A project is made one of two ways, and `update_project` can switch it:
 - storyboard = WITH scenes. One picture per scene, each animated for a few seconds, joined \
 into one film. Silent unless a soundtrack was uploaded. Each scene has its own prompt, which \
@@ -135,6 +142,13 @@ def _scenes(project_id: str, images: list) -> list[dict]:
         vids = editor._ref_video_items(project_id, s)
         if vids:
             d["video"] = vids[0][0]
+        nm = {r["id"]: r["name"] for r in db.query("SELECT id, name FROM prod_refs WHERE project_id=?", (project_id,))}
+        own = [nm[x] for x in json.loads(s["refs"] or "[]") if x in nm]
+        if own:
+            d["characters"] = own
+        w = json.loads(s["opts"] or "{}").get("wear") or {}
+        if w:
+            d["wear"] = {nm.get(k, k): [nm.get(x, x) for x in v] for k, v in w.items()}
         opts = json.loads(s["opts"] or "{}")
         if opts.get("speakers"):
             d["voices"] = len([x for x in opts["speakers"] if x.get("clip")])
@@ -185,6 +199,11 @@ def _describe(project_id: str, base: str) -> dict:
     }
     if not single:
         out["scenes"] = _scenes(project_id, images)
+        chars = db.query("SELECT name, kind, approved FROM prod_refs WHERE project_id=? ORDER BY idx", (project_id,))
+        if chars:
+            out["characters"] = [f"{c['name']} ({c['kind']}"
+                                 f"{', look not chosen yet' if c['kind'] == 'character' and not c['approved'] else ''})"
+                                 for c in chars]
     if project["error"]:
         out["error"] = project["error"]
     video = _video_url(project, base)
@@ -202,9 +221,15 @@ def _status(project_id: str, base: str) -> dict:
     if project["error"]:
         out["error"] = project["error"]
     if project["mode"] == "storyboard":
+        from app import editor
         out["scenes"] = [{"scene": i + 1, "status": s["status"],
+                          **({"has_picture": True} if s["asset_id"] else {}),
                           **({"error": s["error"]} if s["error"] else {})}
                          for i, s in enumerate(service.shots_of(project_id))]
+        prog = editor.drawing_progress(project_id)
+        if prog:
+            out["pictures"] = {k: prog[k] for k in ("shots_done", "shots_total", "pictures_done",
+                                                     "pictures_pending", "eta_s", "waiting_for_looks")}
     video = _video_url(project, base)
     if video:
         out["video_url"] = video
@@ -419,6 +444,14 @@ def _set_scenes(user, args, base):
     # Use cases: one model per job (the same list as the editor's "What happens in this shot?").
     shots = service.shots_of(project["id"])
     for s in scenes:
+        if s.get("characters") is not None or s.get("wear") is not None:
+            shot = shots[int(s["scene"]) - 1]
+            if s.get("characters") is not None:
+                editor.edit_shot(project, shot["id"], refs=[
+                    r for r in (editor.resolve_ref(project["id"], str(n)) for n in s["characters"]) if r])
+            if isinstance(s.get("wear"), dict):
+                editor.apply_changes(project, user, [{"op": "edit_shot", "shot_id": shot["id"],
+                                                      "wear": s["wear"]}])
         if s.get("use_case") is None and s.get("opts") is None:
             continue
         if s.get("use_case") is not None and s["use_case"] not in USE_CASES:
@@ -491,6 +524,216 @@ async def _set_scene_voice(user, args, base):
         raise HTTPException(400, "give speech_id, music_id or audio_url")
     out = editor.set_speaker_audio(project, shot["id"], index, name or "voice.wav", raw)
     return {**out, **_describe(project["id"], base)}
+
+
+# --------------------------------------------------------------------------- characters
+# The same characters, props, styles, designed voices, looks and outfits as the studio's editor
+# (2026-11-25, the person: "am assuming all these capabilities are available over MCP also?").
+
+def _char_view(pid: str, r, base: str) -> dict:
+    from app import editor
+    names = {x["id"]: x["name"] for x in db.query("SELECT id, name FROM prod_refs WHERE project_id=?", (pid,))}
+    out = {"name": r["name"], "kind": r["kind"], "description": r["description"] or ""}
+    if r["image_id"]:
+        row = db.one("SELECT status FROM images WHERE id=?", (r["image_id"],))
+        out["picture"] = row["status"] if row else "gone"
+        if row and row["status"] == "succeeded":
+            out["picture_url"] = base + service.stable_signed_path("image", r["image_id"], 86400)
+            out["image_id"] = r["image_id"]
+    else:
+        out["picture"] = "none yet"
+    goes = [names.get(x, x) for x in editor.linked_ids(pid, r["id"])]
+    if goes:
+        out["goes_with"] = goes
+    if r["kind"] in ("character", "voice"):
+        out["voice"] = ("designed" if r["voice_text"] and r["voice_path"] else
+                        "sample" if r["voice_path"] else f"preset {r['speaker']}" if r["speaker"] else
+                        "being designed" if r["voice_job"] else "not yet (designed when chosen)")
+        if r["voice_design"]:
+            out["voice_brief"] = r["voice_design"]
+    if r["kind"] == "character":
+        out["look_chosen"] = bool(r["approved"]) or not editor.waits_for_looks(pid)
+    return out
+
+
+def _list_characters(user, args, base):
+    from app import editor
+    project = _project(user, args)
+    rows = db.query("SELECT * FROM prod_refs WHERE project_id=? ORDER BY idx", (project["id"],))
+    waiting = [r["name"] for r in rows if r["kind"] == "character" and not r["approved"]]
+    out = {"project_id": project["id"], "characters": [_char_view(project["id"], r, base) for r in rows]}
+    if waiting and editor.waits_for_looks(project["id"]):
+        out["next"] = (f"show the person {', '.join(waiting)} (picture_url) and ask whether the looks "
+                       "are right; when they say so call choose_looks. Until then no scene picture, "
+                       "voice or video is made with them.")
+    return out
+
+
+async def _set_characters(user, args, base):
+    """Add or change characters, places, props and styles by name."""
+    from app import editor
+    project = _project(user, args)
+    pid = project["id"]
+    items = args.get("characters") or []
+    if not isinstance(items, list):
+        raise HTTPException(400, "characters must be a list of {name, kind, description, ...}")
+    changes = []
+    for c in items:
+        if not isinstance(c, dict) or not str(c.get("name") or "").strip():
+            raise HTTPException(400, "every character needs a name")
+        image_id = c.get("image_id")
+        if c.get("picture_url"):
+            name, _ctype, raw = await _fetch_public(str(c["picture_url"]), 30 * 1024 * 1024)
+            image_id = editor._import_picture(user, name or "picture.png", raw)
+        have = editor.ref_by_name(pid, c["name"])
+        if have:
+            op = {"op": "edit_ref", "ref_id": have["id"],
+                  **{k: c[k] for k in ("description", "speaker", "kind") if c.get(k)},
+                  **({"name": c["rename"]} if c.get("rename") else {}),
+                  **({"voice_design": c["voice"]} if c.get("voice") else {})}
+        else:
+            op = {"op": "add_ref", "name": c["name"], "kind": c.get("kind") or "character",
+                  **{k: c[k] for k in ("description", "speaker") if c.get(k)},
+                  **({"voice": c["voice"]} if c.get("voice") else {})}
+        if image_id:
+            op["image_id"] = image_id
+        if isinstance(c.get("goes_with"), list):
+            op["with"] = c["goes_with"]
+        changes.append(op)
+    for n in args.get("remove") or []:
+        rid = editor.resolve_ref(pid, str(n))
+        if rid:
+            changes.append({"op": "delete_ref", "ref_id": rid})
+    res = editor.apply_changes(project, user, changes, guard=True)
+    for c in items:                       # a picture the person gave chooses that look
+        if c.get("image_id") or c.get("picture_url"):
+            rid = editor.resolve_ref(pid, c.get("rename") or c["name"])
+            if rid:
+                editor.approve_refs(pid, [rid])
+    out = _list_characters(user, {"project_id": pid}, base)
+    if res.get("failed"):
+        out["not_applied"] = res["failed"]
+    return out
+
+
+async def _draw_characters(user, args, base):
+    """Pictures for characters/places/props/styles that have none (or `again`)."""
+    from app import editor
+    project = _project(user, args)
+    pid = project["id"]
+    want = [editor.resolve_ref(pid, str(n)) for n in args.get("names") or []] or \
+        [r["id"] for r in db.query("SELECT id, image_id FROM prod_refs WHERE project_id=? "
+                                   "AND kind IN ('character','location','prop','style')", (pid,))
+         if not r["image_id"] or args.get("again")]
+    want = [w for w in want if w]
+    started = []
+    for rid in want:
+        await editor.make_ref_picture(project, user, rid,
+                                      str(args.get("prompt") or "") if len(want) == 1 else "",
+                                      args.get("model"))
+        started.append(editor._ref(pid, rid)["name"])
+    out = _list_characters(user, {"project_id": pid}, base)
+    out["drawing"] = started
+    out["next"] = ("pictures take 10-30 s each; call list_characters to see them (picture_url), "
+                   "then show the person and ask them to choose") if started else "nothing to draw"
+    return out
+
+
+def _choose_looks(user, args, base):
+    from app import editor
+    project = _project(user, args)
+    pid = project["id"]
+    names = args.get("characters") or []
+    ids = [editor.resolve_ref(pid, str(n)) for n in names] if names else \
+        [r["id"] for r in db.query("SELECT id, kind, approved FROM prod_refs WHERE project_id=?", (pid,))
+         if r["kind"] == "character" and not r["approved"]]
+    n = editor.approve_refs(pid, [i for i in ids if i])
+    out = _list_characters(user, {"project_id": pid}, base)
+    out["chosen"] = n
+    return out
+
+
+async def _design_voice(user, args, base):
+    from app import editor
+    project = _project(user, args)
+    out = await editor._t_design_voice(user, {"project_id": project["id"],
+                                             "ref": args.get("character"), "voice": args.get("voice")}, base)
+    return {**out, "next": "call list_characters in ~30 s; the character's lines are voiced again in it"}
+
+
+async def _edit_picture(user, args, base):
+    """Edited versions of a scene's or a character's picture; use_picture puts one in place."""
+    from app import editor
+    project = _project(user, args)
+    ins = str(args.get("instruction") or "")
+    if args.get("scene"):
+        shot = _scene_shot(project, args)
+        ids = await editor.edit_picture(user, editor._shot_picture_path(project["id"], shot), ins,
+                                        int(args.get("count") or 2), args.get("model"))
+    elif args.get("character"):
+        rid = editor.resolve_ref(project["id"], str(args["character"]))
+        if not rid:
+            raise HTTPException(404, "no such character")
+        ids = await editor.edit_ref_picture(project, user, rid, ins, int(args.get("count") or 2),
+                                            args.get("model"))
+    else:
+        raise HTTPException(400, "give scene (a number) or character (a name)")
+    rows = [await images.wait(i, IMAGE_CALL_BUDGET / max(1, len(ids))) for i in ids]
+    return {"options": [_image_view(r, base, preview=True) for r in rows],
+            "next": "show the person the options; use_picture puts the chosen image_id in place "
+                    "(get_image if one is still generating)"}
+
+
+def _use_picture(user, args, base):
+    from app import editor
+    project = _project(user, args)
+    image_id = str(args.get("image_id") or "")
+    if args.get("scene"):
+        shot = _scene_shot(project, args)
+        editor.set_picture(project, user, shot["id"], image_id)
+    elif args.get("character"):
+        rid = editor.resolve_ref(project["id"], str(args["character"]))
+        if not rid:
+            raise HTTPException(404, "no such character")
+        editor.edit_ref(project, rid, user=user, image_id=image_id)
+        editor.approve_refs(project["id"], [rid])      # the person picked it: the look is chosen
+    else:
+        raise HTTPException(400, "give scene (a number) or character (a name)")
+    return _describe(project["id"], base)
+
+
+def _draw_scene_pictures(user, args, base):
+    """Each scene's picture, drawn from its characters and place (two options, the best kept)."""
+    from app import editor
+    project = _project(user, args)
+    shots = service.shots_of(project["id"])
+    only = [shots[int(n) - 1]["id"] for n in (args.get("scenes") or []) if 1 <= int(n) <= len(shots)]
+    _, later = editor.prepare_render(project, user, only or None, "pictures")
+    out = _status(project["id"], base)
+    out["drawing_scenes"] = len(later)
+    out["next"] = ("drawn in the background, one picture at a time (~25 s each): call get_status "
+                   "for progress; scenes whose characters' looks are not chosen wait for "
+                   "choose_looks")
+    return out
+
+
+async def _share_to_batiyao(user, args, base):
+    from app import batiyao
+    if not batiyao.enabled():
+        raise HTTPException(503, "Batiyao sharing is not set up on this studio")
+    st = batiyao.link_of(user.id)
+    if not st or not st["access_token"] or \
+            not {"write:media", "write:post"} <= set((st["scopes"] or "").split()):
+        return {"connected": False,
+                "next": f"the person connects Batiyao once in their browser: "
+                        f"{base}/auth/batiyao/connect?next=/studio , then ask again"}
+    kind = str(args.get("kind") or "")
+    item = str(args.get("id") or "")
+    if kind == "project":
+        kind = "film" if db.params_of(_project(user, {"project_id": item})).get("editor") else "project"
+    return await batiyao.share(user, kind, item, str(args.get("mode") or "post"),
+                               str(args.get("text") or ""), str(args.get("rating") or "sfw"),
+                               "", bool(args.get("confirm_spend")))
 
 
 async def _render_video(user, args, base):
@@ -1043,6 +1286,12 @@ TOOLS = [
                                            "description": "What happens in this scene; each "
                                            "is made by the model built for it (see the server "
                                            "instructions)."},
+                              "characters": {"type": "array", "items": {"type": "string"},
+                                             "description": "the characters/places/objects in this "
+                                                            "scene, by name (set_characters)"},
+                              "wear": {"type": "object", "description": "what a character wears/"
+                                       "carries in THIS scene when it differs from their usual: "
+                                       "{\"Abhi\": [\"Abhi's kurta\"]}; null goes back to usual"},
                               "opts": {"type": "object", "description": "layout (talk2), who "
                                        "(recast: who is replaced), change (restyle)",
                                        "properties": {"layout": {"type": "string", "enum": [
@@ -1367,6 +1616,83 @@ TOOLS = [
                             "language": {"type": "string"},
                             "delivery": {"type": "string", "description": "e.g. calm and slow"}},
           ["voice_id", "text"]),
+    _tool("list_characters", "List characters",
+          "Storyboard only. The project's characters, places, props (outfits, objects) and styles: "
+          "description, picture (picture_url), what goes with them, their voice, and whether the "
+          "person has chosen the look.",
+          _list_characters, _PID, ["project_id"], read_only=True),
+    _tool("set_characters", "Add or change characters",
+          "Storyboard only. Add or change characters, places, props and styles by name. Give each "
+          "character the story's own description (age, skin, hair, clothes), a `voice` brief "
+          "(gender, age, pitch, timbre, pace, accent) -- their own voice is designed from it -- "
+          "and `goes_with`: the props (outfit, objects) and style that always come with them. A "
+          "picture the person gives (image_id or picture_url) is their look; a character sheet "
+          "(several views side by side) is cut into views automatically.",
+          _set_characters,
+          {**_PID, "characters": {"type": "array", "items": {"type": "object", "properties": {
+              "name": {"type": "string"},
+              "kind": {"type": "string", "enum": ["character", "location", "prop", "style", "voice"]},
+              "description": {"type": "string"}, "voice": {"type": "string"},
+              "goes_with": {"type": "array", "items": {"type": "string"}},
+              "image_id": {"type": "string"}, "picture_url": {"type": "string"},
+              "speaker": {"type": "string", "description": "a preset voice instead of a designed one"},
+              "rename": {"type": "string"}},
+              "required": ["name"], "additionalProperties": False}},
+           "remove": {"type": "array", "items": {"type": "string"}}},
+          ["project_id"]),
+    _tool("draw_characters", "Draw characters",
+          "Storyboard only. Pictures for the characters, places, props and styles that have none "
+          "(or `names`, or `again` to redraw). Then show them to the person and ask them to "
+          "choose: nothing else is made with a character until choose_looks.",
+          _draw_characters,
+          {**_PID, "names": {"type": "array", "items": {"type": "string"}},
+           "again": {"type": "boolean"}, "prompt": {"type": "string"}, "model": {"type": "string"}},
+          ["project_id"]),
+    _tool("choose_looks", "Choose characters' looks",
+          "Record that the person has chosen these characters' looks (omit `characters` for all "
+          "of them). Call it ONLY when the person said so. Until then no scene picture, voice or "
+          "video is made with a character.",
+          _choose_looks,
+          {**_PID, "characters": {"type": "array", "items": {"type": "string"}}}, ["project_id"]),
+    _tool("design_voice", "Design a character's voice",
+          "Design (or redesign) a character's own voice from a voice brief (or their "
+          "description). Their lines are voiced again in it.",
+          _design_voice,
+          {**_PID, "character": {"type": "string"}, "voice": {"type": "string"}},
+          ["project_id", "character"]),
+    _tool("edit_picture", "Edit a picture",
+          "Change something in a scene's picture (scene) or a character's picture (character) "
+          "and keep everything else: say only what changes ('she is not smiling', 'evening "
+          "light'). Returns options; use_picture puts the chosen one in place.",
+          _edit_picture,
+          {**_PID, "scene": {"type": "integer", "minimum": 1}, "character": {"type": "string"},
+           "instruction": {"type": "string"}, "count": {"type": "integer", "minimum": 1, "maximum": 3},
+           "model": {"type": "string"}},
+          ["project_id", "instruction"]),
+    _tool("use_picture", "Use a picture",
+          "Put an image (an edit_picture option, a generate_image result) in as a scene's picture "
+          "or a character's picture (that also chooses the character's look).",
+          _use_picture,
+          {**_PID, "image_id": {"type": "string"}, "scene": {"type": "integer", "minimum": 1},
+           "character": {"type": "string"}},
+          ["project_id", "image_id"]),
+    _tool("draw_scene_pictures", "Draw scene pictures",
+          "Storyboard only. Draw each scene's picture (or `scenes`) from its characters, their "
+          "outfits and its place: two options per scene, the better one kept. Runs in the "
+          "background; get_status shows progress. No video is made.",
+          _draw_scene_pictures,
+          {**_PID, "scenes": {"type": "array", "items": {"type": "integer"}}}, ["project_id"]),
+    _tool("share_to_batiyao", "Share to Batiyao",
+          "Share a finished item to the person's Batiyao: kind project (its film), image, speech "
+          "or music. mode post (text up to 500 characters, no #hashtags; COSTS the person 1.0 "
+          "BuckBuck -- confirm_spend only after they agreed) or story (free; a picture or a video "
+          "up to 30 s; safe for everyone).",
+          _share_to_batiyao,
+          {"kind": {"type": "string", "enum": ["project", "image", "speech", "music"]},
+           "id": {"type": "string"}, "mode": {"type": "string", "enum": ["post", "story"]},
+           "text": {"type": "string"}, "rating": {"type": "string", "enum": ["sfw", "suggestive", "nsfw"]},
+           "confirm_spend": {"type": "boolean"}},
+          ["kind", "id", "mode"]),
     _tool("get_voice_job", "Check a voice job",
           "A resing/song/speech job: when it has succeeded, audio_url and stems (links work for "
           "7 days; files are deleted after 90 days).",
