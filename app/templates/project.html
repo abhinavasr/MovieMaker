@@ -26,7 +26,8 @@
   <h2>Your video</h2>
   <video controls playsinline preload="metadata" src="/projects/{{ p.id }}/video"></video>
   <p><a class="btn primary" href="/projects/{{ p.id }}/video?download=1">Download MP4</a>
-     <span class="muted">{% if p.has_audio %}with sound{% else %}silent{% endif %}</span></p>
+     <span class="muted">{% if p.has_audio %}with sound{% else %}silent{% endif %}</span>
+     {% if batiyao_on() %}<button class="btn" type="button" data-bt-share="project:{{ p.id }}">Share to Batiyao</button>{% endif %}</p>
 </div>
 {% endif %}
 

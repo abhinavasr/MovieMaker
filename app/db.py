@@ -381,6 +381,40 @@ CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+-- Batiyao (batiyao.com) accounts linked to studio users: sign-in and sharing. Tokens are
+-- encrypted at rest (app/batiyao.py) and never sent to the browser.
+CREATE TABLE IF NOT EXISTS batiyao_links (
+    user_id       TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    bt_user_id    TEXT NOT NULL UNIQUE,
+    username      TEXT NOT NULL DEFAULT '',
+    display_name  TEXT NOT NULL DEFAULT '',
+    access_token  TEXT NOT NULL DEFAULT '',
+    refresh_token TEXT NOT NULL DEFAULT '',
+    scopes        TEXT NOT NULL DEFAULT '',
+    expires_at    REAL NOT NULL DEFAULT 0,
+    created_at    REAL NOT NULL,
+    updated_at    REAL NOT NULL
+);
+-- One row per sign-in in flight (PKCE verifier + state), kept 15 minutes.
+CREATE TABLE IF NOT EXISTS batiyao_pending (
+    state      TEXT PRIMARY KEY,
+    verifier   TEXT NOT NULL,
+    purpose    TEXT NOT NULL,              -- login | connect
+    user_id    TEXT,
+    next       TEXT NOT NULL DEFAULT '/',
+    created_at REAL NOT NULL
+);
+-- What was shared, for the person's own record and support.
+CREATE TABLE IF NOT EXISTS batiyao_shares (
+    id         TEXT PRIMARY KEY,
+    user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    kind       TEXT NOT NULL,
+    item_id    TEXT NOT NULL,
+    mode       TEXT NOT NULL,              -- post | story
+    status     TEXT NOT NULL,
+    result     TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL
+);
 """
 
 

@@ -308,6 +308,7 @@ mediaPage({
       ${r.style ? `<details><summary>Style it was made in</summary><pre>${esc(r.style)}</pre></details>` : ''}
       <div class="actions">
         ${it.audio ? `<a class="btn tiny" href="${it.audio}?download=1">Download</a>
+          ${window.BATIYAO_ON ? `<button class="btn tiny" type="button" data-bt-share="music:${it.id}">Share</button>` : ''}
           <button class="btn tiny" data-edit="${it.id}" title="Open the lyrics and style in the editor">Edit &amp; regenerate</button>
           <button class="btn tiny" data-remix="${it.id}" title="Cover, repaint, extract stems…">Remix</button>
           <button class="btn tiny" data-ref="${it.id}" title="Use as a sound reference for a new song">Use its sound</button>` : ''}

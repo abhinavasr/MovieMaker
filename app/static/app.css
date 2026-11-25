@@ -249,3 +249,8 @@ progress { width: 100%; max-width: 420px; height: 10px; vertical-align: middle; 
   .top nav a:hover { background: var(--panel-2); }
   .retention-note { font-size: .74rem; padding: 6px 12px; text-align: left; }
 }
+
+/* Continue with Batiyao (login) */
+.bt-login { display: block; text-align: center; margin: 6px 0 8px; }
+.muted.or { display: flex; align-items: center; gap: 10px; margin: 16px 0 6px; }
+.muted.or::before, .muted.or::after { content: ""; flex: 1; border-top: 1px solid var(--line, #333); }

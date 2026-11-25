@@ -29,6 +29,7 @@
 <script>try{if(localStorage.getItem('retnote-hidden')){var n=document.getElementById('retnote');n&&n.remove();}}catch(e){}</script>{% endif %}
 <main>{% block body %}{% endblock %}</main>
 <footer>Generated on a local GPU · pictures and video via WIS, speech with Qwen3-TTS, music with ACE-Step 1.5</footer>
+{% if user and batiyao_on() %}<script>window.BATIYAO_ON=true</script><script src="/static/batiyao-share.js?v={{ asset_v }}" defer></script>{% endif %}
 {% block scripts %}{% endblock %}
 </body>
 </html>

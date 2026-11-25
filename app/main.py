@@ -23,7 +23,7 @@ from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
                                PlainTextResponse, RedirectResponse)
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from app import (agent, agentfiles, auth, editor, db, gpuqueue, images, mcp, music, oauth, render, service, speech, styles,
+from app import (agent, agentfiles, auth, batiyao, editor, db, gpuqueue, images, mcp, music, oauth, render, service, speech, styles,
                  voices, wis)
 from app.config import cfg
 
@@ -38,6 +38,7 @@ templates.env.globals["keep_a_copy"] = service.keep_a_copy_note
 
 from app.main_assets import ASSET_V  # noqa: E402
 templates.env.globals["asset_v"] = ASSET_V
+templates.env.globals["batiyao_on"] = lambda: batiyao.enabled()
 
 
 
@@ -126,6 +127,7 @@ app.include_router(voices.router)
 app.include_router(styles.router)
 app.include_router(agent.router)
 app.include_router(editor.router)
+app.include_router(batiyao.router)
 
 
 async def _reap_loop() -> None:
@@ -253,7 +255,11 @@ async def assistant_page(request: Request):
 async def login_form(request: Request, error: str = ""):
     if auth.current_user(request) is not None:
         return RedirectResponse("/", status_code=303)
-    return templates.TemplateResponse("login.html", {"request": request, "error": error})
+    msg = {"cancelled": "Batiyao sign-in was cancelled.",
+           "batiyao": "Batiyao sign-in did not complete; try again.",
+           "disabled": "This account is disabled or has expired."}.get(error, error)
+    return templates.TemplateResponse("login.html", {"request": request, "error": msg,
+                                                     "next": request.query_params.get("next", "")})
 
 
 @app.post("/login")

@@ -205,6 +205,7 @@
       ${ex.url ? `<video src="${esc(ex.url)}" controls style="width:100%;max-height:50dvh;border-radius:10px;background:#000"></video>` : ""}
       <div class="acts">
         ${ex.url ? `<a class="ed-btn" href="${esc(ex.url)}&download=1">⤓ Download MP4</a>` : ""}
+        ${ex.url && window.BATIYAO_ON ? `<button class="ed-btn" type="button" data-bt-share="film:${PID}">Share to Batiyao</button>` : ""}
         ${missing.length ? `<button class="ed-btn" data-act="render" title="Uses the video model, for shots that have a picture">🎬 Make ${missing.length} missing video(s) first</button>` : ""}
         <button class="ed-btn gold" data-act="mix">${ex.url ? "Mix again" : "Mix the film"}</button>
         <button class="ed-btn ghost" data-act="close">Close</button></div>`, async (act) => {
@@ -969,7 +970,7 @@
         ${gen("music", "🎵", "Music", "score for this scene")}
         ${gen("sfx", "🌧", "SFX / ambience", "a soundscape under this scene")}
       </div></div>
-      <div class="ed-group" style="display:flex;gap:6px;flex-wrap:wrap"><button class="ed-btn sm" id="ins-upload">⤒ Upload picture</button>${sh.clip ? `<a class="ed-btn sm" href="${esc(sh.clip)}" download>⤓ Clip</a>` : ""}<button class="ed-btn sm" id="ins-ask">✨ Ask about this shot</button></div>`;
+      <div class="ed-group" style="display:flex;gap:6px;flex-wrap:wrap"><button class="ed-btn sm" id="ins-upload">⤒ Upload picture</button>${sh.clip ? `<a class="ed-btn sm" href="${esc(sh.clip)}" download>⤓ Clip</a>` : ""}${window.BATIYAO_ON && (sh.clip || sh.picture) ? `<button class="ed-btn sm" type="button" data-bt-share="${sh.clip ? "shot" : "shotpic"}:${PID}:${sh.id}">↗ Share</button>` : ""}<button class="ed-btn sm" id="ins-ask">✨ Ask about this shot</button></div>`;
   }
 
   function genForm(key, sh) {

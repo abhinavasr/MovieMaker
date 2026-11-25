@@ -52,6 +52,7 @@
         </a>
         {% if p.status == 'succeeded' %}
           <a class="btn tiny" href="/projects/{{ p.id }}/video?download=1">Download</a>
+          {% if batiyao_on() %}<button class="btn tiny" type="button" data-bt-share="project:{{ p.id }}">Share</button>{% endif %}
         {% endif %}
       </li>
     {% endfor %}

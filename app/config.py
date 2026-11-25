@@ -96,6 +96,18 @@ class Config:
     # the tunnel and is what lets the same build be tested on 127.0.0.1.
     PUBLIC_URL = _s("STUDIO_PUBLIC_URL").rstrip("/")
 
+    # --- Batiyao (batiyao.com): sign in with Batiyao, share to Batiyao ---
+    # Register the studio at batiyao.com -> Settings -> Developer -> Register an app, with the
+    # redirect URI <public url>/auth/batiyao/callback. The client ID is public (PKCE, no
+    # secret). Empty = the Batiyao buttons are hidden.
+    BATIYAO_CLIENT_ID = _s("STUDIO_BATIYAO_CLIENT_ID")
+    BATIYAO_API = _s("STUDIO_BATIYAO_API", "https://api.batiyao.com").rstrip("/")
+    # Fernet key that encrypts Batiyao tokens at rest; without it Batiyao stays off. Generate:
+    #   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+    BATIYAO_TOKEN_KEY = _s("STUDIO_BATIYAO_TOKEN_KEY")
+    # A first Batiyao sign-in makes a studio account (the person's choice, 2026-11-25).
+    BATIYAO_AUTO_ACCOUNTS = _s("STUDIO_BATIYAO_AUTO_ACCOUNTS", "1") not in ("0", "false", "no")
+
     # --- limits ---
     MAX_UPLOAD_MB = _i("STUDIO_MAX_UPLOAD_MB", 16)
     MAX_STORYBOARD_SHOTS = _i("STUDIO_MAX_STORYBOARD_SHOTS", 12)

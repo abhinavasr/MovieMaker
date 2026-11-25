@@ -319,6 +319,7 @@ mediaPage({
       ${it.voice === 'clone' && it.reference_text ? `<details><summary>Transcript of the clip it used</summary><pre>${esc(it.reference_text)}</pre></details>` : ''}
       <div class="actions">
         ${it.audio ? `<a class="btn tiny" href="${it.audio}?download=1">Download</a>` : ''}
+        ${it.audio && window.BATIYAO_ON ? `<button class="btn tiny" type="button" data-bt-share="speech:${it.id}">Share</button>` : ''}
         ${p.seed != null && it.status === 'succeeded' ? `<button class="btn tiny" data-seed="${p.seed}" title="Put this seed in Fine-tune">Reuse seed</button>` : ''}
         ${projectPicker('speech', it, projects)}
         ${it.status !== 'generating' ? `<button class="btn tiny danger" data-delete="${it.id}">Delete</button>` : ''}
