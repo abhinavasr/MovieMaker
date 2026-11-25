@@ -624,6 +624,14 @@
     } else if (making) {
       const n = making.options.length, done = making.options.filter((o) => o.status === "succeeded").length;
       st.innerHTML = `<div class="gen"><span class="spin"></span><b>Making ${n} picture option${n === 1 ? "" : "s"}…</b><span class="ed-note">${done} of ${n} ready · ${Math.max(0, Math.round(S.now - making.created_at))} s · they appear in the panel on the right</span></div>${mk}`;
+    } else if (sh.auto && !sh.picture) {
+      // Being drawn already: say so, and offer no "Generate" (pressing it started duplicates).
+      const step = {continuity: "checking how it follows the previous shot", refs: "drawing its characters and places first",
+        looks: "waiting for you to choose the characters", picture: "drawing two options; the assistant picks the better one",
+        render: "picture ready"}[sh.auto] || "in progress";
+      st.innerHTML = `<div class="empty"><b>${sh.auto === "looks" ? "⚠ Waiting for your character choice" : "🖼 Drawing this shot's picture…"}</b><span>${esc(step.charAt(0).toUpperCase() + step.slice(1))}.${S.progress && S.progress.eta_s && sh.auto !== "looks" ? ` The whole batch: about ${Math.max(1, Math.round(S.progress.eta_s / 60))} min.` : ""}</span>
+        ${sh.auto === "looks" ? `<div class="row"><button class="ed-btn gold" id="stage-looks">Choose looks</button></div>` : `<div class="row"><span class="spin"></span></div>`}</div>${mk}`;
+      if ($("stage-looks")) $("stage-looks").onclick = () => { const r = S.refs.find((x) => (S.progress?.waiting_for_looks || []).includes(x.name)); if (r) refModal(r); };
     } else if (!sh.needs_picture) {
       const why = {recast: "The action comes from the video: its frame is redrawn with your characters when the video is made (or now, with 🖼).", restyle: "The action comes from the video: its frame is redrawn with the change when the video is made (or now, with 🖼).", motion: "The moves come from the video and the character's own picture says who performs.", perform: "The video is made from the characters' and places' pictures (and reference videos)."}[sh.make] || "";
       st.innerHTML = `<div class="empty"><b>No starting picture needed</b><span>${why} You can still add one.</span>
