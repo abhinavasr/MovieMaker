@@ -467,3 +467,58 @@ body:has(.ed) footer, body:has(.ed) .retention-note { display: none; }
 .el-seg { position: relative; overflow: hidden; }
 .el { overflow-x: clip; }
 .el-row { flex-wrap: wrap; }
+
+/* ======================================================================= phones
+   2026-11-25, the person: "Reimagine the entire navigation of studio for mobile, very
+   non-responsive. User cannot scroll." One section at a time, picked from a bottom tab
+   bar; the page itself never scrolls and each section is the ONLY scroll area, so no
+   nested scroller can trap a finger. */
+.ed-mtabs { display: none; }
+@media (max-width: 780px) {
+  body:has(.ed) { overflow: hidden; }
+  body:has(.ed) footer { display: none; }
+  .ed { height: calc(100dvh - var(--hdr, 50px) - 58px - env(safe-area-inset-bottom)); min-height: 0;
+        overflow: hidden; grid-template-rows: auto minmax(0, 1fr); }
+  .ed-mtabs { display: grid; grid-template-columns: repeat(5, 1fr); position: fixed; left: 0; right: 0; bottom: 0;
+              z-index: 50; height: calc(58px + env(safe-area-inset-bottom)); padding-bottom: env(safe-area-inset-bottom);
+              background: #101114; border-top: 1px solid var(--line); }
+  .ed-mtabs button { background: none; border: 0; color: var(--muted); font: inherit; font-size: .68rem; cursor: pointer;
+                     display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1px; }
+  .ed-mtabs button span { font-size: 1.15rem; line-height: 1.2; filter: grayscale(.6); }
+  .ed-mtabs button.on { color: var(--gold); }
+  .ed-mtabs button.on span { filter: none; }
+
+  /* top bar: one compact row (+ the render status row when something is running) */
+  .ed-top { flex-wrap: wrap; gap: 6px; padding: 6px 10px; row-gap: 4px; }
+  .ed-title { width: auto; flex: 1 1 0; min-width: 0; order: 0; font-size: .95rem; padding: 4px 4px; }
+  .ed-views { order: 1; } .ed-views [data-view=timeline] { display: none; }
+  .ed-views button { padding: 6px 8px; }
+  .ed-topr { order: 2; margin-left: 0; gap: 4px; }
+  .ed-render { order: 5; flex: 1 1 100%; justify-content: flex-start; font-size: .72rem; }
+  .ed-render:empty { display: none; }
+  .ed-only-narrow { display: none !important; }
+
+  /* the sections */
+  .ed-body { display: block; position: relative; overflow: hidden; height: 100%; }
+  .ed-body > .ed-left, .ed-body > .ed-center, .ed-body > .ed-right {
+    position: absolute; inset: 0; display: none; width: auto; transform: none; box-shadow: none; border: 0;
+    overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
+  .ed[data-m="story"] .ed-left { display: block; padding: 12px 14px 24px; }
+  .ed[data-m="stage"] .ed-center, .ed[data-m="timeline"] .ed-center { display: flex; flex-direction: column; }
+  .ed[data-m="stage"] #tl { display: none !important; }
+  .ed[data-m="stage"] .ed-stage-wrap { min-height: 0; flex: none; }
+  .ed[data-m="stage"] .ed-stage { aspect-ratio: auto; height: min(58dvh, 125vw); flex: none; }
+  .ed[data-m="stage"] .ed-strip { flex: none; padding-bottom: 16px; }
+  .ed[data-m="timeline"] .ed-center { overflow: hidden; }
+  .ed[data-m="timeline"] #v-storyboard, .ed[data-m="timeline"] #v-assets { display: none !important; }
+  .ed[data-m="timeline"] #tl { display: flex !important; flex-direction: column; flex: 1; min-height: 0; height: auto; }
+  .ed[data-m="timeline"] .ed-tl-scroll { flex: 1; min-height: 0; max-height: none; }
+  .ed[data-m="timeline"] .ed-hint { white-space: normal; }
+  .ed[data-m="shot"] .ed-right, .ed[data-m="agent"] .ed-right { display: flex; flex-direction: column; overflow: hidden; }
+  .ed-right .ed-tabs { display: none; }
+  .ed-right .ed-insp-h { flex: none; }
+  .ed-right .ed-pane { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+  .ed-right .ed-pane.chat { overflow: hidden; display: flex; flex-direction: column; }
+  .ed-right .ed-pane[hidden] { display: none; }
+  .ed-pop, .ed-more-menu { max-width: calc(100vw - 16px); }
+}

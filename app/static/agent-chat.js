@@ -68,7 +68,7 @@ window.AgentChat = (() => {
     const on = (id, ev, fn) => { const el = $(id); if (el) el.addEventListener(ev, fn); };
     const page = !!opts.page;
     const ws = $("ws"), feed = $("feed"), col = $("col");
-    const setHdr = () => document.documentElement.style.setProperty("--hdr", (document.querySelector("header.top")?.offsetHeight || 50) + "px");
+    const setHdr = () => document.documentElement.style.setProperty("--hdr", Math.round(document.querySelector("main")?.getBoundingClientRect().top + scrollY || 50) + "px");
     setHdr(); addEventListener("resize", setHdr);
 
     let current = opts.threadId || (page ? new URLSearchParams(location.search).get("t") : null) || null;

@@ -257,7 +257,7 @@
   }
   $("scenes").addEventListener("click", (e) => {
     const ed = e.target.closest("[data-scedit]"); if (ed) { e.stopPropagation(); sceneModal(sceneById(ed.dataset.scedit)); return; }
-    const d = e.target.closest("[data-scene]"); if (!d) return; selectScene(d.dataset.scene); ED.classList.remove("left-open"); });
+    const d = e.target.closest("[data-scene]"); if (!d) return; selectScene(d.dataset.scene); ED.classList.remove("left-open"); if (phone()) setM("stage"); });
   function sceneModal(sc) {
     if (!sc) return;
     const on = new Set(sc.refs || []);
@@ -774,7 +774,21 @@
 
   // ------------------------------------------------------------------ inspector
   document.querySelectorAll(".ed-tabs button").forEach((b) => b.onclick = () => setTab(b.dataset.tab));
+  // Phones: one section at a time, chosen from the bottom tab bar (2026-11-25: "very
+  // non-responsive. User cannot scroll"). Each section is the only thing that scrolls.
+  const phone = () => matchMedia("(max-width: 780px)").matches;
+  function setM(m) {
+    ED.dataset.m = m;
+    document.querySelectorAll("#mtabs button").forEach((b) => b.classList.toggle("on", b.dataset.m === m));
+    if (m === "shot" || m === "agent") { if (tab !== m) setTab(m); }
+    if (m === "timeline" && view === "assets") setView("storyboard");
+    if (m === "timeline" || m === "stage") requestAnimationFrame(() => { paint(); if (typeof fitFrame === "function") fitFrame(); });
+  }
+  document.querySelectorAll("#mtabs button").forEach((b) => b.onclick = () => setM(b.dataset.m));
+  ED.dataset.m = "stage";
   function setTab(t) {
+    if (phone() && ED.dataset.m !== t && (t === "shot" || t === "agent")) { ED.dataset.m = t;
+      document.querySelectorAll("#mtabs button").forEach((b) => b.classList.toggle("on", b.dataset.m === t)); }
     tab = t;
     document.querySelectorAll(".ed-tabs button").forEach((b) => b.classList.toggle("on", b.dataset.tab === t));
     $("pane-shot").hidden = t !== "shot"; $("pane-agent").hidden = t !== "agent";
@@ -1237,7 +1251,9 @@
   async function chatSend(text) { setTab("agent"); const c = await ensureChat(); c.send(text); }
 
   // ------------------------------------------------------------------ start
-  const setHdr = () => document.documentElement.style.setProperty("--hdr", (document.querySelector("header.top")?.offsetHeight || 50) + "px");
+  // Everything above <main> (the header AND the files-are-deleted note), not just the header:
+  // counting only the header made the editor taller than the screen.
+  const setHdr = () => document.documentElement.style.setProperty("--hdr", Math.round(document.querySelector("main")?.getBoundingClientRect().top + scrollY || 50) + "px");
   setHdr(); addEventListener("resize", setHdr);
   paintScope();
   load(true);

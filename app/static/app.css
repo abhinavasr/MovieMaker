@@ -233,3 +233,19 @@ details.more[open] summary { margin-bottom: 12px; }
 .consent { align-items: flex-start; gap: 8px; line-height: 1.4; }
 .consent input { margin-top: 3px; }
 progress { width: 100%; max-width: 420px; height: 10px; vertical-align: middle; }
+
+/* ---- phones: one-line header with a menu (2026-11-25: "reimagine the navigation for mobile") */
+.menu-btn { display: none; background: none; border: 1px solid var(--line); color: var(--ink); border-radius: 8px; width: 38px; height: 34px; font-size: 1.1rem; cursor: pointer; }
+.retention-note { display: flex; align-items: center; justify-content: center; gap: 10px; }
+.retention-note button { background: none; border: 0; color: inherit; cursor: pointer; font-size: .9rem; opacity: .7; flex: none; }
+@media (max-width: 780px) {
+  .top { padding: 8px 14px; position: relative; flex-wrap: nowrap; }
+  .menu-btn { display: inline-block; }
+  .top nav { display: none; position: absolute; top: 100%; right: 8px; z-index: 80; flex-direction: column; align-items: stretch;
+    gap: 2px; min-width: 200px; padding: 8px; background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+    box-shadow: 0 14px 34px rgba(0,0,0,.45); }
+  .top.open nav { display: flex; }
+  .top nav a, .top nav .who, .top nav form button { padding: 10px 12px; border-radius: 8px; font-size: .95rem; text-align: left; }
+  .top nav a:hover { background: var(--panel-2); }
+  .retention-note { font-size: .74rem; padding: 6px 12px; text-align: left; }
+}
