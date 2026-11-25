@@ -450,8 +450,18 @@ PRODUCTION_ABOUT = ("Story Studio makes films on one local GPU: pictures (FLUX.2
 #   57344+ -> part on the CPU, ~35 tok/s      forcing num_gpu at 65536 ran out of memory.
 # So each call takes the SMALLEST window that holds its prompt plus the thinking budget.
 PLANNER_WINDOWS = (40960, 49152, 65536)
-PLANNER_THINK_TOKENS = 20000          # num_predict: thinking + the JSON plan. A whole-episode
-                                      # breakdown used 18.5k; at 12k its first try was cut off.
+PLANNER_THINK_TOKENS = 20000          # num_predict for a breakdown: a whole episode used 18.5k
+                                      # and 26.5k (12k cut the first try off)
+PLANNER_THINK_LATER = 12000           # once the production has shots: later turns used 1.3k-6.1k
+PLANNER_THINK_MAX = 32000             # a turn cut off for length retries with double, up to this
+
+
+def think_budget(project_id: str | None) -> int:
+    """Room to think: big while the story is still being broken down, smaller afterwards
+    (so later prompts fit the fast window). A turn cut off for length is retried bigger."""
+    if project_id and db.one("SELECT 1 FROM shots WHERE project_id=? LIMIT 1", (project_id,)):
+        return PLANNER_THINK_LATER
+    return PLANNER_THINK_TOKENS
 CHARS_PER_TOKEN = 3.0                 # measured 3.29 on a Sanskrit-heavy production; err high
 
 
@@ -460,9 +470,69 @@ def _est_tokens(messages: list[dict]) -> int:
     return int(n + 800 * sum(len(m.get("images") or []) for m in messages) + 50 * len(messages))
 
 
-def _fit_window(messages: list[dict]) -> tuple[list[dict], int, int]:
+COMPACT_LEVELS = 4
+_STEP = re.compile(r"^#(\d+) (\S+) \[(\w+)\]")
+
+
+def fold_log(content: str, keep_last: int = 2) -> str:
+    """A studio-log message with runs of the same tool folded into one line:
+    "#12-#35 make_ref_picture x24 [ok 22, running 2]". Failed steps and the last
+    `keep_last` lines stay in full (2026-11-25: 25 make_ref_picture lines were 6.6k tokens)."""
+    head, _, body = content.partition("\n")
+    lines = body.split("\n")
+    out, run = [], []
+
+    def flush():
+        if len(run) >= 3:
+            counts: dict[str, int] = {}
+            for _, st, _ln in run:
+                counts[st] = counts.get(st, 0) + 1
+            n0, n1 = run[0][0], run[-1][0]
+            tool = _STEP.match(run[0][2]).group(2)
+            out.append(f"#{n0}-#{n1} {tool} x{len(run)} [" +
+                       ", ".join(f"{k} {v}" for k, v in counts.items()) + "]")
+            out.extend(ln for _, st, ln in run if st not in ("ok", "done", "running", "queued"))
+        else:
+            out.extend(ln for _, _, ln in run)
+        run.clear()
+
+    tail = lines[-keep_last:] if keep_last else []
+    for ln in lines[:len(lines) - len(tail)]:
+        m = _STEP.match(ln)
+        if m and run and _STEP.match(run[-1][2]).group(2) == m.group(2):
+            run.append((m.group(1), m.group(3), ln))
+            continue
+        flush()
+        if m:
+            run.append((m.group(1), m.group(3), ln))
+        else:
+            out.append(ln[:240])
+    flush()
+    return head + "\n" + "\n".join(out + tail)
+
+
+def compact_history(history: list[dict], level: int) -> list[dict]:
+    """level >=1: studio logs folded; >=4: the assistant's older replies shortened. The
+    person's own messages are never changed: they are the instructions."""
+    if level <= 0:
+        return history
+    out = []
+    replies = [i for i, m in enumerate(history) if m["role"] == "assistant"]
+    for i, m in enumerate(history):
+        m = dict(m)
+        if m["role"] == "user" and (m.get("content") or "").startswith("[studio log]"):
+            m["content"] = fold_log(m["content"])
+        elif level >= 4 and m["role"] == "assistant" and i not in replies[-2:] \
+                and len(m.get("content") or "") > 400:
+            m["content"] = m["content"][:400] + " ..."
+        out.append(m)
+    return out
+
+
+def _fit_window(messages: list[dict], think: int = PLANNER_THINK_TOKENS
+                ) -> tuple[list[dict], int, int]:
     """(messages, num_ctx, estimated prompt tokens): the smallest measured window that holds
-    the prompt + PLANNER_THINK_TOKENS; if none does, the oldest history (never the system
+    the prompt + `think`; if none does, the oldest history (never the system
     prompt, the latest message or the person's last three messages) is dropped until it fits.
     Ollama would otherwise cut the START of the prompt silently -- the rules."""
     msgs = list(messages)
@@ -470,7 +540,7 @@ def _fit_window(messages: list[dict]) -> tuple[list[dict], int, int]:
     while True:
         est = _est_tokens(msgs)
         for ctx in PLANNER_WINDOWS:
-            if est + PLANNER_THINK_TOKENS + margin <= ctx:
+            if est + think + margin <= ctx:
                 return msgs, ctx, est
         last = len(msgs) - 1
         keep = {0, last} | set([i for i, m in enumerate(msgs[:last]) if m["role"] == "user"][-3:])
@@ -982,22 +1052,40 @@ async def _plan(thread, trigger: str, turn: GpuTurn) -> dict:
     _seen[thread["id"]] = _last_user_seq(thread["id"])
     first = _next_step_number(thread["id"])
     pid = thread["project_id"] if "project_id" in thread.keys() else None
-    messages = [{"role": "system", "content": _system_prompt(thread["user_id"], first,
-                                                             bool(pid), pid)}]
+    system = {"role": "system", "content": _system_prompt(thread["user_id"], first, bool(pid), pid)}
     history, eyes = _history(thread["id"])
-    messages += history
     pinned, pinned_pics = _pinned(thread)
     files = agentfiles.files_of(thread["id"])
     files_line = ("Files in this conversation: " + ", ".join(
         f"F{f['num']} {f['name']} ({f['kind']})" for f in files) +
         '. In a tool argument, "@F<n>" stands for a file (bytes for *_base64, the image_id '
         "for pictures, the text for text).") if files else ""
-    production_txt = ""
-    if pid:
-        production_txt = "[the production now]\n" + editor.describe_for_agent(pid, _focus(thread["id"]))
-    final = {"role": "user", "content": "\n".join(x for x in (
-        f"[{trigger}]", production_txt, pinned, files_line, _watch_summary(thread["id"]),
-        "Answer with the JSON object.") if x)}
+    focus = _focus_meta(thread["id"])
+    watch = _watch_summary(thread["id"])
+
+    def build(level: int) -> list[dict]:
+        """The prompt at compaction `level` (0 = everything as is). The stable parts come
+        first (system, then history) so Ollama can reuse its cache across rounds."""
+        hist = compact_history(history, level)
+        production_txt = ""
+        if pid:
+            production_txt = "[the production now]\n" + editor.describe_for_agent(
+                pid, focus.get("shot_id") or None, compact=max(0, level - 1),
+                focus_scene=focus.get("scene_id") or None)
+        fin = {"role": "user", "content": "\n".join(x for x in (
+            f"[{trigger}]", production_txt, pinned, files_line, watch,
+            "Answer with the JSON object.") if x)}
+        return [system] + hist + [fin]
+
+    # Compact only as far as needed to fit the fast window (measured 2026-11-25: 40960 runs
+    # fully on the GPU at 116 tok/s; 65536 spills to the CPU at ~35 tok/s).
+    think = think_budget(pid)
+    fast = PLANNER_WINDOWS[0] - think - 1024
+    for level in range(COMPACT_LEVELS + 1):
+        messages = build(level)
+        if _est_tokens(messages) <= fast:
+            break
+    final = messages[-1]
     pics = pinned_pics[:max(0, MAX_EYES - eyes)]
     views = _views.pop(thread["id"], [])[:max(0, MAX_EYES - eyes - len(pics))]
     if views:
@@ -1006,9 +1094,9 @@ async def _plan(thread, trigger: str, turn: GpuTurn) -> dict:
     if pics or views:
         final["images"] = [base64.b64encode(p).decode() for p in pics] + \
                           [base64.b64encode(jpg).decode() for _, jpg in views]
-    messages.append(final)
-    messages, num_ctx, est = _fit_window(messages)
-    log.info("planner %s: prompt ~%d tokens, window %d", thread["id"], est, num_ctx)
+    messages, num_ctx, est = _fit_window(messages, think)
+    log.info("planner %s: prompt ~%d tokens, compaction %d/%d, think %d, window %d",
+             thread["id"], est, level, COMPACT_LEVELS, think, num_ctx)
     _activity(thread["id"], "planning", "planning")
     for attempt in range(3):
         await turn.renew()
@@ -1016,11 +1104,16 @@ async def _plan(thread, trigger: str, turn: GpuTurn) -> dict:
         result = await _stream_plan(thread["id"], {
             "model": cfg.PLANNER_MODEL, "messages": messages,
             "think": True, "format": _plan_schema(), "keep_alive": "10m",
-            "options": {"num_ctx": num_ctx, "num_predict": PLANNER_THINK_TOKENS,
+            "options": {"num_ctx": num_ctx, "num_predict": think,
                         "temperature": 0.6 if attempt == 0 else 0.8}})
         out = _parse_json(result.get("content", ""))
-        log.info("planner %s: %.1fs, %s tokens, ok=%s", thread["id"], time.monotonic() - t0,
-                 result.get("eval_count"), out is not None)
+        log.info("planner %s: %.1fs, %s tokens, ok=%s%s", thread["id"], time.monotonic() - t0,
+                 result.get("eval_count"), out is not None,
+                 " (cut off: out of room to think)" if result.get("done_reason") == "length" else "")
+        if out is None and result.get("done_reason") == "length" and think < PLANNER_THINK_MAX:
+            think = min(PLANNER_THINK_MAX, think * 2)
+            messages, num_ctx, est = _fit_window(messages, think)
+            log.info("planner %s: retrying with think %d, window %d", thread["id"], think, num_ctx)
         if out is not None and isinstance(out.get("steps", []), list):
             out.setdefault("reply", "")
             out.setdefault("state", "done")
@@ -1222,6 +1315,13 @@ def _clip_status(clip_id: str) -> dict:
     status = {"ready": "succeeded", "pending": "running"}.get(c["status"], c["status"])
     return {"clip_id": clip_id, "status": status, "name": c["name"],
             **({"error": c["error"]} if c["error"] else {})}
+
+
+def _focus_meta(thread_id: str) -> dict:
+    row = db.one("SELECT meta FROM agent_messages WHERE thread_id=? AND role='user' "
+                 "ORDER BY seq DESC LIMIT 1", (thread_id,))
+    f = (json.loads(row["meta"] or "{}").get("focus") or {}) if row else {}
+    return f if isinstance(f, dict) else {}
 
 
 def _focus(thread_id: str) -> str | None:

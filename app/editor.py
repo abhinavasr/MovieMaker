@@ -3134,14 +3134,24 @@ def _story_for_agent(story: str | None) -> str:
             f"for the rest if a scene you need is past this point):\n{text[:STORY_FOR_AGENT]}")
 
 
-def describe_for_agent(project_id: str, focus_shot: str | None = None) -> str:
-    """The production as the planner reads it, compactly, with every id it needs."""
+def describe_for_agent(project_id: str, focus_shot: str | None = None, compact: int = 0,
+                       focus_scene: str | None = None) -> str:
+    """The production as the planner reads it, compactly, with every id it needs.
+
+    compact (agent._plan raises it only when the prompt would not fit the fast window):
+      >=1  shots outside the focused scene lose their prompt text (ids, title, framing, use
+           case, length, status, picture, cast and the use-case settings -- reference videos,
+           voices, recast cast, restyle change -- stay, so the planner can act on any shot);
+      >=2  also shortens reference descriptions."""
     project = db.one("SELECT * FROM projects WHERE id=?", (project_id,))
     if project is None:
         return ""
     refresh_clips(project_id)
     params = db.params_of(project)
     tm = timings(project_id)
+    if focus_shot and not focus_scene:
+        fs = db.one("SELECT scene_id FROM shots WHERE id=?", (focus_shot,))
+        focus_scene = fs["scene_id"] if fs else None
     lines = [f"PRODUCTION project_id={project_id} \"{project['title']}\" "
              f"(aspect {aspect_of(params)}"
              f"{', rendered 16:9 and cropped to scope: keep action in the middle band' if aspect_of(params) == '2.39:1' else ''}"
@@ -3156,14 +3166,18 @@ def describe_for_agent(project_id: str, focus_shot: str | None = None) -> str:
                     "voice sample" if r["voice_path"] else
                     (f"speaker {r['speaker']}" if r["speaker"] else "no voice")]
             lines.append(f"- ref_id={r['id']} {r['kind']} \"{r['name']}\": "
-                         f"{r['description'][:700]} [{', '.join(bits)}]")
+                         f"{r['description'][:260 if compact >= 2 else 700]} [{', '.join(bits)}]")
     shots = ordered_shots(project_id)
     names = {r["id"]: r["name"] for r in refs}
     for sc in scenes_of(project_id):
         cast = [names.get(r, r) for r in _jl(sc["refs"], [])]
         lines.append(f"SCENE scene_id={sc['id']} \"{sc['title']}\"{' LOCKED-BY-THE-PERSON' if sc['locked'] else ''} assets=[{', '.join(cast)}]: "
                      f"{sc['summary'][:300]}")
-        for s in [x for x in shots if x["scene_id"] == sc["id"]]:
+        in_scene = [x for x in shots if x["scene_id"] == sc["id"]]
+        brief = compact >= 1 and sc["id"] != focus_scene
+        if brief and in_scene:
+            lines.append("  (shot prompts of this scene left out to save room; every id is here)")
+        for s in in_scene:
             start, secs = tm[s["id"]]
             mark = " <== the person is looking at this shot" if s["id"] == focus_shot else ""
             lines.append(
@@ -3171,8 +3185,10 @@ def describe_for_agent(project_id: str, focus_shot: str | None = None) -> str:
                 f"{s['make']} {secs:g}s @{start:g}s status={s['status']}"
                 f"{' starts-from-previous-last-frame' if s['start_from'] == 'prev_last' else (' picture' if s['asset_id'] else (' NO PICTURE' if needs_picture(project_id, s) else ' no-picture-needed'))} "
                 f"refs=[{', '.join(names.get(r, r) for r in _jl(s['refs'], []))}] "
+                # use-case settings (reference videos, voices, cast, change) ALWAYS stay:
+                # they are short and the shot cannot be made without them
                 f"{_agent_shot_extras(project_id, s)}"
-                f"prompt: {(s['prompt'] or '')[:220]}{mark}")
+                + ("" if brief else f"prompt: {(s['prompt'] or '')[:220]}") + mark)
     clips = db.query("SELECT * FROM prod_clips WHERE project_id=? ORDER BY track, start_s",
                      (project_id,))
     if clips:
