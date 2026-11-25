@@ -2125,7 +2125,9 @@ def drawing_progress(pid: str) -> dict | None:
     return {"shots_total": total, "shots_done": max(0, total - len(jobs)),
             "stages": stages, "pictures_done": pics_done, "pictures_pending": pending_pics,
             "queue": _wis_q["n"], "waiting_for_looks": waiting_looks,
-            "eta_s": int((_wis_q["n"] + pending_pics) * SECONDS_PER_PICTURE) if pending_pics else 0,
+            # this batch's pictures are already IN the WIS queue: the wait is the queue (or the
+            # batch's own count if the queue is not known yet), not both added together
+            "eta_s": int(max(_wis_q["n"], pending_pics) * SECONDS_PER_PICTURE) if pending_pics else 0,
             "since": batch.get("started")}
 
 
