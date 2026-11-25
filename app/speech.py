@@ -160,8 +160,9 @@ def rate_limited(user_id: str, adding: int = 1) -> bool:
     if auth.is_unlimited(user_id):
         return False
     # Failed clips don't count: they made nothing.
+    # Failed clips and character voice samples (voice 'design', made automatically) don't count.
     row = db.one("SELECT COUNT(*) AS n FROM speech WHERE user_id=? AND created_at > ? "
-                 "AND status != 'failed'", (user_id, db.now() - 3600))
+                 "AND status != 'failed' AND voice != 'design'", (user_id, db.now() - 3600))
     return bool(row and row["n"] + adding > cfg.USER_SPEECH_PER_HOUR)
 
 
@@ -224,8 +225,12 @@ async def create(user: auth.User, text: str, *, speaker: str | None = None,
                  language: str | None = None, instruct: str | None = None,
                  reference: bytes | None = None, reference_text: str | None = None,
                  match: str | None = None, temperature=None, seed=None,
-                 takes=1, meter: str | None = None) -> list[str]:
-    """Queue one clip, or `takes` variations of it (different seeds) to choose from."""
+                 takes=1, meter: str | None = None, design: str | None = None) -> list[str]:
+    """Queue one clip, or `takes` variations of it (different seeds) to choose from.
+    `design` = a voice description: the clip is spoken in a NEW voice made from it
+    (Qwen3-TTS VoiceDesign) -- a character's voice sample, cloned for all their lines."""
+    if design:
+        return _create_design(user, text, design, language, seed)
     text = (text or "").strip()
     if not text:
         raise HTTPException(400, "text is required — the words to speak")
@@ -326,6 +331,30 @@ async def create(user: auth.User, text: str, *, speaker: str | None = None,
         ids.append(speech_id)
     gpuqueue.kick()
     return ids
+
+
+DESIGN_LANGUAGES = ("English", "Chinese", "Japanese", "Korean", "German", "French", "Russian",
+                    "Portuguese", "Spanish", "Italian")
+
+
+def _create_design(user: auth.User, text: str, brief: str, language: str | None,
+                   seed) -> list[str]:
+    text = (text or "").strip()
+    brief = " ".join(str(brief or "").split())[:700]
+    if not text or not brief:
+        raise HTTPException(400, "a voice design needs sample text and a voice description")
+    if len(text) > MAX_TEXT:
+        text = text[:MAX_TEXT]
+    lang = next((l for l in DESIGN_LANGUAGES if l.lower() == str(language or "").lower()),
+                "English")
+    speech_id = db.new_id("spk")
+    params = {"seed": int(seed) if seed not in (None, "") else None}
+    db.run("INSERT INTO speech (id,user_id,text,voice,language,instruct,reference_text,"
+           "params,status,message,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+           (speech_id, user.id, text, "design", lang, brief, None, json.dumps(params),
+            "queued", "queued", db.now(), db.now()))
+    gpuqueue.kick()
+    return [speech_id]
 
 
 def params(row) -> dict:
@@ -474,7 +503,7 @@ async def run(row) -> None:
     voice, language, instruct = row["voice"], row["language"], row["instruct"]
     ref_text, p = row["reference_text"], params(row)
     ref_wav = _ref_path(speech_id).read_bytes() if voice == "clone" else None
-    url = engine_url(language, voice)
+    url = cfg.TTS_URL if voice == "design" else engine_url(language, voice)
     # VoxCPM2 can keep its model loaded when the next queued line goes to it too (one
     # load per batch instead of one per line); after the last it unloads as before.
     keep = url == cfg.TTS_MY_URL and _next_uses(url, speech_id)
@@ -483,7 +512,11 @@ async def run(row) -> None:
     try:
         async with httpx.AsyncClient(timeout=300.0) as client:
             tag = engine_language(language, voice)
-            if ref_wav is not None:
+            if voice == "design":
+                resp = await client.post(f"{cfg.TTS_URL}/design", json={
+                    "text": text, "instruct": instruct, "language": language,
+                    "seed": p.get("seed")})
+            elif ref_wav is not None:
                 data = {"text": text, "language": tag, "mode": p.get("match") or "style"}
                 if keep:
                     data["keep"] = "true"
@@ -509,6 +542,9 @@ async def run(row) -> None:
                 detail = None
             raise RuntimeError(detail or f"the speech service answered HTTP {resp.status_code}")
         duration = float(resp.headers.get("X-TTS-Duration-S") or 0) or None
+        if voice == "design" and resp.headers.get("X-TTS-F0"):
+            p["f0"] = float(resp.headers["X-TTS-F0"])          # checked against the brief
+            db.run("UPDATE speech SET params=? WHERE id=?", (json.dumps(p), speech_id))
         dest = cfg.speech_dir / user_id
         dest.mkdir(parents=True, exist_ok=True)
         path = dest / f"{speech_id}.mp3"

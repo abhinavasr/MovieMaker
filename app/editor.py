@@ -566,7 +566,7 @@ def _drop_unused_asset(pid: str, asset_id: str | None) -> None:
 
 def add_ref(project, kind: str, name: str, description: str = "", image_id: str | None = None,
             speaker: str | None = None, voice: bytes | None = None, voice_name: str = "",
-            user: auth.User | None = None) -> str:
+            user: auth.User | None = None, voice_design: str = "") -> str:
     pid = project["id"]
     if kind not in REF_KINDS:
         raise HTTPException(400, f"kind must be one of {', '.join(REF_KINDS)}")
@@ -587,6 +587,10 @@ def add_ref(project, kind: str, name: str, description: str = "", image_id: str 
             speaker or None, db.now()))
     if image_id and kind in ("character", "location"):
         _want_angles(pid, rid)
+    if kind in VOICE_KINDS and not voice_path and not speaker:
+        # Part of creating a character: its own voice is designed from its description.
+        db.run("UPDATE prod_refs SET voice_auto=1, voice_design=? WHERE id=?",
+               (" ".join((voice_design or "").split())[:700], rid))
     _touch(pid)
     return rid
 
@@ -615,6 +619,8 @@ def edit_ref(project, ref_id: str, user: auth.User | None = None, **f) -> None:
         sets["image_id"] = f["image_id"]
         if f["image_id"] != row["image_id"] and (f.get("kind") or row["kind"]) in ("character", "location"):
             sets["angles"] = json.dumps({"_auto": True})
+    if f.get("voice_design") is not None:
+        sets["voice_design"] = " ".join(str(f["voice_design"]).split())[:700]
     if f.get("speaker") is not None:
         if f["speaker"] and f["speaker"] not in speech.SPEAKERS:
             raise HTTPException(400, f"speaker must be one of {', '.join(speech.SPEAKERS)}")
@@ -626,6 +632,12 @@ def edit_ref(project, ref_id: str, user: auth.User | None = None, **f) -> None:
     if sets:
         cols = ", ".join(f"{k}=?" for k in sets)
         db.run(f"UPDATE prod_refs SET {cols} WHERE id=?", (*sets.values(), ref_id))
+        if "voice_path" in sets:
+            # The person's own sample: its transcript is not known (Whisper hears it).
+            db.run("UPDATE prod_refs SET voice_text=NULL WHERE id=?", (ref_id,))
+        if "voice_path" in sets or ("speaker" in sets and
+                                    (sets["speaker"] or None) != (row["speaker"] or None)):
+            revoice_lines(ref_id)
         _touch(pid)
 
 
@@ -805,7 +817,9 @@ async def _speak(user: auth.User, ref, text: str, instruct: str = "",
     reference = Path(ref["voice_path"]).read_bytes() if ref and ref["voice_path"] and \
         Path(ref["voice_path"]).exists() else None
     voice = speaker or (ref["speaker"] if ref else None)
-    reference_text = None
+    # A designed voice knows what its sample says: cloning uses it (no Whisper needed).
+    reference_text = (ref["voice_text"] if ref is not None and "voice_text" in ref.keys()
+                      and reference else None) or None
     if not reference and voice in speech.HINDI_SPEAKERS and not speech._has_hindi(text) and \
             (language or "").lower() not in ("hindi", "hi"):
         # A Hindi-only preset speaking another language: clone that preset's own clip, so the
@@ -858,6 +872,12 @@ async def voice_script(project, user: auth.User, clip_id: str) -> None:
     if c["status"] != "script":
         return
     ref = db.one("SELECT * FROM prod_refs WHERE id=?", (c["ref_id"],)) if c["ref_id"] else None
+    if ref is not None and needs_voice(ref):
+        # No voice of their own yet: never the default (2026-11-25: every character, women
+        # included, spoke in the male default "Ryan"). Design theirs; the line waits for it.
+        if not ref["voice_auto"]:
+            db.run("UPDATE prod_refs SET voice_auto=1 WHERE id=?", (ref["id"],))
+        return
     sid = await _speak(user, ref, c["text"], c["instruct"] or "")
     db.run("UPDATE prod_clips SET source_id=?, status='pending', duration_s=NULL, auto=0, error=NULL, "
            "updated_at=? WHERE id=?", (sid, db.now(), clip_id))
@@ -875,6 +895,210 @@ def _preset_clip(voice: str) -> tuple[bytes | None, str | None]:
         meta = {}
     said = (meta.get("transcripts") or {}).get(voice) or meta.get("transcript")
     return wav.read_bytes(), said
+
+
+# --------------------------------------------------------------------------- designed voices
+# Every character gets a voice of their own, made from their description with Qwen3-TTS
+# VoiceDesign, as part of creating the character (the person, 2026-11-25: "generating new audio
+# profiles per character based on the character description ... bake it as part of agentic
+# workflow when creating characters"). One short sample is designed; every line is then CLONED
+# from it, so the character keeps the same voice.
+
+VOICE_KINDS = ("character", "voice")
+
+VOICE_BRIEF_RULES = """You write a VOICE DESCRIPTION for a text-to-speech voice designer, from a
+character description. START with the gender and age in plain words ("A woman in her fifties",
+"A man in his seventies"). Pitch must fit the gender: a woman's voice is medium-high or high
+unless the description clearly says otherwise; a man's is low or medium.
+One or two sentences, at most 50 words, covering: gender, age, pitch
+(low/medium/high), timbre (e.g. warm, husky, bright, breathy, resonant), pace, accent (only when
+the story's setting implies one, e.g. "a soft Indian English accent"), and the emotional colour
+of how they usually speak. Describe the VOICE only: no looks, no clothes, no names.
+A baby or an animal that does not talk: describe the sound they would make.
+Answer with JSON: {"voice": "..."}"""
+
+
+def revoice_lines(ref_id: str) -> int:
+    """The character's voice changed: their spoken lines are voiced again in the new voice
+    (2026-11-25: presets were given to the characters after their lines had been spoken in the
+    default voice, and nothing followed)."""
+    n = 0
+    for c in db.query("SELECT id FROM prod_clips WHERE ref_id=? AND source_kind='speech' AND "
+                      "text IS NOT NULL AND status IN ('ready','pending','failed')", (ref_id,)):
+        db.run("UPDATE prod_clips SET status='script', auto=1, error=NULL WHERE id=?", (c["id"],))
+        n += 1
+    return n
+
+
+def needs_voice(r) -> bool:
+    return (r["kind"] in VOICE_KINDS and not r["voice_path"] and not r["speaker"]
+            and (r["voice_design"] or "") != "off")
+
+
+def _guess_brief(r) -> str:
+    """When no model is free: at least the right gender and age."""
+    d = f" {(r['name'] or '')} {(r['description'] or '')} ".lower()
+    female = re.search(r"\b(she|her|woman|women|girl|queen|princess|mother|wife|daughter|"
+                       r"lady|female|goddess|sister|grandmother|aunt)\b", d)
+    old = re.search(r"\b(old|elder|elderly|aged|grey|gray|silver|grand)", d)
+    child = re.search(r"\b(child|boy|girl|kid|teen|teenage|young)\b", d)
+    baby = re.search(r"\b(newborn|baby|infant)\b", d)
+    if baby:
+        return "A newborn baby: soft coos and small cries, very high and gentle."
+    who = "woman" if female else "man"
+    age = "elderly " if old else ("young " if child else "adult ")
+    pitch = ("a warm, medium-high" if female else "a warm, low") + " voice"
+    return f"An {age}{who} with {pitch}, clear and natural, speaking at a calm, steady pace."
+
+
+async def voice_brief(project, r) -> str:
+    """The voice description: the planner's (stored on the reference) or written now by the
+    small CPU model from the character description; a rule-based guess as the last resort."""
+    if (r["voice_design"] or "").strip() and r["voice_design"] != "off":
+        return r["voice_design"].strip()
+    from app import agent
+    try:
+        res = await agent._ollama("/api/chat", {
+            "model": cfg.EXECUTOR_MODEL, "stream": False, "think": False,
+            "format": {"type": "object", "properties": {"voice": {"type": "string"}},
+                       "required": ["voice"]},
+            "messages": [{"role": "system", "content": VOICE_BRIEF_RULES},
+                         {"role": "user", "content":
+                          f"Story setting (excerpt): {(project['story'] or '')[:700]}\n\n"
+                          f"Character: {r['name']}\nDescription: {r['description'] or '(none)'}"}],
+            "options": {"num_gpu": 0, "num_thread": cfg.EXECUTOR_THREADS, "num_ctx": 4096,
+                        "temperature": 0.3}}, timeout=240)
+        voice = (agent._parse_json((res.get("message") or {}).get("content", "")) or {}).get("voice")
+        if voice and len(voice) > 20:
+            return " ".join(voice.split())[:600]
+    except Exception as exc:                                   # noqa: BLE001
+        log.warning("voice brief for %s by the CPU model failed: %s", r["name"], exc)
+    return _guess_brief(r)
+
+
+NEUTRAL_SAMPLE = ("Listen closely, for this is how I speak: steady and true. Some words come "
+                  "easily, and some must be weighed before they are said.")
+
+
+def _sample_text(pid: str, r) -> str:
+    """What the designed sample says: the character's own lines when they are in English,
+    each once, topped up with a neutral line to ~8 s or more (cloning needs that much; a
+    5 s sample of one line said twice gave a weak clone, 2026-11-25)."""
+    said, total = [], 0
+    for c in db.query("SELECT text FROM prod_clips WHERE project_id=? AND ref_id=? AND text "
+                      "IS NOT NULL ORDER BY start_s", (pid, r["id"])):
+        t = " ".join((c["text"] or "").split())
+        if t and t.isascii() and t not in said:
+            said.append(t)
+            total += len(t)
+        if total > 200:
+            break
+    text = " ".join(said)
+    if total < 110:
+        text = (text + " " + NEUTRAL_SAMPLE).strip()
+    return text[:420]
+
+
+def _gender_of(brief: str) -> str | None:
+    b = (brief or "").lower()
+    if re.search(r"\b(female|woman|women|girl|feminine|she|her|queen|lady|mother)\b", b):
+        return "female"
+    if re.search(r"\b(male|man|men|boy|masculine|he|his|king|father)\b", b):
+        return "male"
+    return None
+
+
+def _pitch_mismatch(brief: str, f0: float | None) -> str | None:
+    """Why a designed sample does not match its brief, or None."""
+    if not f0:
+        return None
+    g = _gender_of(brief)
+    if "newborn" in (brief or "").lower() or "baby" in (brief or "").lower():
+        return None
+    if g == "female" and f0 < 160:
+        return "female"
+    if g == "male" and f0 > 175:
+        return "male"
+    return None
+
+
+async def design_voice(project, user: auth.User, ref_id: str, brief: str | None = None) -> str:
+    """Design this character's voice now (queued on the GPU like any speech). Returns the
+    speech id; the reference takes the sample when it is ready (_run_voices)."""
+    r = _ref(project["id"], ref_id)
+    if r["kind"] not in VOICE_KINDS:
+        raise HTTPException(400, "only characters and voices have a voice")
+    brief = " ".join((brief or "").split()) or await voice_brief(project, r)
+    sid = (await speech.create(user, _sample_text(project["id"], r), design=brief,
+                               language="English"))[0]
+    db.run("UPDATE prod_refs SET voice_design=?, voice_job=?, voice_auto=1 WHERE id=?",
+           (brief[:700], sid, ref_id))
+    _touch(project["id"])
+    log.info("designing a voice for %s: %s", r["name"], brief[:120])
+    return sid
+
+
+async def _run_voices() -> None:
+    """Attach finished designs (and re-voice that character's lines made without them);
+    start designs for characters that want one."""
+    from app import agent
+    for r in db.query("SELECT * FROM prod_refs WHERE voice_job IS NOT NULL AND voice_job != ''"):
+        row = db.one("SELECT * FROM speech WHERE id=?", (r["voice_job"],))
+        if row is None or row["status"] in ("failed", "cancelled"):
+            # Never leave lines waiting forever: a preset of the right gender instead.
+            fallback = "Serena" if re.search(r"\b(woman|female|girl|queen|she|her)\b",
+                                             (r["voice_design"] or "").lower()) else "Ryan"
+            db.run("UPDATE prod_refs SET voice_job=NULL, speaker=? WHERE id=?", (fallback, r["id"]))
+            log.warning("voice design for %s failed; using %s", r["name"], fallback)
+            continue
+        if row["status"] != "succeeded" or not row["path"] or not Path(row["path"]).exists():
+            continue
+        p = speech.params(row)
+        wrong = _pitch_mismatch(r["voice_design"], p.get("f0"))
+        tries = int(p.get("try") or 1)
+        if wrong and tries < 3:
+            # Off for its description (a "female" voice at 128 Hz): design again, more clearly.
+            cue = (" Clearly feminine, a higher, lighter female voice." if wrong == "female" else
+                   " Clearly masculine, a lower, deeper male voice.")
+            owner = agent.load_user(row["user_id"])
+            if owner is not None:
+                sid = (await speech.create(owner, row["text"], design=(r["voice_design"] + cue)[:700],
+                                           language=row["language"], seed=7919 * tries + 13))[0]
+                pr = speech.params(db.one("SELECT * FROM speech WHERE id=?", (sid,)))
+                pr["try"] = tries + 1
+                db.run("UPDATE speech SET params=? WHERE id=?", (json.dumps(pr), sid))
+                db.run("UPDATE prod_refs SET voice_job=? WHERE id=?", (sid, r["id"]))
+                log.info("voice for %s came out at %.0f Hz for a %s voice; designing again (try %d)",
+                         r["name"], p["f0"], wrong, tries + 1)
+                continue
+        dest = cfg.uploads_dir / r["project_id"] / "voices"
+        dest.mkdir(parents=True, exist_ok=True)
+        path = dest / f"{r['id']}.mp3"
+        shutil.copyfile(row["path"], path)
+        db.run("UPDATE prod_refs SET voice_path=?, voice_text=?, voice_job=NULL WHERE id=?",
+               (str(path), row["text"], r["id"]))
+        # Lines already voiced in another voice are voiced again in the new one.
+        again = revoice_lines(r["id"])
+        _touch(r["project_id"])
+        log.info("voice for %s is ready%s", r["name"],
+                 f"; {again} line(s) voiced again in it" if again else "")
+    started = 0
+    for r in db.query("SELECT r.*, p.user_id AS owner FROM prod_refs r JOIN projects p ON "
+                      "p.id=r.project_id WHERE r.voice_auto=1 AND (r.voice_job IS NULL OR "
+                      "r.voice_job='') AND (r.voice_path IS NULL OR r.voice_path='') AND "
+                      "(r.speaker IS NULL OR r.speaker='') AND r.voice_design != 'off' "
+                      "ORDER BY r.created_at LIMIT 6"):
+        user = agent.load_user(r["owner"])
+        project = db.one("SELECT * FROM projects WHERE id=?", (r["project_id"],))
+        if user is None or project is None or r["kind"] not in VOICE_KINDS:
+            db.run("UPDATE prod_refs SET voice_auto=0 WHERE id=?", (r["id"],))
+            continue
+        try:
+            await design_voice(project, user, r["id"])
+            started += 1
+        except HTTPException as exc:
+            log.warning("could not design a voice for %s: %s", r["name"], exc.detail)
+            db.run("UPDATE prod_refs SET voice_auto=0 WHERE id=?", (r["id"],))
 
 
 async def add_music(project, user: auth.User, description: str, start_s: float = 0.0,
@@ -955,6 +1179,12 @@ async def _run_scripts() -> None:
     from app import agent
     for c in db.query("SELECT c.id, c.project_id, p.user_id AS owner FROM prod_clips c JOIN projects p "
                       "ON p.id=c.project_id WHERE c.status='script' AND c.auto=1 "
+                      # lines waiting for their character's voice are skipped, not counted
+                      "AND (c.ref_id IS NULL OR NOT EXISTS (SELECT 1 FROM prod_refs r WHERE "
+                      "r.id=c.ref_id AND r.kind IN ('character','voice') AND "
+                      "(r.voice_path IS NULL OR r.voice_path='') AND (r.speaker IS NULL OR "
+                      "r.speaker='') AND r.voice_design != 'off' AND r.voice_auto=1 AND "
+                      "r.voice_job IS NOT NULL)) "
                       "ORDER BY c.project_id, c.start_s LIMIT 12"):
         user = agent.load_user(c["owner"])
         project = db.one("SELECT * FROM projects WHERE id=?", (c["project_id"],))
@@ -969,6 +1199,7 @@ async def _run_scripts() -> None:
 
 async def _run_pending() -> None:
     await _run_angles()
+    await _run_voices()
     await _run_scripts()
     await _run_auto_shots()
     from app import agent
@@ -2960,6 +3191,8 @@ def apply_changes(project, user: auth.User, changes: list, guard: bool = False) 
                 keys[key] = have["id"]
                 fill = {k: c[k] for k in ("description", "speaker", "image_id")
                         if c.get(k) and not have[k]}
+                if (c.get("voice") or c.get("voice_design")) and not have["voice_design"]:
+                    fill["voice_design"] = c.get("voice") or c.get("voice_design")
                 if fill:
                     edit_ref(project, have["id"], user=user, **fill)
                 done.append("add_ref(existing)")
@@ -2967,12 +3200,13 @@ def apply_changes(project, user: auth.User, changes: list, guard: bool = False) 
             else:
                 keys[key] = add_ref(
                     project, c.get("kind", "character"), c.get("name", ""),
-                    c.get("description", ""), c.get("image_id"), c.get("speaker"), user=user)
+                    c.get("description", ""), c.get("image_id"), c.get("speaker"), user=user,
+                    voice_design=str(c.get("voice") or c.get("voice_design") or ""))
         elif op == "edit_ref":
             target = rref(c.get("ref_id") or c.get("name"))
             edit_ref(project, target, user=user,
                      **{k: c.get(k) for k in ("name", "description", "kind", "image_id",
-                                              "speaker") if k in c and not
+                                              "speaker", "voice_design") if k in c and not
                         (k == "name" and not c.get("ref_id"))})
         elif op == "delete_ref":
             delete_ref(project, rref(c.get("ref_id") or c.get("name")))
@@ -3078,7 +3312,11 @@ def state(project, base: str) -> dict:
                                      for k, v in _jl(r["angles"], {}).items() if isinstance(v, str)],
                           "angles_waiting": "_auto" in _jl(r["angles"], {}),
                           "voice": f"/api/editor/{pid}/refs/{r['id']}/voice"
-                          if r["voice_path"] else None})
+                          if r["voice_path"] else None,
+                          "voice_design": r["voice_design"] or "",
+                          "voice_designed": bool(r["voice_text"]) and bool(r["voice_path"]),
+                          "voice_pending": bool(r["voice_job"]) or (
+                              bool(r["voice_auto"]) and needs_voice(r))})
     props = []
     for p in db.query("SELECT * FROM proposals WHERE project_id=? AND status='open' "
                       "ORDER BY created_at", (pid,)):
@@ -3284,6 +3522,7 @@ def storyboard_changes(project_id: str, args: dict) -> list:
                         "kind": kind if kind in REF_KINDS else "character",
                         "description": r.get("description", ""),
                         **({"from_ref_id": r["from_ref_id"]} if r.get("from_ref_id") else {}),
+                        **({"voice": r["voice"]} if r.get("voice") else {}),
                         **({"speaker": r["speaker"]} if r.get("speaker") in speech.SPEAKERS else {})})
     for si, sc in enumerate(args.get("scenes") or []):
         if not isinstance(sc, dict):
@@ -3589,6 +3828,19 @@ def _t_my_characters(user, args, base):
                    "one into this production with its pictures, views and voice"}
 
 
+async def _t_design_voice(user, args, base):
+    project = _agent_project(user, args)
+    rid = resolve_ref(project["id"], str(args.get("ref") or args.get("ref_id") or ""))
+    if not rid:
+        raise HTTPException(404, "no such character in this production")
+    r = _ref(project["id"], rid)
+    if args.get("voice") and r["voice_path"]:
+        db.run("UPDATE prod_refs SET voice_path=NULL, voice_text=NULL, speaker=NULL WHERE id=?", (rid,))
+    sid = await design_voice(project, user, rid, str(args.get("voice") or "") or None)
+    return {"ref": r["name"], "voice": _ref(project["id"], rid)["voice_design"], "speech_id": sid,
+            "status": "designing (a few seconds on the GPU); their lines follow it automatically"}
+
+
 async def _t_export(user, args, base):
     project = _agent_project(user, args)
     await export(project)
@@ -3645,7 +3897,9 @@ AGENT_TOOLS = {
             **_PID,
             "story": {"type": "string", "description": "the full story text (optional)"},
             "refs": {"type": "array", "items": {"type": "object"},
-                     "description": "characters/places: {name, kind, description, speaker}"},
+                     "description": "characters/places: {name, kind, description, voice} -- "
+                                    "voice (characters): how they sound, for designing their own "
+                                    "voice: gender, age, pitch, timbre, pace, accent, emotion"},
             "scenes": {"type": "array", "items": {"type": "object"}, "description":
                        "in order: {title, summary, refs:[the characters/places in the scene, by "
                        "name], shots:[{title, framing, seconds, prompt, make, refs, "
@@ -3748,6 +4002,16 @@ AGENT_TOOLS = {
         "description": "Apply open proposals ONLY when the person has just said so in their own "
                        "words (\"apply\", \"approve\", \"go ahead\", \"yes, do it\"). Never on your "
                        "own initiative."},
+    "design_voice": {
+        "handler": _t_design_voice,
+        "schema": {"type": "object", "required": ["project_id", "ref"], "properties": {
+            **_PID, "ref": {"type": "string", "description": "the character's NAME (or ref_id)"},
+            "voice": {"type": "string", "description": "voice description: gender, age, pitch, "
+                      "timbre, pace, accent, emotion (omit = from the character description)"}}},
+        "description": "Design (or redesign) a character's own voice from a description "
+                       "(Qwen3-TTS VoiceDesign). Characters get one automatically when created; "
+                       "use this when the person wants a different voice. Their lines are "
+                       "voiced again in it."},
     "web_search": {
         "handler": _t_search, "light": True,
         "schema": {"type": "object", "required": ["query"], "properties": {
@@ -3774,7 +4038,7 @@ AGENT_TOOLS = {
         "description": "Join every shot's clip and mix the timeline into the final film."},
 }
 EDITOR_HEAVY = {"shot_picture_options", "render_shots", "add_dialogue", "add_music",
-                "make_ref_picture", "draw_pictures"}
+                "make_ref_picture", "draw_pictures", "design_voice"}
 
 
 # =========================================================================== API
@@ -4051,7 +4315,8 @@ async def api_add_ref(pid: str, request: Request):
     rid = add_ref(project, str(form.get("kind") or "character"), str(form.get("name") or ""),
                   str(form.get("description") or ""), image_id,
                   str(form.get("speaker") or "") or None, vraw or None,
-                  getattr(voice, "filename", "") if vraw else "", user)
+                  getattr(voice, "filename", "") if vraw else "", user,
+                  voice_design=str(form.get("voice_design") or ""))
     return {"id": rid}
 
 
@@ -4060,8 +4325,8 @@ async def api_edit_ref(pid: str, rid: str, request: Request):
     user = _user(request)
     project = production(user, pid)
     form = await request.form()
-    f = {k: form.get(k) for k in ("name", "description", "kind", "speaker", "image_id")
-         if form.get(k) is not None}
+    f = {k: form.get(k) for k in ("name", "description", "kind", "speaker", "image_id",
+                                  "voice_design") if form.get(k) is not None}
     pic = form.get("picture")
     if pic is not None and hasattr(pic, "read"):
         raw = await pic.read()
@@ -4156,6 +4421,45 @@ async def api_del_ref(pid: str, rid: str, request: Request):
     user = _user(request)
     delete_ref(production(user, pid), rid)
     return {"ok": True}
+
+
+@router.post("/api/editor/{pid}/refs/{rid}/design-voice")
+async def api_design_voice(pid: str, rid: str, request: Request):
+    """Design (or redesign) this character's voice from {voice} or its description. The new
+    voice replaces the old sample when it is ready, and their lines are voiced again in it."""
+    user = _user(request)
+    project = production(user, pid)
+    b = await _body(request)
+    r = _ref(pid, rid)
+    brief = str(b.get("voice") or "").strip()
+    if b.get("redo") or brief:
+        # A new design: the old sample and preset go; lines follow the new voice.
+        db.run("UPDATE prod_refs SET voice_path=NULL, voice_text=NULL, speaker=NULL WHERE id=?",
+               (rid,))
+        if r["voice_path"]:
+            Path(r["voice_path"]).unlink(missing_ok=True)
+    sid = await design_voice(project, user, rid, brief or None)
+    return {"speech_id": sid, "voice": _ref(pid, rid)["voice_design"]}
+
+
+@router.post("/api/editor/{pid}/design-voices")
+async def api_design_voices(pid: str, request: Request):
+    """Every character without a voice of their own gets one designed (and the lines they
+    already have are voiced again in it)."""
+    user = _user(request)
+    production(user, pid)
+    b = await _body(request)
+    n = 0
+    for r in db.query("SELECT * FROM prod_refs WHERE project_id=?", (pid,)):
+        if b.get("replace_presets") and r["kind"] in VOICE_KINDS and r["speaker"] \
+                and not r["voice_path"]:
+            db.run("UPDATE prod_refs SET speaker=NULL WHERE id=?", (r["id"],))
+            r = _ref(pid, r["id"])
+        if needs_voice(r) and not r["voice_job"]:
+            db.run("UPDATE prod_refs SET voice_auto=1 WHERE id=?", (r["id"],))
+            n += 1
+    _touch(pid)
+    return {"characters": n}
 
 
 @router.get("/api/editor/{pid}/refs/{rid}/voice")

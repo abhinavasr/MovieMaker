@@ -48,6 +48,11 @@ CUSTOM_GLOB = os.getenv(
     "TTS_CUSTOM_GLOB", "/models/hf/hub/models--Qwen--Qwen3-TTS-12Hz-1.7B-CustomVoice/snapshots/*")
 BASE_GLOB = os.getenv(
     "TTS_BASE_GLOB", "/base-hf/hub/models--Qwen--Qwen3-TTS-12Hz-1.7B-Base/snapshots/*")
+# VoiceDesign: a NEW voice from a written description ("elderly woman, warm low voice, slow").
+# The studio designs one short sample per character and clones every line from it, so a
+# character keeps one voice (2026-11-25: characters without a voice all got the male default).
+DESIGN_GLOB = os.getenv(
+    "TTS_DESIGN_GLOB", "/models/hf/hub/models--Qwen--Qwen3-TTS-12Hz-1.7B-VoiceDesign/snapshots/*")
 DEVICE = os.getenv("TTS_DEVICE", "cuda:0")
 IDLE = int(os.getenv("TTS_IDLE_UNLOAD_S", "0"))
 TIMEOUT = int(os.getenv("TTS_RENDER_TIMEOUT_S", "240"))
@@ -69,7 +74,7 @@ class GpuBusy(Exception):
 
 class Engine:
     def __init__(self):
-        self.kind: str | None = None          # "custom" | "base" | None
+        self.kind: str | None = None          # "custom" | "base" | "design" | None
         self.model = None
         self.lock = threading.Lock()
         self.last = 0.0
@@ -88,7 +93,7 @@ class Engine:
         from qwen_tts import Qwen3TTSModel
         # Local snapshot folders, not repo ids: given an id, qwen_tts asks the
         # Hub for model info even when the weights are cached, and fails offline.
-        pattern = CUSTOM_GLOB if kind == "custom" else BASE_GLOB
+        pattern = {"custom": CUSTOM_GLOB, "base": BASE_GLOB, "design": DESIGN_GLOB}[kind]
         found = sorted(glob.glob(pattern))
         if not found:
             raise RuntimeError(f"the {kind} checkpoint is not on disk ({pattern})")
@@ -245,14 +250,34 @@ def healthz():
     return {"status": "ok", "loaded": E.kind, "renders": E.renders,
             "speakers": SPEAKERS, "languages": LANGUAGES,
             "clone_available": bool(glob.glob(BASE_GLOB)),
+            "design_available": bool(glob.glob(DESIGN_GLOB)),
             "transcribe_available": bool(glob.glob(WHISPER_GLOB))}
 
 
-def _wav(out: np.ndarray, sr: int) -> Response:
+def median_f0(x: np.ndarray, sr: int) -> float:
+    """Median pitch of the voiced frames (autocorrelation). The studio checks a designed voice
+    against its description with it: a "female" voice came out at 128 Hz (2026-11-25)."""
+    x = np.asarray(x, dtype=np.float32)
+    fr, hop, out = int(0.04 * sr), int(0.01 * sr), []
+    lo, hi = int(sr / 400), int(sr / 70)
+    for i in range(0, max(0, len(x) - fr), hop):
+        w = x[i:i + fr] * np.hanning(fr)
+        if np.sqrt((w ** 2).mean()) < 0.02:
+            continue
+        ac = np.correlate(w, w, "full")[fr - 1:]
+        k = lo + int(np.argmax(ac[lo:hi]))
+        if ac[k] > 0.35 * ac[0]:
+            out.append(sr / k)
+    return float(np.median(out)) if out else 0.0
+
+
+def _wav(out: np.ndarray, sr: int, pitch: bool = False) -> Response:
     buf = io.BytesIO()
     sf.write(buf, out, sr, format="WAV")
-    return Response(buf.getvalue(), media_type="audio/wav",
-                    headers={"X-TTS-Duration-S": f"{len(out) / sr:.3f}"})
+    headers = {"X-TTS-Duration-S": f"{len(out) / sr:.3f}"}
+    if pitch:
+        headers["X-TTS-F0"] = f"{median_f0(out, sr):.0f}"
+    return Response(buf.getvalue(), media_type="audio/wav", headers=headers)
 
 
 def _text(text: str) -> str:
@@ -264,7 +289,7 @@ def _text(text: str) -> str:
     return text
 
 
-async def _render(kind: str, fn) -> Response:
+async def _render(kind: str, fn, pitch: bool = False) -> Response:
     try:
         out, sr = await asyncio.wait_for(asyncio.to_thread(E.run, kind, fn), TIMEOUT)
     except GpuBusy:
@@ -277,7 +302,7 @@ async def _render(kind: str, fn) -> Response:
     except Exception as exc:                                   # noqa: BLE001
         log.exception("render failed")
         raise HTTPException(500, f"render failed: {type(exc).__name__}: {exc}")
-    return _wav(out, sr)
+    return _wav(out, sr, pitch)
 
 
 class Speak(BaseModel):
@@ -307,6 +332,34 @@ async def speak(req: Speak):
         return m.generate_custom_voice(text=text, speaker=speaker, language=language,
                                        instruct=instruct, **kw)
     return await _render("custom", go)
+
+
+class Design(BaseModel):
+    text: str
+    instruct: str
+    language: str = "English"
+    temperature: float | None = None
+    top_p: float | None = None
+    seed: int | None = None
+
+
+@app.post("/design")
+async def design(req: Design):
+    """Speak `text` in a new voice described by `instruct` (gender, age, pitch, timbre,
+    pace, accent, emotion). Used to make each character's voice sample."""
+    text = _text(req.text)
+    instruct = (req.instruct or "").strip()[:800]
+    if not instruct:
+        raise HTTPException(422, "describe the voice in `instruct`")
+    language = next((l for l in LANGUAGES if l.lower() == req.language.lower()), None)
+    if language is None or language == "Auto":
+        language = "English"
+    kw = sampling(req.temperature, req.top_p, None, None)
+
+    def go(m):
+        seed_all(req.seed)
+        return m.generate_voice_design(text=text, instruct=instruct, language=language, **kw)
+    return await _render("design", go, pitch=True)
 
 
 async def _transcribe(ref: np.ndarray, sr: int) -> tuple[str, str | None]:

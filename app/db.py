@@ -457,7 +457,12 @@ def _migrate(conn) -> None:
               "images": {"model": "TEXT"},
               "agent_threads": {"thought": "TEXT NOT NULL DEFAULT ''", "stage_at": "REAL",
                                 "context": "TEXT NOT NULL DEFAULT '[]'", "project_id": "TEXT"},
-              "prod_refs": {"angles": "TEXT NOT NULL DEFAULT '{}'"},
+              "prod_refs": {"angles": "TEXT NOT NULL DEFAULT '{}'",
+                            # designed voices (2026-11-25): the voice description, what the
+                            # sample says (for cloning), the design job, design automatically
+                            "voice_design": "TEXT NOT NULL DEFAULT ''",
+                            "voice_text": "TEXT", "voice_job": "TEXT",
+                            "voice_auto": "INTEGER NOT NULL DEFAULT 0"},
               "agent_lessons": {"project_id": "TEXT"},
               "prod_clips": {"instruct": "TEXT NOT NULL DEFAULT ''", "auto": "INTEGER NOT NULL DEFAULT 0"},
               "prod_scenes": {"refs": "TEXT NOT NULL DEFAULT '[]'",

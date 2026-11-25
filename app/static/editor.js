@@ -287,12 +287,17 @@
   function paintRefs() {
     $("refs").innerHTML = S.refs.length ? S.refs.map((r) => `<div class="ed-ref" data-ref="${r.id}">
       <div class="th">${r.image ? `<img src="${esc(r.image)}" alt="" loading="lazy">` : r.image_pending ? "⏳" : ({character: "👤", location: "🏛", prop: "🗝", style: "🎨", voice: "🎙"}[r.kind] || "📌")}</div>
-      <div><b>${esc(r.name)}</b><span>${esc(r.kind[0].toUpperCase() + r.kind.slice(1))}${r.description ? " · " + esc(r.description) : ""}</span>${r.voice ? `<span class="v">🎙 voice sample</span>` : r.speaker ? `<span class="v">🎙 ${esc(r.speaker)}</span>` : ""}${r.kind === "character" || r.kind === "location" ? `<span class="v" style="color:var(--muted)">🔄 ${(r.angles || []).filter((a) => a.status === "succeeded" && !a.angle.startsWith("photo_")).length}/4 ${r.kind === "location" ? "views" : "angles"}${(r.angles || []).some((a) => a.angle.startsWith("photo_")) ? ` + ${(r.angles || []).filter((a) => a.angle.startsWith("photo_")).length} photo(s)` : ""}${(r.angles || []).some((a) => !["succeeded", "failed", "gone"].includes(a.status)) || r.angles_waiting ? " · drawing" : ""}</span>` : ""}</div>
+      <div><b>${esc(r.name)}</b><span>${esc(r.kind[0].toUpperCase() + r.kind.slice(1))}${r.description ? " · " + esc(r.description) : ""}</span>${r.voice_pending ? `<span class="v">🎙 designing voice…</span>` : r.voice_designed ? `<span class="v">🎙 own voice</span>` : r.voice ? `<span class="v">🎙 voice sample</span>` : r.speaker ? `<span class="v">🎙 ${esc(r.speaker)}</span>` : ""}${r.kind === "character" || r.kind === "location" ? `<span class="v" style="color:var(--muted)">🔄 ${(r.angles || []).filter((a) => a.status === "succeeded" && !a.angle.startsWith("photo_")).length}/4 ${r.kind === "location" ? "views" : "angles"}${(r.angles || []).some((a) => a.angle.startsWith("photo_")) ? ` + ${(r.angles || []).filter((a) => a.angle.startsWith("photo_")).length} photo(s)` : ""}${(r.angles || []).some((a) => !["succeeded", "failed", "gone"].includes(a.status)) || r.angles_waiting ? " · drawing" : ""}</span>` : ""}</div>
       <span>⋮</span></div>`).join("") : `<div class="ed-note" style="padding:4px 6px">Characters, places and voices the film keeps coming back to. Shots that include them get them as references, so faces and voices stay consistent.</div>`;
   }
   $("refs").addEventListener("click", (e) => { const d = e.target.closest("[data-ref]"); if (d) refModal(refById(d.dataset.ref)); });
   $("add-ref").onclick = () => refModal(null);
   if ($("refs-lib")) $("refs-lib").onclick = () => libraryModal("");
+  if ($("refs-voices")) $("refs-voices").onclick = async () => {
+    const presets = S.refs.filter((r) => (r.kind === "character" || r.kind === "voice") && r.speaker && !r.voice).length;
+    const replace = presets ? confirm(`Design a voice for every character from their description.\n\n${presets} character(s) use a preset voice. Replace those with designed voices too? (OK = yes, Cancel = keep the presets)`) : false;
+    try { const d = await api(`/api/editor/${PID}/design-voices`, {replace_presets: replace}); toast(d.characters ? `Designing ${d.characters} voice(s); their lines follow automatically` : "Every character already has a voice"); load(true); }
+    catch (e) { toast(e.message); } };
   $("refs-gen").onclick = async () => {
     const missing = S.refs.filter((r) => !r.image && !r.image_pending).length;
     if (!missing) { toast("Every reference already has a picture"); return; }
@@ -335,7 +340,10 @@
         <div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap;align-items:center"><button class="ed-btn sm" type="button" id="rf-photos">⤒ Add photos</button><label class="ed-note ed-drawwith">Draw with <select id="rf-vmodel" title="If a view comes out wrong, pick another model and press ↻ on it">${modelOptions("")}</select></label><button class="ed-btn sm" type="button" id="rf-angles">↻ Redraw all</button><span class="ed-note" id="rf-turn-note"></span></div>
         <div class="ed-note" style="margin-top:4px">A view not right? Pick another model under “Draw with” and press ↻ on it — or use your own photos: ⤒ on a view replaces it, ✕ removes it, and “Add photos” takes several at once. Your photos are never redrawn.</div></div>` : ""}
       <input type="file" id="rf-picfile" accept="image/*" hidden>
-      <div class="ed-row2" id="rf-voicerow" ${voiced(r?.kind || "character") ? "" : "hidden"}><label class="ed-field">Preset voice<select id="rf-speaker"><option value="">— none —</option>${S.speakers.map((s) => `<option value="${esc(s)}" ${r?.speaker === s ? "selected" : ""}>${esc(voiceLabel(s))}</option>`).join("")}</select></label>
+      <div class="ed-field" id="rf-designrow" ${voiced(r?.kind || "character") ? "" : "hidden"}>Their voice — designed from this description, then used for every line they say
+        <textarea id="rf-vdesign" rows="2" placeholder="Empty = written from the description above (gender, age, pitch, timbre, pace, accent)">${esc(r?.voice_design || "")}</textarea>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:6px">${r ? `<button class="ed-btn sm" type="button" id="rf-design">✨ ${r.voice_designed ? "Design a new voice" : "Design this voice"}</button>` : ""}<span class="ed-note" id="rf-vstate">${r?.voice_pending ? "🎙 designing their voice…" : r?.voice_designed ? "🎙 their designed voice is in use" : r?.voice ? "🎙 your voice sample is in use" : r?.speaker ? "🎙 a preset voice is in use" : (r ? "" : "Designed automatically when you save")}</span></div></div>
+      <div class="ed-row2" id="rf-voicerow" ${voiced(r?.kind || "character") ? "" : "hidden"}><label class="ed-field">…or a preset voice<select id="rf-speaker"><option value="">— their own designed voice —</option>${S.speakers.map((s) => `<option value="${esc(s)}" ${r?.speaker === s ? "selected" : ""}>${esc(voiceLabel(s))}</option>`).join("")}</select></label>
       <label class="ed-field">…or a voice sample to clone<div class="ed-drop" id="rf-voice">${r?.voice ? "🎙 sample saved — click to replace" : "5–30 s of clear speech"}</div><input type="file" id="rf-voicefile" accept="audio/*" hidden></label></div>
       ${r?.voice ? `<audio src="${esc(r.voice)}" controls style="width:100%"></audio>` : ""}
       <div class="acts">${r ? `<button class="ed-btn danger" data-act="delete" style="margin-right:auto">Delete</button>` : ""}<button class="ed-btn ghost" data-act="close">Cancel</button><button class="ed-btn gold" data-act="save">Save</button></div>`,
@@ -350,6 +358,7 @@
       fd.append("name", $("rf-name").value.trim()); fd.append("kind", $("rf-kind").value);
       fd.append("description", $("rf-desc").value);
       fd.append("speaker", voiced($("rf-kind").value) ? $("rf-speaker").value : "");
+      if (voiced($("rf-kind").value)) fd.append("voice_design", $("rf-vdesign").value.trim());
       if ($("rf-picfile").files[0]) fd.append("picture", $("rf-picfile").files[0]);
       else if (pickedImage) fd.append("image_id", pickedImage);
       if (voiced($("rf-kind").value) && $("rf-voicefile").files[0]) fd.append("voice", $("rf-voicefile").files[0]);
@@ -358,7 +367,13 @@
       if (!r && d.id) r = {id: d.id, kind: fd.get("kind"), name: fd.get("name")};
       return r;
     }
-    $("rf-kind").onchange = () => { $("rf-voicerow").hidden = !voiced($("rf-kind").value); };
+    $("rf-kind").onchange = () => { $("rf-voicerow").hidden = $("rf-designrow").hidden = !voiced($("rf-kind").value); };
+    if ($("rf-design")) $("rf-design").onclick = async () => {
+      const b = $("rf-design"); b.disabled = true;
+      try { await saveRef(); const d = await api(`/api/editor/${PID}/refs/${r.id}/design-voice`, {voice: $("rf-vdesign").value.trim(), redo: true});
+        $("rf-vdesign").value = d.voice || $("rf-vdesign").value; $("rf-vstate").textContent = "🎙 designing their voice… their lines follow it automatically"; toast("Designing the voice"); load(true); }
+      catch (e) { toast(e.message); } finally { b.disabled = false; }
+    };
     const ANG = r && r.kind === "location" ? {wide: "Wide", reverse: "Reverse", detail: "Detail", aerial: "Aerial"} : {three_quarter: "¾ view", side: "Side", back: "Back", face: "Face"};
     function paintTurn() {
       if (!live() || !$("rf-turn") || !r) return;

@@ -763,6 +763,12 @@ audio, mix) is given to you in every turn; the person sees the same thing on scr
     look agrees with this story; pass the story's description anyway. If it disagrees (age,
     skin, hair, costume), add a fresh reference instead.
   * make_ref_picture takes the reference's NAME (ref), so it works right after you add it.
+  * EVERY CHARACTER GETS ITS OWN VOICE, designed from a voice brief: give each character ref a
+    `voice` (one sentence: gender, age, pitch, timbre, pace, accent the setting implies, how they
+    usually sound -- e.g. "A woman in her fifties, warm low voice, soft Indian English accent,
+    slow and kind"). It is designed automatically when the character is created and every line
+    of theirs is cloned from it; never leave a speaking character on a preset of the wrong
+    gender. design_voice redesigns one when the person asks for a different voice.
 - When the person says to apply / approve / go ahead with your proposal(s), call apply_proposals
   (and then carry on with the next stage). Never apply on your own initiative.
 - When the state says you may apply directly, your edits take effect at once: CARRY ON through
