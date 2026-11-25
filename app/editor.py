@@ -3918,6 +3918,14 @@ async def api_delete_production(pid: str, request: Request):
     from app import agent
     user = _user(request)
     project = service.owned_project(user, pid)
+    # Stop its work first, as ■ Stop does: on 2026-11-24 a deleted production's place
+    # views kept drawing in WIS (and held up the person's next production) because only
+    # the rows were removed.
+    if project["mode"] == "storyboard":
+        try:
+            await stop_all(project, user)
+        except Exception as exc:                               # noqa: BLE001
+            log.warning("stopping %s before deleting it: %s", pid, exc)
     if service.is_rendering(project):
         render.request_cancel(pid)
     for t in db.query("SELECT id FROM agent_threads WHERE project_id=?", (pid,)):

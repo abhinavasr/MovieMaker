@@ -523,7 +523,14 @@ async def cancel(request: Request, project_id: str):
 
 @app.post("/projects/{project_id}/delete")
 async def delete_project(request: Request, project_id: str):
-    project, _ = _project(request, project_id)
+    project, user = _project(request, project_id)
+    if project["mode"] == "storyboard":
+        # Its pictures, voicing and assistant stop first (see editor.api_delete_production).
+        from app import editor
+        try:
+            await editor.stop_all(project, user)
+        except Exception:                                      # noqa: BLE001
+            log.warning("stopping %s before deleting it failed", project_id, exc_info=True)
     if project["status"] in ("queued", "running"):
         render.request_cancel(project_id)
     _delete_project_files(project_id)
