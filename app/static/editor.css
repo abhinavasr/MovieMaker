@@ -571,3 +571,6 @@ body:has(.ed) footer, body:has(.ed) .retention-note { display: none; }
 .ed-chip.lk input { width: auto; margin: 0; }
 .ed-wear { margin: 6px 0 10px; }
 .ed-wear .h { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+
+/* A character whose look the person has not chosen yet */
+.ed-choose { display: flex; gap: 10px; align-items: center; justify-content: space-between; padding: 10px 12px; margin-bottom: 10px; border-radius: 10px; background: rgba(251, 191, 36, .12); border: 1px solid rgba(251, 191, 36, .45); font-size: .85rem; }

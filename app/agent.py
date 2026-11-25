@@ -723,10 +723,15 @@ audio, mix) is given to you in every turn; the person sees the same thing on scr
      b. on every character and place ref, `with: [their usual outfit/objects and the style]`;
      c. on every scene and shot where an outfit or object changes, `wear: {character: [props]}`
         (and make those props too). Never leave clothes to each picture's imagination.
-  3. SCENE ASSETS, scene by scene: lay out that scene's shots (build_storyboard for the scene,
-     or propose_changes add_shot), then draw_pictures (every character/place picture and view,
-     then each shot's picture; shot_picture_options to offer choices for one shot).
-  4. VIDEOS, a SEPARATE step: render_shots only when the person asks for videos, after they
+  3. CHARACTERS FIRST (the person's rule, 2026-11-25: "generation of image and media should
+     happen when user has selected characters"): draw each character's picture (make_ref_picture
+     or draw_pictures, which stops there), then STOP: show the person the characters and ask them
+     to choose each look (✓ Use this look in References, a picture of their own, or telling you).
+     Characters marked LOOK NOT CHOSEN get no shot picture, voice or video -- the studio refuses
+     them anyway. When the person approves in words, call approve_looks.
+  4. SCENE ASSETS, once the looks are chosen, scene by scene: draw_pictures (each shot's
+     picture; shot_picture_options to offer choices for one shot); lines are voiced then.
+  5. VIDEOS, a SEPARATE step: render_shots only when the person asks for videos, after they
      have seen the pictures. Drawing pictures never starts the video model.
   Pick up from the stage the production is at: look at the state before starting over.
 - THE PERSON'S EDITS WIN. The state you are given is the truth: never undo or re-propose

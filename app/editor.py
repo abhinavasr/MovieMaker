@@ -574,7 +574,8 @@ def _drop_unused_asset(pid: str, asset_id: str | None) -> None:
 
 def add_ref(project, kind: str, name: str, description: str = "", image_id: str | None = None,
             speaker: str | None = None, voice: bytes | None = None, voice_name: str = "",
-            user: auth.User | None = None, voice_design: str = "") -> str:
+            user: auth.User | None = None, voice_design: str = "",
+            approved: bool = True) -> str:
     pid = project["id"]
     if kind not in REF_KINDS:
         raise HTTPException(400, f"kind must be one of {', '.join(REF_KINDS)}")
@@ -596,6 +597,8 @@ def add_ref(project, kind: str, name: str, description: str = "", image_id: str 
     if image_id and kind in ("character", "location"):
         if not apply_sheet(project, user, rid, image_id):
             _want_angles(pid, rid)
+    if not approved and kind == "character":
+        db.run("UPDATE prod_refs SET approved=0 WHERE id=?", (rid,))
     if kind in VOICE_KINDS and not voice_path and not speaker:
         # Part of creating a character: its own voice is designed from its description.
         db.run("UPDATE prod_refs SET voice_auto=1, voice_design=? WHERE id=?",
@@ -1109,6 +1112,8 @@ async def _run_voices() -> None:
         if user is None or project is None or r["kind"] not in VOICE_KINDS:
             db.run("UPDATE prod_refs SET voice_auto=0 WHERE id=?", (r["id"],))
             continue
+        if unchosen(r["project_id"], [r["id"]]):
+            continue          # no audio for a character until the person has chosen them
         try:
             await design_voice(project, user, r["id"])
             started += 1
@@ -1201,11 +1206,17 @@ async def _run_scripts() -> None:
                       "(r.voice_path IS NULL OR r.voice_path='') AND (r.speaker IS NULL OR "
                       "r.speaker='') AND r.voice_design != 'off' AND r.voice_auto=1 AND "
                       "r.voice_job IS NOT NULL)) "
+                      # lines of characters not chosen yet are skipped, not counted
+                      "AND (c.ref_id IS NULL OR NOT EXISTS (SELECT 1 FROM prod_refs r2 WHERE "
+                      "r2.id=c.ref_id AND r2.kind='character' AND r2.approved=0)) "
                       "ORDER BY c.project_id, c.start_s LIMIT 12"):
         user = agent.load_user(c["owner"])
         project = db.one("SELECT * FROM projects WHERE id=?", (c["project_id"],))
         if user is None or project is None:
             continue
+        cl = db.one("SELECT ref_id FROM prod_clips WHERE id=?", (c["id"],))
+        if cl and cl["ref_id"] and unchosen(c["project_id"], [cl["ref_id"]]):
+            continue          # voiced once the person has chosen this character
         try:
             await voice_script(project, user, c["id"])
         except HTTPException as exc:
@@ -1870,6 +1881,37 @@ async def check_continuity(pid: str, scene_id: str) -> dict:
     return decided
 
 
+def waits_for_looks(pid: str) -> bool:
+    """Shots, lines and videos wait until the person has chosen their characters' looks
+    (default on; ⋯ menu). 2026-11-25, the person: "your generation of image and media should
+    happen when user has selected characters"."""
+    p = db.one("SELECT params_json FROM projects WHERE id=?", (pid,))
+    return (json.loads(p["params_json"] or "{}").get("wait_for_cast", True)) if p else True
+
+
+def unchosen(pid: str, ref_ids) -> list:
+    """The characters among these whose look the person has not chosen yet."""
+    if not waits_for_looks(pid):
+        return []
+    out = []
+    for rid in ref_ids:
+        r = db.one("SELECT id, name, kind, approved FROM prod_refs WHERE id=? AND project_id=?",
+                   (rid, pid))
+        if r and r["kind"] == "character" and not r["approved"]:
+            out.append(r)
+    return out
+
+
+def approve_refs(pid: str, ref_ids, approved: bool = True) -> int:
+    n = 0
+    for rid in ref_ids:
+        if db.one("SELECT 1 FROM prod_refs WHERE id=? AND project_id=?", (rid, pid)):
+            db.run("UPDATE prod_refs SET approved=? WHERE id=?", (1 if approved else 0, rid))
+            n += 1
+    _touch(pid)
+    return n
+
+
 def linked_ids(pid: str, ref_id: str) -> list[str]:
     """What goes with a reference, both ways: the props and style linked to a character or
     place, and the characters/places a prop or style is linked to. (2026-11-25, the person:
@@ -2171,7 +2213,8 @@ async def _run_auto_shots() -> None:
         for j in jobs:
             shot = db.one("SELECT * FROM shots WHERE id=?", (j["shot"],))
             user = agent.load_user(j["user"])
-            if shot is None or user is None or db.now() - j.get("at", 0) > 12 * 3600:
+            if shot is None or user is None or (db.now() - j.get("at", 0) > 12 * 3600
+                                                and j.get("stage") != "looks"):
                 continue
             proj = db.one("SELECT * FROM projects WHERE id=?", (pid,))
             try:
@@ -2209,6 +2252,17 @@ async def _run_auto_shots() -> None:
                             await images.refresh(r["image_id"])
                     if not waiting:
                         j["stage"] = "picture" if not shot["asset_id"] else "render"
+                if j["stage"] in ("picture", "looks") and not shot["asset_id"]:
+                    who = unchosen(pid, _shot_ref_ids(shot))
+                    if who:
+                        # The characters are drawn; the person chooses them before any shot
+                        # picture, voice or video is made with them.
+                        j["stage"] = "looks"
+                        j["waiting_for"] = [r["name"] for r in who]
+                        keep.append(j)
+                        continue
+                    j["stage"] = "picture"
+                    j.pop("waiting_for", None)
                 if j["stage"] == "picture" and shot["asset_id"]:
                     j["stage"] = "render"                  # the person set one meanwhile
                 elif j["stage"] == "picture" and not j.get("images"):
@@ -2239,6 +2293,9 @@ async def _run_auto_shots() -> None:
                 if j["stage"] == "render":
                     if j.get("until") == "picture":
                         continue                   # step 1 only: the person starts the videos
+                    if unchosen(pid, _shot_ref_ids(shot)):
+                        keep.append(j)             # no video until the characters are chosen
+                        continue
                     to_render.setdefault(j["user"], []).append(shot["id"])
                     continue
             except HTTPException as exc:
@@ -3471,7 +3528,9 @@ def apply_changes(project, user: auth.User, changes: list, guard: bool = False) 
                 keys[key] = add_ref(
                     project, c.get("kind", "character"), c.get("name", ""),
                     c.get("description", ""), c.get("image_id"), c.get("speaker"), user=user,
-                    voice_design=str(c.get("voice") or c.get("voice_design") or ""))
+                    voice_design=str(c.get("voice") or c.get("voice_design") or ""),
+                    # a picture given with it is the person's own; otherwise they choose later
+                    approved=bool(c.get("image_id")) or not guard)
         elif op == "edit_ref":
             target = rref(c.get("ref_id") or c.get("name"))
             if c.get("links") is not None or c.get("with") is not None:
@@ -3604,6 +3663,7 @@ def state(project, base: str) -> dict:
                           "voice": f"/api/editor/{pid}/refs/{r['id']}/voice"
                           if r["voice_path"] else None,
                           "voice_design": r["voice_design"] or "",
+                          "approved": bool(r["approved"]),
                           "links": linked_ids(pid, r["id"]),
                           "voice_designed": bool(r["voice_text"]) and bool(r["voice_path"]),
                           "voice_pending": bool(r["voice_job"]) or (
@@ -3638,6 +3698,7 @@ def state(project, base: str) -> dict:
         "proposals": props, "export": export_view, "ai": ai_activity(project),
         "agent_applies": bool(params.get("agent_applies")),
         "image_model": params.get("image_model") or "",
+        "wait_for_cast": params.get("wait_for_cast", True) is not False,
         "planner": cfg.PLANNER_MODEL,
         "video_refs": bool(params.get("video_refs")),
         "thread_id": thread["id"] if thread else None,
@@ -3697,6 +3758,9 @@ def describe_for_agent(project_id: str, focus_shot: str | None = None, compact: 
                     "voice sample" if r["voice_path"] else
                     (f"speaker {r['speaker']}" if r["speaker"] else "no voice")]
             goes = [ref_names.get(x, x) for x in linked_ids(project_id, r["id"])]
+            if r["kind"] == "character" and not r["approved"] and waits_for_looks(project_id):
+                bits.append("LOOK NOT CHOSEN BY THE PERSON YET: no shot picture, voice or video "
+                            "with them until they choose")
             lines.append(f"- ref_id={r['id']} {r['kind']} \"{r['name']}\": "
                          f"{r['description'][:260 if compact >= 2 else 700]} [{', '.join(bits)}]"
                          + (f" goes with: {', '.join(goes)}" if goes else ""))
@@ -3964,9 +4028,19 @@ async def _t_ref_picture(user, args, base):
     return out
 
 
+def _gate(pid: str, ref_ids, what: str) -> None:
+    who = unchosen(pid, ref_ids)
+    if who:
+        raise HTTPException(409, f"waiting for the person to choose the look of "
+                                 f"{', '.join(r['name'] for r in who)} before any {what} is made "
+                                 "with them: show them the character pictures and ask (they press "
+                                 "✓ Use this look, or tell you; then call approve_looks)")
+
+
 async def _t_picture_options(user, args, base):
     project = _agent_project(user, args)
     shot_id = str(args.get("shot_id") or "")
+    _gate(project["id"], _shot_ref_ids(_shot(project["id"], shot_id)), "shot picture")
     ids = await picture_options(project, user, shot_id, str(args.get("prompt") or ""),
                                 int(args.get("count") or 2), args.get("model"))
     for i in ids:
@@ -3990,6 +4064,11 @@ async def _t_picture_options(user, args, base):
 async def _t_render(user, args, base):
     project = _agent_project(user, args)
     now, skipped = prepare_render(project, user, args.get("shot_ids") or None, "videos")
+    held = [s for s in now if unchosen(project["id"], _shot_ref_ids(_shot(project["id"], s)))]
+    now = [s for s in now if s not in held]
+    if held and not now:
+        _gate(project["id"], [x for s in held for x in _shot_ref_ids(_shot(project["id"], s))],
+              "video")
     if now:
         await render_shots(project, user, now)
     out = {"project_id": project["id"], "status": "queued" if now else "nothing to render",
@@ -4017,12 +4096,26 @@ async def _t_draw(user, args, base):
                     "no videos are made (render_shots is a separate step the person asks for)"}
 
 
+async def _t_approve(user, args, base):
+    project = _agent_project(user, args)
+    pid = project["id"]
+    names = args.get("refs") or []
+    ids = [r["id"] for r in db.query("SELECT id, kind, approved FROM prod_refs WHERE project_id=?", (pid,))
+           if r["kind"] == "character" and not r["approved"]] if not names or names == ["all"] else \
+        [x for x in (resolve_ref(pid, str(n)) for n in names) if x]
+    approve_refs(pid, ids)
+    return {"chosen": [_ref(pid, i)["name"] for i in ids],
+            "note": "their shots' pictures, voices and videos can be made now"}
+
+
 async def _t_dialogue(user, args, base):
     project = _agent_project(user, args)
     start = args.get("start_s")
     if start is None and args.get("shot_id"):
         start = timings(project["id"]).get(args["shot_id"], (0, 0))[0] + \
             float(args.get("offset_s") or 0.3)
+    if args.get("ref_id"):
+        _gate(project["id"], [resolve_ref(project["id"], str(args["ref_id"])) or args["ref_id"]], "voice")
     cid = await add_dialogue(project, user, args.get("ref_id"), str(args.get("text") or ""),
                              float(start or 0), str(args.get("instruct") or ""),
                              args.get("language"), True, args.get("speaker"))
@@ -4352,6 +4445,14 @@ AGENT_TOOLS = {
         "description": "Change something in an EXISTING picture and keep everything else (an "
                        "instruction editor, Qwen-Image-Edit). Use it whenever the person asks to "
                        "change part of a picture, instead of drawing it again."},
+    "approve_looks": {
+        "handler": _t_approve, "light": True,
+        "schema": {"type": "object", "required": ["project_id"], "properties": {
+            **_PID, "refs": {"type": "array", "items": {"type": "string"},
+                             "description": "character names, or omit/['all'] for every one"}}},
+        "description": "Mark characters' looks as chosen ONLY when the person has just said so in "
+                       "their own words (\"looks good\", \"use these\", \"approve\"). Until "
+                       "then no shot picture, voice or video is made with them."},
     "design_voice": {
         "handler": _t_design_voice,
         "schema": {"type": "object", "required": ["project_id", "ref"], "properties": {
@@ -4470,6 +4571,10 @@ async def api_settings(pid: str, request: Request):
     if "agent_applies" in b:
         params = db.params_of(db.one("SELECT * FROM projects WHERE id=?", (pid,)))
         params["agent_applies"] = bool(b["agent_applies"])
+        db.set_params(pid, params)
+    if "wait_for_cast" in b:
+        params = db.params_of(db.one("SELECT * FROM projects WHERE id=?", (pid,)))
+        params["wait_for_cast"] = bool(b["wait_for_cast"])
         db.set_params(pid, params)
     if "image_model" in b:
         m = str(b.get("image_model") or "")
@@ -4654,6 +4759,25 @@ async def api_clip(pid: str, sid: str, request: Request):
     return FileResponse(shot["clip_path"], media_type="video/mp4")
 
 
+@router.post("/api/editor/{pid}/refs/{rid}/approve")
+async def api_approve_ref(pid: str, rid: str, request: Request):
+    """{approved: true|false}: the person has chosen this character's look (or takes it back)."""
+    user = _user(request)
+    production(user, pid)
+    b = await _body(request)
+    approve_refs(pid, [rid], b.get("approved", True) is not False)
+    return {"ok": True}
+
+
+@router.post("/api/editor/{pid}/approve-looks")
+async def api_approve_looks(pid: str, request: Request):
+    user = _user(request)
+    production(user, pid)
+    ids = [r["id"] for r in db.query("SELECT id, kind, approved FROM prod_refs WHERE project_id=?", (pid,))
+           if r["kind"] == "character" and not r["approved"]]
+    return {"chosen": approve_refs(pid, ids)}
+
+
 @router.get("/api/editor/{pid}/library")
 async def api_library(pid: str, request: Request, q: str = ""):
     """The person's characters/places/voices from their other productions."""
@@ -4676,7 +4800,9 @@ async def api_import_ref(pid: str, request: Request):
     ids = b.get("ref_ids") or ([b["ref_id"]] if b.get("ref_id") else [])
     if not ids:
         raise HTTPException(400, "pick at least one character")
-    return {"ids": [import_ref(project, user, str(i)) for i in ids[:30]]}
+    made = [import_ref(project, user, str(i)) for i in ids[:30]]
+    approve_refs(pid, made)               # their own character from another story
+    return {"ids": made}
 
 
 @router.post("/api/editor/{pid}/refs")
@@ -4720,6 +4846,8 @@ async def api_edit_ref(pid: str, rid: str, request: Request):
         if raw:
             f["voice"], f["voice_name"] = raw, getattr(voice, "filename", "")
     edit_ref(project, rid, user=user, **f)
+    if f.get("image_id") or pic is not None and getattr(pic, "filename", ""):
+        approve_refs(pid, [rid])          # the person set this picture: the look is chosen
     return {"ok": True}
 
 
@@ -4755,7 +4883,9 @@ async def api_ref_photos(pid: str, rid: str, request: Request):
     form = await request.form()
     files = [(getattr(f, "filename", "photo.png"), await f.read())
              for f in form.getlist("file") if hasattr(f, "read")]
-    return add_ref_photos(project, user, rid, files, str(form.get("slot") or "") or None)
+    out = add_ref_photos(project, user, rid, files, str(form.get("slot") or "") or None)
+    approve_refs(pid, [rid])              # the person's own photos: the look is theirs
+    return out
 
 
 @router.post("/api/editor/{pid}/refs/{rid}/views/{key}/delete")

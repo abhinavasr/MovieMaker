@@ -23,6 +23,7 @@
         <div class="ed-more-menu" id="more-menu" hidden>
           <label class="ed-aspect" title="The film's shape"><span>Aspect</span><select id="aspect" aria-label="Aspect ratio"><option value="9:16">9:16</option><option value="16:9">16:9</option><option value="1:1">1:1</option><option value="2.39:1">2.39:1 cinema</option></select></label>
           <label class="ed-aspect" title="The model that draws every picture made automatically: characters, places, their views and shot pictures. Auto = the usual mix."><span>Pictures</span><select id="img-model" aria-label="Picture model"></select></label>
+          <label class="ed-switch" title="The assistant draws characters first; their shot pictures, voices and videos wait until you choose each look"><input type="checkbox" id="wait-cast"> Wait for my character choices</label>
           <button class="ed-btn sm" id="free-gpu" type="button" title="Unload every model the studio and the picture/video service hold, so the next job has the whole card">🧹 Free the GPU</button>
           <button class="ed-btn sm danger" id="del-prod" type="button">🗑 Delete production</button>
         </div>
@@ -42,7 +43,7 @@
         <div class="ed-scenes" id="scenes"></div>
       </section>
       <section>
-        <div class="ed-sec-h"><h2 title="Characters, places and voices the film keeps coming back to">References</h2><span><button class="ed-btn ghost icon" id="refs-gen" type="button" title="Generate a picture for every reference that has none" aria-label="Generate missing reference pictures">✨</button><button class="ed-btn ghost icon" id="refs-voices" type="button" title="Design a voice for every character that has none" aria-label="Design missing voices">🎙</button><button class="ed-btn ghost icon" id="refs-lib" type="button" title="Add from my characters in other productions" aria-label="My characters">⤓</button><button class="ed-btn ghost icon" id="add-ref" type="button" title="Add a character, place or voice" aria-label="Add reference">＋</button></span></div>
+        <div class="ed-sec-h"><h2 title="Characters, places and voices the film keeps coming back to">References</h2><span><button class="ed-btn ghost icon" id="refs-gen" type="button" title="Generate a picture for every reference that has none" aria-label="Generate missing reference pictures">✨</button><button class="ed-btn sm gold" id="refs-approve" type="button" hidden title="Use every character's current look; their shots, voices and videos go ahead">✓ Approve looks</button><button class="ed-btn ghost icon" id="refs-voices" type="button" title="Design a voice for every character that has none" aria-label="Design missing voices">🎙</button><button class="ed-btn ghost icon" id="refs-lib" type="button" title="Add from my characters in other productions" aria-label="My characters">⤓</button><button class="ed-btn ghost icon" id="add-ref" type="button" title="Add a character, place or voice" aria-label="Add reference">＋</button></span></div>
         <div class="ed-refs" id="refs"></div>
       </section>
     </aside>

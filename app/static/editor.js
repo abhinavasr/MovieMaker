@@ -89,6 +89,8 @@
     const n = S.proposals.length; $("prop-n").hidden = !n; $("prop-n").textContent = n;
     paintPropbar();
     $("applies").checked = S.agent_applies;
+    if ($("wait-cast")) $("wait-cast").checked = S.wait_for_cast;
+    if ($("refs-approve")) $("refs-approve").hidden = !(S.wait_for_cast && S.refs.some((r) => r.kind === "character" && r.approved === false));
     if ($("img-model") && document.activeElement !== $("img-model")) $("img-model").innerHTML = IMG_MODELS.filter(([v]) => v !== "qwen-image-edit-2511").map(([v, t]) => `<option value="${v}" ${v === (S.image_model || "") ? "selected" : ""}>${v ? t : "Auto (klein + Qwen mix)"}</option>`).join("");
     const d = String(S.mix.duck_db <= -0.5 ? Math.round(S.mix.duck_db) : 0);
     if (![...$("duck").options].some((o) => o.value === d)) $("duck").insertAdjacentHTML("beforeend", `<option value="${d}">${d} dB</option>`);
@@ -296,7 +298,7 @@
   function paintRefs() {
     $("refs").innerHTML = S.refs.length ? S.refs.map((r) => `<div class="ed-ref" data-ref="${r.id}">
       <div class="th">${r.image ? `<img src="${esc(r.image)}" alt="" loading="lazy">` : r.image_pending ? "⏳" : ({character: "👤", location: "🏛", prop: "🗝", style: "🎨", voice: "🎙"}[r.kind] || "📌")}</div>
-      <div><b>${esc(r.name)}</b><span>${esc(r.kind[0].toUpperCase() + r.kind.slice(1))}${r.description ? " · " + esc(r.description) : ""}</span>${r.voice_pending ? `<span class="v">🎙 designing voice…</span>` : r.voice_designed ? `<span class="v">🎙 own voice</span>` : r.voice ? `<span class="v">🎙 voice sample</span>` : r.speaker ? `<span class="v">🎙 ${esc(r.speaker)}</span>` : ""}${r.kind === "character" || r.kind === "location" ? `<span class="v" style="color:var(--muted)">🔄 ${(r.angles || []).filter((a) => a.status === "succeeded" && !a.angle.startsWith("photo_")).length}/4 ${r.kind === "location" ? "views" : "angles"}${(r.angles || []).some((a) => a.angle.startsWith("photo_")) ? ` + ${(r.angles || []).filter((a) => a.angle.startsWith("photo_")).length} photo(s)` : ""}${(r.angles || []).some((a) => !["succeeded", "failed", "gone"].includes(a.status)) || r.angles_waiting ? " · drawing" : ""}</span>` : ""}</div>
+      <div><b>${esc(r.name)}</b><span>${esc(r.kind[0].toUpperCase() + r.kind.slice(1))}${r.description ? " · " + esc(r.description) : ""}</span>${r.kind === "character" && r.approved === false && S.wait_for_cast ? `<span class="v" style="color:var(--warn)">⚠ choose this look — their shots wait</span>` : ""}${r.voice_pending ? `<span class="v">🎙 designing voice…</span>` : r.voice_designed ? `<span class="v">🎙 own voice</span>` : r.voice ? `<span class="v">🎙 voice sample</span>` : r.speaker ? `<span class="v">🎙 ${esc(r.speaker)}</span>` : ""}${r.kind === "character" || r.kind === "location" ? `<span class="v" style="color:var(--muted)">🔄 ${(r.angles || []).filter((a) => a.status === "succeeded" && !a.angle.startsWith("photo_")).length}/4 ${r.kind === "location" ? "views" : "angles"}${(r.angles || []).some((a) => a.angle.startsWith("photo_")) ? ` + ${(r.angles || []).filter((a) => a.angle.startsWith("photo_")).length} photo(s)` : ""}${(r.angles || []).some((a) => !["succeeded", "failed", "gone"].includes(a.status)) || r.angles_waiting ? " · drawing" : ""}</span>` : ""}</div>
       <span>⋮</span></div>`).join("") : `<div class="ed-note" style="padding:4px 6px">Characters, places and voices the film keeps coming back to. Shots that include them get them as references, so faces and voices stay consistent.</div>`;
   }
   $("refs").addEventListener("click", (e) => { const d = e.target.closest("[data-ref]"); if (d) refModal(refById(d.dataset.ref)); });
@@ -340,6 +342,7 @@
     const gen = ++refGen, live = () => gen === refGen && !$("modal").hidden;
     const voiced = (k) => k === "character" || k === "voice";
     modal(`<h2>${r ? "Edit reference" : "New reference"}</h2>
+      ${r && r.kind === "character" && r.approved === false && S.wait_for_cast ? `<div class="ed-choose"><span>⚠ <b>Choose ${esc(r.name)}'s look.</b> Their shot pictures, voice and videos wait until you do. Keep this picture, or make / paste / upload another (that counts as choosing).</span><button class="ed-btn gold sm" type="button" id="rf-approve">✓ Use this look</button></div>` : ""}
       <div class="ed-row2"><label class="ed-field">Name<input id="rf-name" value="${esc(r?.name || "")}" maxlength="80" placeholder="Name"></label>
       <label class="ed-field">Kind<select id="rf-kind">${kinds.map((k) => `<option ${r?.kind === k ? "selected" : ""}>${k}</option>`).join("")}</select></label></div>
       <label class="ed-field">Description (used in prompts)<textarea id="rf-desc" rows="3" placeholder="How they look — used in every prompt they appear in">${esc(r?.description || "")}</textarea></label>
@@ -391,6 +394,7 @@
       return r;
     }
     document.querySelectorAll("[data-link]").forEach((x) => x.onchange = () => x.closest(".ed-chip").classList.toggle("off", !x.checked));
+    if ($("rf-approve")) $("rf-approve").onclick = async () => { try { await api(`/api/editor/${PID}/refs/${r.id}/approve`, {approved: true}); toast(`${r.name}: look chosen — their shots can be made now`); $("rf-approve").closest(".ed-choose").remove(); load(true); } catch (e) { toast(e.message); } };
     $("rf-kind").onchange = () => { $("rf-voicerow").hidden = $("rf-designrow").hidden = !voiced($("rf-kind").value); };
     if ($("rf-design")) $("rf-design").onclick = async () => {
       const b = $("rf-design"); b.disabled = true;
@@ -665,7 +669,7 @@
       ${s.start_from === "prev_last" ? `<span class="chain" title="Opens on the previous shot's last frame">⛓ continues</span>` : ""}
       <div class="th">${s.picture ? `<img src="${esc(s.picture)}" alt="" loading="lazy">` : s.start_from === "prev_last" ? "" : "no picture"}</div>
       <span class="mk" title="${MAKE[s.make][0]}">${ICON[s.make]} ${s.seconds}s</span>
-      ${(() => { const b = s.auto ? {continuity: "🔗 checking continuity", refs: "⏳ characters & places", picture: "🖼 making picture", render: s.start_from === "prev_last" ? "⛓ after previous" : "⏳ to render"}[s.auto] : {done: "● clip", running: "⏳ rendering", failed: "failed", stale: "changed"}[s.status] || (s.status === "pending" && ["running", "queued"].includes(S.status) ? "queued" : ""); return b ? `<span class="st ${s.auto ? "running" : esc(s.status)}">${b}</span>` : ""; })()}
+      ${(() => { const b = s.auto ? {continuity: "🔗 checking continuity", refs: "⏳ characters & places", looks: "⚠ choose the characters", picture: "🖼 making picture", render: s.start_from === "prev_last" ? "⛓ after previous" : "⏳ to render"}[s.auto] : {done: "● clip", running: "⏳ rendering", failed: "failed", stale: "changed"}[s.status] || (s.status === "pending" && ["running", "queued"].includes(S.status) ? "queued" : ""); return b ? `<span class="st ${s.auto ? "running" : esc(s.status)}">${b}</span>` : ""; })()}
       <div class="m"><b>Shot ${String(i + 1).padStart(2, "0")}</b><span class="f">${esc(s.framing)}</span><span>${esc(s.title || s.prompt || "untitled")}</span></div></div>`).join("")
       + `<button class="ed-card add" id="add-shot" type="button" title="Add a shot" aria-label="Add a shot">＋</button>`;
     $("add-shot").onclick = addShot;
@@ -1454,6 +1458,8 @@
   }
   ["story", "scene", "shot"].forEach((k) => $("scope-" + k).onclick = () => { scope = k; paintScope(); });
   ["quick", "quick-empty"].forEach((id) => $(id)?.addEventListener("click", (e) => { const b = e.target.closest("button"); if (b) chatSend(b.textContent); }));
+  if ($("wait-cast")) $("wait-cast").onchange = async () => { try { await api(`/api/editor/${PID}/settings`, {wait_for_cast: $("wait-cast").checked}); S.wait_for_cast = $("wait-cast").checked; toast($("wait-cast").checked ? "Shots, voices and videos wait until you choose each character" : "Characters don't need your choice first"); load(true); } catch (e) { toast(e.message); } };
+  if ($("refs-approve")) $("refs-approve").onclick = async () => { try { const d = await api(`/api/editor/${PID}/approve-looks`, {}); toast(d.chosen ? `${d.chosen} look(s) chosen — their shots go ahead` : "Every character is already chosen"); load(true); } catch (e) { toast(e.message); } };
   if ($("img-model")) $("img-model").onchange = async () => { const v = $("img-model").value; try { await api(`/api/editor/${PID}/settings`, {image_model: v}); S.image_model = v; toast(v ? `New pictures are drawn with ${IMG_MODELS.find((m) => m[0] === v)[1].split(" —")[0]}` : "New pictures use the usual mix of models"); } catch (e) { toast(e.message); } };
   $("applies").onchange = async () => { await api(`/api/editor/${PID}/settings`, {agent_applies: $("applies").checked}); toast($("applies").checked ? "The agent applies its edits directly" : "The agent proposes; you apply"); };
 

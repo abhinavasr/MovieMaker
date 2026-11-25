@@ -464,7 +464,10 @@ def _migrate(conn) -> None:
                             "voice_text": "TEXT", "voice_job": "TEXT",
                             "voice_auto": "INTEGER NOT NULL DEFAULT 0",
                             # props/styles that go with a character or place (2026-11-25)
-                            "links": "TEXT NOT NULL DEFAULT '[]'"},
+                            "links": "TEXT NOT NULL DEFAULT '[]'",
+                            # the person has chosen this character's look (2026-11-25); existing
+                            # rows count as chosen, the assistant's new characters start at 0
+                            "approved": "INTEGER NOT NULL DEFAULT 1"},
               "agent_lessons": {"project_id": "TEXT"},
               "prod_clips": {"instruct": "TEXT NOT NULL DEFAULT ''", "auto": "INTEGER NOT NULL DEFAULT 0"},
               "prod_scenes": {"refs": "TEXT NOT NULL DEFAULT '[]'",
