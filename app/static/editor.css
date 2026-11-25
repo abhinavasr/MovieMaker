@@ -460,3 +460,10 @@ body:has(.ed) footer, body:has(.ed) .retention-note { display: none; }
 .ed-polish { margin: -2px 0 10px; font-size: .78rem; }
 .ed-polish summary { cursor: pointer; color: var(--muted); }
 .ed-polish pre { white-space: pre-wrap; word-break: break-word; max-height: 260px; overflow: auto; background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; padding: 8px; font-size: .72rem; margin: 6px 0 4px; }
+/* The aspect choices' radios are hidden, but the site-wide `input { width: 100% }` made
+   each one as wide as the screen, so the productions page scrolled sideways into empty
+   space on phones (2026-11-25). */
+.el-seg input[type=radio] { position: absolute; width: 1px; height: 1px; opacity: 0; margin: 0; pointer-events: none; }
+.el-seg { position: relative; overflow: hidden; }
+.el { overflow-x: clip; }
+.el-row { flex-wrap: wrap; }
