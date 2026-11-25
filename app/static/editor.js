@@ -270,8 +270,12 @@
       <label class="ed-field">What happens (the agent reads this for every shot in the scene)<textarea id="sm-sum" rows="5">${esc(sc.summary)}</textarea></label>
       <div class="ed-field">Assets in this scene — new shots get these as references<div class="ed-pick">${S.refs.map((r) => `<label class="ed-chip ${on.has(r.id) ? "" : "off"}" style="cursor:pointer"><div class="th">${r.image ? `<img src="${esc(r.image)}" alt="">` : "👤"}</div><span>${esc(r.name)}</span><input type="checkbox" data-scref="${r.id}" ${on.has(r.id) ? "checked" : ""} style="accent-color:var(--gold)"></label>`).join("") || '<span class="ed-note">No references yet — add characters and places under Project references.</span>'}</div></div>
       ${(() => { const chars = (sc.refs || []).map(refById).filter((r) => r && r.kind === "character"); if (!chars.length || !PROPS().length) return "";
-        return `<div class="ed-field">👕 What they wear / carry in this scene <span class="ed-note">(ticked = this scene's choice; untouched characters keep their usual)</span>` + chars.map((r) => { const set = (sc.wear || {})[r.id]; const on = new Set(set || r.links || []);
-          return `<div class="ed-wear" data-swear="${r.id}" data-changed="${set ? 1 : 0}"><div class="h"><b>${esc(r.name)}</b> <span class="ed-note">${set ? "set for this scene" : "as usual"}</span>${set ? `<button class="ed-btn ghost sm" type="button" data-swreset="${r.id}">↺ usual</button>` : ""}</div><div class="ed-chips">${PROPS().map((p) => `<label class="ed-chip lk ${on.has(p.id) ? "" : "off"}"><input type="checkbox" data-swprop="${p.id}" ${on.has(p.id) ? "checked" : ""}> 🗝 ${esc(p.name)}</label>`).join("")}</div></div>`; }).join("") + `</div>`; })()}
+        return `<div class="ed-field">👕 Clothes &amp; things they carry in this scene` + chars.map((r) => { const set = (sc.wear || {})[r.id]; const usual = usualProps(r); const on = new Set(set || usual);
+          const shown = PROPS().filter((p) => on.has(p.id) || usual.includes(p.id)), rest = PROPS().filter((p) => !shown.includes(p));
+          const changed = set && !sameSet(set, usual);
+          return `<div class="ed-wear" data-swear="${r.id}" data-changed="${set ? 1 : 0}"><div class="h"><b>${esc(r.name)}</b> <span class="ed-note">${changed ? "changed for this scene" : "as usual"}</span>${set ? `<button class="ed-btn ghost sm" type="button" data-swreset="${r.id}">↺ usual</button>` : ""}</div>
+            <div class="ed-wearrow">${shown.map((p) => `<label class="ed-tag"><input type="checkbox" data-swprop="${p.id}" ${on.has(p.id) ? "checked" : ""} style="width:auto;margin:0"> ${esc(p.name)}</label>`).join("") || `<span class="ed-note">nothing in particular</span>`}
+            ${rest.length ? `<select data-swadd aria-label="Add"><option value="">＋ add…</option>${rest.map((p) => `<option value="${p.id}">${esc(p.name)}</option>`).join("")}</select>` : ""}</div></div>`; }).join("") + `</div>`; })()}
       <label class="ed-switch"><input type="checkbox" id="sm-lock" ${sc.locked ? "checked" : ""}> 🔒 Lock this scene — the agent won't change it or its shots</label>
       <div class="acts"><button class="ed-btn danger" data-act="delete" style="margin-right:auto">Delete scene</button><button class="ed-btn ghost" data-act="close">Cancel</button><button class="ed-btn gold" data-act="save">Save</button></div>`,
       async (act) => {
@@ -286,6 +290,12 @@
       });
     document.querySelectorAll("[data-scref]").forEach((x) => x.onchange = () => x.closest(".ed-chip").classList.toggle("off", !x.checked));
     document.querySelectorAll("[data-swprop]").forEach((x) => x.onchange = () => { x.closest(".ed-chip").classList.toggle("off", !x.checked); const box = x.closest("[data-swear]"); box.dataset.changed = "1"; box.dataset.reset = "0"; });
+    document.querySelectorAll("[data-swadd]").forEach((sel) => sel.onchange = () => {
+      if (!sel.value) return; const p = refById(sel.value), box = sel.closest("[data-swear]");
+      const tag = document.createElement("label"); tag.className = "ed-tag";
+      tag.innerHTML = `<input type="checkbox" data-swprop="${p.id}" checked style="width:auto;margin:0"> ${esc(p.name)}`;
+      sel.before(tag); sel.querySelector(`option[value="${p.id}"]`).remove(); sel.value = ""; box.dataset.changed = "1"; box.dataset.reset = "0";
+    });
     document.querySelectorAll("[data-swreset]").forEach((b) => b.onclick = () => { const box = b.closest("[data-swear]"); box.dataset.reset = "1"; box.querySelector(".ed-note").textContent = "back to usual when you save"; });
   }
   dragList($("scenes"), "[data-scene]", (id, toIndex) => change([{op: "edit_scene", scene_id: id, position: toIndex}], "Scene moved"));
@@ -998,19 +1008,33 @@
   // (2026-11-25: "the props can change across scenes and shots, so we need that combination".)
   const PROPS = () => S.refs.filter((r) => r.kind === "prop");
   const FROM = {usual: "as usual", scene: "set for this scene", shot: "set for this shot"};
+  const usualProps = (r) => (r.links || []).filter((x) => refById(x)?.kind === "prop");
+  const sameSet = (a, b) => a.length === b.length && a.every((x) => b.includes(x));
   function wearBlock(sh) {
-    const chars = Object.entries(sh.wear || {});
-    if (!chars.length || !PROPS().length) return "";
-    return `<div class="ed-group"><h3>👕 What they wear / carry in this shot</h3>` + chars.map(([rid, w]) => {
-      const r = refById(rid); if (!r) return "";
-      const on = new Set(w.props || []);
-      return `<div class="ed-wear" data-wear="${rid}"><div class="h"><b>${esc(r.name)}</b> <span class="ed-note">${FROM[w.from] || ""}</span>${w.from === "shot" ? `<button class="ed-btn ghost sm" type="button" data-wearreset="${rid}" title="Go back to the scene's / usual">↺</button>` : ""}</div>
-        <div class="ed-chips">${PROPS().map((p) => `<label class="ed-chip lk ${on.has(p.id) ? "" : "off"}"><input type="checkbox" data-wearprop="${p.id}" ${on.has(p.id) ? "checked" : ""}> 🗝 ${esc(p.name)}</label>`).join("")}</div></div>`;
-    }).join("") + `<div class="ed-note">A change here is for this shot only. Set a whole scene's in the scene (click its title ⋯), and a character's usual ones in their reference.</div></div>`;
+    const chars = Object.entries(sh.wear || {}).filter(([rid]) => refById(rid));
+    const styles = S.refs.filter((r) => r.kind === "style");
+    if (!chars.length && !styles.length) return "";
+    const rows = chars.map(([rid, w]) => {
+      const r = refById(rid), has = (w.props || []).filter((x) => refById(x)?.kind === "prop");
+      const plain = w.from === "usual" || sameSet(has, usualProps(r));
+      const others = PROPS().filter((p) => !has.includes(p.id));
+      return `<div class="ed-wear" data-wear="${rid}" data-has="${has.join(",")}">
+        <div class="h"><b>${esc(r.name)}</b><span class="ed-note">wears / carries${plain ? "" : w.from === "shot" ? " · changed for this shot" : " · changed for this scene"}</span>${w.from === "shot" ? `<button class="ed-btn ghost sm" type="button" data-wearreset="${rid}" title="Back to the scene's / usual">↺</button>` : ""}</div>
+        <div class="ed-wearrow">${has.map((x) => `<span class="ed-tag">${esc(refById(x).name)}<button type="button" data-wearoff="${x}" title="Not in this shot">✕</button></span>`).join("") || `<span class="ed-note">nothing in particular</span>`}
+          ${others.length ? `<select data-wearadd aria-label="Add"><option value="">＋ add…</option>${others.map((p) => `<option value="${p.id}">${esc(p.name)}</option>`).join("")}</select>` : ""}</div></div>`;
+    }).join("");
+    return `<div class="ed-group"><h3>👕 Clothes &amp; things they carry</h3>${rows}
+      ${styles.length ? `<div class="ed-note" style="margin-top:6px">🎨 Style: ${styles.map((x) => esc(x.name)).join(", ")} — applies to the whole film</div>` : ""}
+      ${chars.length ? `<div class="ed-note">Changes here are for this shot only. A whole scene: the scene's ⋯. Their usual clothes: the character's reference.</div>` : ""}</div>`;
   }
   function shotInspector(sh) {
     const cap = S.limits[sh.make];
-    const refChips = S.refs.map((r) => `<div class="ed-chip ${sh.refs.includes(r.id) ? "" : "off"}" data-tref="${r.id}" title="${sh.refs.includes(r.id) ? "In this shot — click to remove" : "Click to add to this shot"}">
+    // Props that come along with a character, and styles, are not listed here (they show under
+    // each character / as one style line): listing them as "+" made it look as if they were left
+    // out (2026-11-25: "this is confusing").
+    const carried = new Set(Object.values(sh.wear || {}).flatMap((w) => w.props || []));
+    const chipRefs = S.refs.filter((r) => r.kind !== "style" && !(r.kind === "prop" && (carried.has(r.id) || (r.links || []).some((x) => ["character", "location"].includes(refById(x)?.kind)))));
+    const refChips = chipRefs.map((r) => `<div class="ed-chip ${sh.refs.includes(r.id) ? "" : "off"}" data-tref="${r.id}" title="${sh.refs.includes(r.id) ? "In this shot — click to remove" : "Click to add to this shot"}">
       <div class="th">${r.image ? `<img src="${esc(r.image)}" alt="">` : ({voice: "🎙", location: "🏛"}[r.kind] || "👤")}</div><span>${esc(r.name)}</span><button aria-label="toggle">${sh.refs.includes(r.id) ? "✕" : "＋"}</button></div>`).join("");
     const lines = S.clips.filter((c) => c.track === "dialogue" && c.start_s < sh.start + sh.seconds && c.start_s + (c.duration_s || 0) > sh.start);
     const gen = (key, icon, label, small) => `<button type="button" data-gen="${key}"><span class="i">${icon}</span><span>${label}</span><span class="a">${genOpen === key ? "⌄" : "›"}</span>${small ? `<small>${small}</small>` : ""}</button>` + (genOpen === key ? genForm(key, sh) : "");
@@ -1038,7 +1062,7 @@
         <option value="prev_last" ${sh.start_from === "prev_last" ? "selected" : ""} ${S.shots[0]?.id === sh.id ? "disabled" : ""}>Last frame of the previous shot (continuous)</option></select></label>
       <label class="ed-field">Prompt — what moves, how the camera moves<textarea data-f="prompt" rows="4" placeholder="What moves, and how the camera moves…">${esc(sh.prompt)}</textarea></label>
       ${(sh.opts || {})._polish ? `<details class="ed-polish"><summary>Prompt sent to the video model · written by the local ${esc(S.planner || "27B")}</summary><pre>${esc(sh.opts._polish.prompt)}${sh.opts._polish.motion_prompt ? "\n\nMotion: " + esc(sh.opts._polish.motion_prompt) : ""}</pre><div class="ed-note">From the last render. It is written again when you change this shot.</div></details>` : `<div class="ed-note" style="margin:-4px 0 8px">At render, the local planner model rewrites this into the final prompt for the video model.</div>`}
-      <div class="ed-group"><h3>References <span class="c ed-note">${sh.refs.length} in this shot</span></h3>
+      <div class="ed-group"><h3>In this shot <span class="c ed-note">characters, places, objects</span></h3>
         ${S.refs.length ? `<div class="ed-chips">${refChips}</div>` : `<div class="ed-note">No references yet. <a href="#" id="ins-addref" style="color:var(--gold)">Add a character or place</a> so it stays consistent across shots.</div>`}</div>
         ${wearBlock(sh)}
       ${["lipsync", "talk2", "longtalk"].includes(sh.make) ? "" : `<div class="ed-group"><h3>${sh.make === "motion" ? "The video to copy" : ["recast", "restyle"].includes(sh.make) ? "The video to remake" : "Reference videos"} <span class="c ed-note">${sh.ref_videos.length} of ${["motion", "recast", "restyle"].includes(sh.make) ? 1 : 3}</span></h3>
@@ -1214,11 +1238,11 @@
     bindUseOptions(sh, pane);
     pane.querySelectorAll("[data-make]").forEach((b) => b.onclick = () => change([{op: "edit_shot", shot_id: sh.id, make: b.dataset.make}], `${MAKE[b.dataset.make][0]} shot`));
     pane.querySelectorAll("[data-wear]").forEach((box) => {
-      const rid = box.dataset.wear;
-      box.querySelectorAll("[data-wearprop]").forEach((x) => x.onchange = () => {
-        const props = [...box.querySelectorAll("[data-wearprop]")].filter((y) => y.checked).map((y) => y.dataset.wearprop);
-        change([{op: "edit_shot", shot_id: sh.id, wear: {[rid]: props}}], "Changed for this shot");
-      });
+      const rid = box.dataset.wear, has = (box.dataset.has || "").split(",").filter(Boolean);
+      box.querySelectorAll("[data-wearoff]").forEach((b) => b.onclick = () =>
+        change([{op: "edit_shot", shot_id: sh.id, wear: {[rid]: has.filter((x) => x !== b.dataset.wearoff)}}], "Changed for this shot"));
+      const add = box.querySelector("[data-wearadd]");
+      if (add) add.onchange = () => { if (add.value) change([{op: "edit_shot", shot_id: sh.id, wear: {[rid]: [...has, add.value]}}], "Changed for this shot"); };
       const back = box.querySelector("[data-wearreset]"); if (back) back.onclick = () => change([{op: "edit_shot", shot_id: sh.id, wear: {[rid]: null}}], "Back to the scene's");
     });
     pane.querySelectorAll("[data-tref]").forEach((b) => b.onclick = () => { const id = b.dataset.tref; const refs = sh.refs.includes(id) ? sh.refs.filter((x) => x !== id) : [...sh.refs, id]; change([{op: "edit_shot", shot_id: sh.id, refs}]); });

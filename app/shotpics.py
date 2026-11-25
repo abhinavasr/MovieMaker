@@ -229,9 +229,13 @@ def sources_for(user, pid: str, shot, plan: dict | None, prompt: str) -> tuple[l
             except Exception:                                  # noqa: BLE001
                 pass
         if nums:
-            lines.append(f"{r['name']} has exactly the face, hair and clothes of picture"
-                         f"{'s' if len(nums) > 1 else ''} {' and '.join(nums)} (only the "
-                         "person, not that picture's pose or background)")
+            # With an outfit of their own in this shot, their picture gives only the face and
+            # hair (2026-11-25: a waistcoat in the character picture vs "wears a navy T-shirt").
+            dressed = any((db.one("SELECT kind FROM prod_refs WHERE id=?", (x,)) or {"kind": ""})["kind"] == "prop"
+                          for x in editor.props_for(pid, shot, r["id"]))
+            lines.append(f"{r['name']} has exactly the face{', hair' if dressed else ', hair and clothes'} of "
+                         f"picture{'s' if len(nums) > 1 else ''} {' and '.join(nums)} (only the person"
+                         f"{', NOT those clothes' if dressed else ''}, not that picture's pose or background)")
     # What visible characters always have (a costume, an object): its picture if there is room,
     # its description always.
     for r in chars[:3]:
