@@ -333,6 +333,7 @@
             <label class="ed-note">Options <select id="rf-count"><option>1</option><option selected>2</option><option>3</option><option>4</option></select></label>
             <label class="ed-note">Model <select id="rf-model">${modelOptions("")}</select></label>
             <details><summary class="ed-note">Edit the prompt</summary><textarea id="rf-prompt" rows="3" placeholder="Empty = from the name, kind and description, in the film's style"></textarea></details>
+            ${r?.image ? `<details class="rf-editbox"><summary class="ed-note">✏️ Edit this picture (change only part of it)</summary><textarea id="rf-edit" rows="2" placeholder="e.g. glasses off · grey hair · a red shawl instead of the blue one"></textarea><button class="ed-btn sm" type="button" id="rf-editgo">✏️ Make edited versions</button></details>` : ""}
           </div>
         </div>
         <div class="ed-refopts" id="rf-opts"></div></div>
@@ -422,6 +423,29 @@
           const left = st.images.filter((x) => !["succeeded", "failed", "cancelled"].includes(x.status)).length;
           btn.textContent = left ? `✨ Drawing… ${Math.round((Date.now() - t0) / 1000)} s` : "✨ Generate again";
           if (left) polling = setTimeout(poll, 2000); else { btn.disabled = false; toast("Click a picture to use it"); }
+        };
+        poll();
+      } catch (e) { toast(e.message); btn.disabled = false; }
+    };
+    if ($("rf-editgo")) $("rf-editgo").onclick = async () => {
+      const ins = $("rf-edit").value.trim(); if (!ins) { toast("Say what should change"); return; }
+      const btn = $("rf-editgo"); btn.disabled = true;
+      try {
+        const d = await api(`/api/editor/${PID}/refs/${r.id}/edit`, {instruction: ins, count: +$("rf-count").value});
+        const ids = d.image_ids;
+        $("rf-opts").innerHTML = ids.map((id, i) => `<button type="button" class="opt" data-img="${id}"><span>editing ${i + 1}…</span><span class="pg"><i></i></span></button>`).join("");
+        const t0 = Date.now();
+        const poll = async () => {
+          if (!live() || !$("rf-opts")) return;
+          const st = await api(`/api/editor/${PID}/images?ids=${ids.join(",")}`);
+          for (const im of st.images) {
+            const el = $("rf-opts").querySelector(`[data-img="${im.image_id}"]`); if (!el) continue;
+            if (im.status === "succeeded" && !el.querySelector("img")) el.innerHTML = `<img src="${esc(im.url)}" alt="edited">`;
+            else if (im.status === "failed") el.innerHTML = "failed";
+          }
+          const left = st.images.filter((x) => !["succeeded", "failed", "cancelled"].includes(x.status)).length;
+          btn.textContent = left ? `✏️ Editing… ${Math.round((Date.now() - t0) / 1000)} s` : "✏️ Make edited versions";
+          if (left) polling = setTimeout(poll, 2000); else { btn.disabled = false; toast("Click a version to use it, then Save"); }
         };
         poll();
       } catch (e) { toast(e.message); btn.disabled = false; }
@@ -526,11 +550,12 @@
       if ($("give-sound")) $("give-sound").onclick = () => { setTab("shot"); $("pane-shot").scrollTop = 0; document.querySelector(".ed-silent")?.scrollIntoView({block: "start"}); };
     } else if (sh.picture) {
       const snd = soundUnder(sh);
-      st.innerHTML = `<div class="ed-frame" id="frame"><img id="stage-i" src="${esc(sh.picture)}" alt="" class="${Player.playing ? "kb" : ""}"></div>${mk}<span class="ed-badge r">${esc(state)}</span>`
+      st.innerHTML = `<div class="ed-frame" id="frame"><img id="stage-i" src="${esc(sh.picture)}" alt="" class="${Player.playing ? "kb" : ""}"></div>${mk}<span class="ed-badge r">${esc(state)}</span><button class="ed-btn sm ed-stage-edit" id="stage-edit" type="button" title="Change something in this picture and keep the rest">✏️ Edit picture</button>`
         + (snd.tracks.length || !["animate", "motion"].includes(sh.make) ? (snd.tracks.length ? `<span class="ed-sound">🔊 ${esc(snd.tracks.join(" · "))}</span>` : "")
            : `<span class="ed-sound none">🔇 No sound in this shot <button type="button" id="give-sound">Give it sound</button></span>`);
       fitFrame();
       if ($("give-sound")) $("give-sound").onclick = () => { setTab("shot"); $("pane-shot").scrollTop = 0; };
+      $("stage-edit").onclick = () => { setTab("shot"); genOpen = "edit"; paintInspector(); $("pane-shot").scrollTop = 0; setTimeout(() => $("g-edit")?.focus(), 50); };
     } else if (sh.start_from === "prev_last") {
       const prev = S.shots[S.shots.findIndex((x) => x.id === sh.id) - 1];
       st.innerHTML = `<div class="empty"><b>⛓ Opens on the last frame of the previous shot</b><span>Taken from “${esc(prev?.title || "the previous shot")}” when this shot renders, so the two flow as one take.</span>
@@ -979,6 +1004,7 @@
         ${sh.ref_videos.length < (["motion", "recast", "restyle"].includes(sh.make) ? 1 : 3) ? `<div class="ed-rvadd"><select id="rv-shot" aria-label="Use a shot's clip"><option value="">＋ A shot's clip…</option>${S.shots.filter((x) => x.clip && x.id !== sh.id && !sh.ref_videos.some((v) => v.label.includes("“" + (x.title || "shot " + x.n) + "”"))).map((x) => `<option value="${x.id}">${x.n}. ${esc(x.title || "Shot " + x.n)}</option>`).join("")}</select><button class="ed-btn sm" id="rv-upload" type="button">⤒ Upload video</button></div>` : ""}
         <div class="ed-note">${["recast", "restyle"].includes(sh.make) ? "Its motion, camera, timing and sound are kept. 4–14 s is used; a shorter video loops." : sh.make === "motion" ? "The person in the shot's picture makes these exact movements. Up to 15 s is used; a shorter video loops." : "A loose guide for motion and camera. For an exact copy of a dance or gesture, choose “🕺 Copy a dance or movement from a video” at the top. Up to 15 s is used."}</div></div>`}
       <div class="ed-group"><h3>Generate</h3><div class="ed-gen">
+        ${sh.picture ? gen("edit", "✏️", "Edit this picture", "say what to change; everything else stays") : ""}
         ${gen("image", "🖼", "Image", sh.picture ? "new picture options (keeps the references)" : "this shot has no picture yet")}
         ${gen("video", "🎬", "Video", sh.status === "done" ? "clip ready — render again" : sh.status === "stale" ? "changed since rendered" : "render this shot's clip")}
         ${gen("voice", "🎙", "Voice", "a line of dialogue at this shot")}
@@ -989,6 +1015,10 @@
   }
 
   function genForm(key, sh) {
+    if (key === "edit") return `<div class="ed-genform"><label class="ed-field">What should change?<textarea id="g-edit" rows="3" placeholder="e.g. she is not smiling · evening light instead of noon · remove the car behind him · he holds the cup in his left hand"></textarea></label>
+      <div class="ed-row2"><label class="ed-field">Versions<select id="g-ecount"><option>1</option><option selected>2</option><option>3</option></select></label>
+      <label class="ed-field">Model<select id="g-emodel"><option value="qwen-image-edit-2511">Qwen-Image-Edit — made for edits (keeps faces)</option>${modelOptions("").replace(/<option value="">[^<]*<\/option>/, "").replace(/<option value="qwen-image-edit-2511"[^>]*>[^<]*<\/option>/, "")}</select></label></div>
+      <div class="acts"><button class="ed-btn gold" data-go="edit">Edit the picture</button></div><div class="ed-note">Only what you describe changes. The edited versions appear under Proposed changes to pick from; the current picture stays until you pick one.</div></div>`;
     if (key === "image") return `<div class="ed-genform"><label class="ed-field">Picture prompt (empty = from the shot's framing, title, prompt and scene)<textarea id="g-prompt" rows="3"></textarea></label>
       <div class="ed-row2"><label class="ed-field">Options<select id="g-count"><option>1</option><option selected>2</option><option>3</option><option>4</option></select></label>
       <label class="ed-field">Model<select id="g-model">${modelOptions("")}</select></label></div>
@@ -1212,7 +1242,9 @@
   async function runGen(what, sh, btn) {
     btn.disabled = true;
     try {
-      if (what === "image") { await api(`/api/editor/${PID}/shots/${sh.id}/options`, {prompt: $("g-prompt").value, count: +$("g-count").value, model: $("g-model").value || null}); toast("Making picture options — they appear at the top of this panel"); setTimeout(() => { $("pane-shot").scrollTop = 0; }, 100); }
+      if (what === "edit") { const ins = $("g-edit").value.trim(); if (!ins) { toast("Say what should change"); btn.disabled = false; return; }
+        await api(`/api/editor/${PID}/shots/${sh.id}/edit`, {instruction: ins, count: +$("g-ecount").value, model: $("g-emodel").value || null}); toast("Editing the picture — the versions appear at the top of this panel"); setTimeout(() => { $("pane-shot").scrollTop = 0; }, 100); }
+      else if (what === "image") { await api(`/api/editor/${PID}/shots/${sh.id}/options`, {prompt: $("g-prompt").value, count: +$("g-count").value, model: $("g-model").value || null}); toast("Making picture options — they appear at the top of this panel"); setTimeout(() => { $("pane-shot").scrollTop = 0; }, 100); }
       else if (what === "video") { await renderShots([sh.id], "this shot"); }
       else if (what === "video-scene") { await renderShots(sceneShots(sh.scene_id).map((s) => s.id), "the scene"); }
       else if (what === "voice") { const text = $("g-text").value.trim(); if (!text) { toast("Write the line"); btn.disabled = false; return; }

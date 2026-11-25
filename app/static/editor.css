@@ -561,3 +561,7 @@ body:has(.ed) footer, body:has(.ed) .retention-note { display: none; }
 .ed-libitem .tx { display: grid; gap: 2px; min-width: 0; }
 .ed-libitem .tx small { color: var(--muted); font-size: .72rem; overflow: hidden; text-overflow: ellipsis; }
 .ed-libitem .tx i { color: var(--muted); font-style: normal; font-size: .72rem; }
+
+/* Edit a picture (change part of it, keep the rest) */
+.ed-stage-edit { position: absolute; right: 10px; bottom: 10px; z-index: 3; }
+.rf-editbox textarea { width: 100%; margin: 6px 0; }

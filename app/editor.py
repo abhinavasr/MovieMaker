@@ -1707,6 +1707,66 @@ async def picture_options(project, user: auth.User, shot_id: str, prompt: str = 
     return ids
 
 
+# --------------------------------------------------------------------------- picture edits
+# "Why don't I have an option to edit a generated image? I have to regenerate everything ...
+# won't it be easier to give a suggestion on what to change" (the person, 2026-11-25).
+# An edit sends the CURRENT picture to an instruction editor (Qwen-Image-Edit by default) with
+# what to change; everything else is asked to stay as it is. The results are options to pick.
+
+EDIT_MODEL = "qwen-image-edit-2511"
+EDIT_KEEP = (" Keep everything else exactly as it is: the same people, faces, hair, clothes, "
+             "pose, framing, background, light and style. Change only what is asked.")
+
+
+def _edit_size(path: Path) -> tuple[int, int]:
+    """The source's shape at about one megapixel (multiples of 16)."""
+    from PIL import Image
+    with Image.open(path) as im:
+        w, h = im.size
+    k = (1024 * 1024 / max(1, w * h)) ** 0.5
+    return max(256, int(w * k) // 16 * 16), max(256, int(h * k) // 16 * 16)
+
+
+async def edit_picture(user: auth.User, source: Path, instruction: str, count: int = 2,
+                       model: str | None = None) -> list[str]:
+    instruction = " ".join((instruction or "").split())
+    if not instruction:
+        raise HTTPException(400, "say what should change in the picture")
+    if not source or not Path(source).exists():
+        raise HTTPException(409, "there is no picture to edit yet")
+    w, h = _edit_size(Path(source))
+    src = [("current.png", Path(source).read_bytes())]
+    text = (instruction.rstrip(".") + "." + EDIT_KEEP)[:1900]
+    import random
+    return [await images.create(user, text, src, width=w, height=h, model=model or EDIT_MODEL,
+                                seed=random.randrange(2 ** 31))
+            for _ in range(max(1, min(4, int(count or 2))))]
+
+
+def _shot_picture_path(pid: str, shot) -> Path | None:
+    a = db.one("SELECT path FROM assets WHERE id=? AND project_id=?", (shot["asset_id"], pid)) \
+        if shot["asset_id"] else None
+    return Path(a["path"]) if a and a["path"] else None
+
+
+async def edit_shot_picture(project, user: auth.User, shot_id: str, instruction: str,
+                            count: int = 2, model: str | None = None) -> tuple[list[str], str]:
+    """Edited versions of a shot's picture, offered as options. Returns (ids, proposal id)."""
+    shot = _shot(project["id"], shot_id)
+    ids = await edit_picture(user, _shot_picture_path(project["id"], shot), instruction, count, model)
+    prop = propose(project, f"Edited picture: {instruction[:80]}", instruction[:200], [], shot_id, ids)
+    return ids, prop
+
+
+async def edit_ref_picture(project, user: auth.User, ref_id: str, instruction: str,
+                           count: int = 2, model: str | None = None) -> list[str]:
+    """Edited versions of a character's/place's main picture; the person picks one."""
+    r = _ref(project["id"], ref_id)
+    row = db.one("SELECT path FROM images WHERE id=?", (r["image_id"],)) if r["image_id"] else None
+    return await edit_picture(user, Path(row["path"]) if row and row["path"] else None,
+                              instruction, count, model)
+
+
 async def _check_options_later(pid: str, shot_id: str, ids: list[str]) -> None:
     """When the options are drawn, the planner looks at them; its verdict goes on the
     proposal ("⭐ option 2 fits best ...") so the person sees it beside the pictures."""
@@ -3899,6 +3959,35 @@ def _t_my_characters(user, args, base):
                    "one into this production with its pictures, views and voice"}
 
 
+async def _t_edit_picture(user, args, base):
+    project = _agent_project(user, args)
+    instruction = str(args.get("instruction") or args.get("change") or "")
+    if args.get("shot_id"):
+        ids, prop = await edit_shot_picture(project, user, str(args["shot_id"]), instruction,
+                                            int(args.get("count") or 2), args.get("model"))
+        for i in ids:
+            await images.wait(i, 120)
+        done = [i for i in ids if (db.one("SELECT status FROM images WHERE id=?", (i,)) or
+                                   {"status": ""})["status"] == "succeeded"]
+        if db.params_of(project).get("agent_applies") and done:
+            apply_proposal(db.one("SELECT * FROM projects WHERE id=?", (project["id"],)), user,
+                           prop, done[0])
+            return {"edited": True, "image_id": done[0],
+                    "image_url": base + service.stable_signed_path("image", done[0], 86400),
+                    "note": "the first edited version is now the shot's picture"}
+        return {"proposal_id": prop, "image_ids": ids, "status": "the person picks one"}
+    rid = resolve_ref(project["id"], str(args.get("ref") or args.get("ref_id") or ""))
+    if not rid:
+        raise HTTPException(400, "give shot_id, or ref (a character/place name)")
+    ids = await edit_ref_picture(project, user, rid, instruction, 1, args.get("model"))
+    row = await images.wait(ids[0], 120)
+    if row["status"] != "succeeded":
+        return {"image_id": ids[0], "status": row["status"]}
+    edit_ref(project, rid, user=user, image_id=ids[0])
+    return {"edited": True, "ref": _ref(project["id"], rid)["name"], "image_id": ids[0],
+            "image_url": base + service.stable_signed_path("image", ids[0], 86400)}
+
+
 async def _t_design_voice(user, args, base):
     project = _agent_project(user, args)
     rid = resolve_ref(project["id"], str(args.get("ref") or args.get("ref_id") or ""))
@@ -4073,6 +4162,17 @@ AGENT_TOOLS = {
         "description": "Apply open proposals ONLY when the person has just said so in their own "
                        "words (\"apply\", \"approve\", \"go ahead\", \"yes, do it\"). Never on your "
                        "own initiative."},
+    "edit_picture": {
+        "handler": _t_edit_picture,
+        "schema": {"type": "object", "required": ["project_id", "instruction"], "properties": {
+            **_PID, "shot_id": {"type": "string", "description": "edit this shot's picture"},
+            "ref": {"type": "string", "description": "or this character's/place's picture (name)"},
+            "instruction": {"type": "string", "description": "only what should change, e.g. "
+                            "'she is not smiling', 'make it evening light', 'remove the car'"},
+            "count": {"type": "integer"}, "model": {"type": "string"}}},
+        "description": "Change something in an EXISTING picture and keep everything else (an "
+                       "instruction editor, Qwen-Image-Edit). Use it whenever the person asks to "
+                       "change part of a picture, instead of drawing it again."},
     "design_voice": {
         "handler": _t_design_voice,
         "schema": {"type": "object", "required": ["project_id", "ref"], "properties": {
@@ -4109,7 +4209,7 @@ AGENT_TOOLS = {
         "description": "Join every shot's clip and mix the timeline into the final film."},
 }
 EDITOR_HEAVY = {"shot_picture_options", "render_shots", "add_dialogue", "add_music",
-                "make_ref_picture", "draw_pictures", "design_voice"}
+                "make_ref_picture", "draw_pictures", "design_voice", "edit_picture"}
 
 
 # =========================================================================== API
@@ -4298,6 +4398,28 @@ async def api_frame(pid: str, sid: str, request: Request):
     return await asyncio.to_thread(
         use_frame, project, user, sid, b.get("at", "last"),
         sid if to == "this" else (None if to in ("next", "new") else to), key_new=(to == "new"))
+
+
+@router.post("/api/editor/{pid}/shots/{sid}/edit")
+async def api_edit_shot_picture(pid: str, sid: str, request: Request):
+    """{instruction, count?, model?}: edited versions of this shot's picture, as options."""
+    user = _user(request)
+    project = production(user, pid)
+    b = await _body(request)
+    ids, prop = await edit_shot_picture(project, user, sid, str(b.get("instruction") or ""),
+                                        int(b.get("count") or 2), b.get("model"))
+    return {"proposal_id": prop, "image_ids": ids}
+
+
+@router.post("/api/editor/{pid}/refs/{rid}/edit")
+async def api_edit_ref_picture(pid: str, rid: str, request: Request):
+    """{instruction, count?, model?}: edited versions of this reference's main picture."""
+    user = _user(request)
+    project = production(user, pid)
+    b = await _body(request)
+    ids = await edit_ref_picture(project, user, rid, str(b.get("instruction") or ""),
+                                 int(b.get("count") or 2), b.get("model"))
+    return {"image_ids": ids}
 
 
 @router.post("/api/editor/{pid}/shots/{sid}/options")
