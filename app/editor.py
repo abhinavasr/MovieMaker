@@ -275,9 +275,17 @@ def _reindex_scenes(pid: str) -> None:
 
 def edit_scene(project, scene_id: str, title: str | None = None, summary: str | None = None,
                position: int | None = None, refs: list | None = None,
-               locked: bool | None = None) -> None:
+               locked: bool | None = None, wear: dict | None = None) -> None:
     pid = project["id"]
     row = _scene(pid, scene_id)
+    if wear is not None:
+        # merge: each character named is set (an empty list clears back to their usual props)
+        cur = _jl(row["wear"], {})
+        for who, props in _clean_wear(pid, wear).items():
+            cur[who] = props
+        for who in [k for k, v in (wear or {}).items() if v is None]:
+            cur.pop(resolve_ref(pid, str(who)) or who, None)
+        db.run("UPDATE prod_scenes SET wear=? WHERE id=?", (json.dumps(cur), scene_id))
     if locked is not None:
         db.run("UPDATE prod_scenes SET locked=? WHERE id=?", (1 if locked else 0, scene_id))
     if refs is not None:
@@ -622,6 +630,11 @@ def edit_ref(project, ref_id: str, user: auth.User | None = None, **f) -> None:
             sets["angles"] = json.dumps({"_auto": True})
     if f.get("voice_design") is not None:
         sets["voice_design"] = " ".join(str(f["voice_design"]).split())[:700]
+    if f.get("links") is not None:
+        names = f["links"] if isinstance(f["links"], list) else \
+            [x for x in str(f["links"]).split(",") if x.strip()]
+        set_links(pid, ref_id, [resolve_ref(pid, str(x).strip()) for x in names])
+        _touch(pid)
     if f.get("speaker") is not None:
         if f["speaker"] and f["speaker"] not in speech.SPEAKERS:
             raise HTTPException(400, f"speaker must be one of {', '.join(speech.SPEAKERS)}")
@@ -1654,7 +1667,9 @@ def _ref_sources(user: auth.User, pid: str, ref_ids: list,
 def _shot_context(pid: str, shot) -> str:
     scene = db.one("SELECT * FROM prod_scenes WHERE id=?", (shot["scene_id"],)) \
         if shot["scene_id"] else None
-    refs = [db.one("SELECT * FROM prod_refs WHERE id=?", (r,)) for r in _jl(shot["refs"], [])]
+    own = _jl(shot["refs"], [])
+    linked = [x for r in own for x in linked_ids(pid, r) if x not in own]
+    refs = [db.one("SELECT * FROM prod_refs WHERE id=?", (r,)) for r in own + list(dict.fromkeys(linked))]
     who = "; ".join(f"{r['name']} ({r['kind']}): {r['description']}" for r in refs if r)
     parts = []
     if scene and scene["summary"]:
@@ -1855,13 +1870,92 @@ async def check_continuity(pid: str, scene_id: str) -> dict:
     return decided
 
 
+def linked_ids(pid: str, ref_id: str) -> list[str]:
+    """What goes with a reference, both ways: the props and style linked to a character or
+    place, and the characters/places a prop or style is linked to. (2026-11-25, the person:
+    "allow user to associate character or location to props and style ... the clothes keep
+    changing across the scenes".)"""
+    out = []
+    row = db.one("SELECT links FROM prod_refs WHERE id=? AND project_id=?", (ref_id, pid))
+    for x in _jl(row["links"] if row else "[]", []):
+        if x != ref_id and x not in out:
+            out.append(x)
+    for r in db.query("SELECT id, links FROM prod_refs WHERE project_id=?", (pid,)):
+        if ref_id in _jl(r["links"], []) and r["id"] != ref_id and r["id"] not in out:
+            out.append(r["id"])
+    return out
+
+
+def wear_choice(pid: str, shot, ref_id: str) -> tuple[list[str] | None, str]:
+    """The props this character has in this shot when they differ from their usual ones:
+    (ids, "shot" | "scene"), or (None, "usual"). Props change across scenes and shots (the
+    person, 2026-11-25: "the props can change across scenes and shots, so we need to have that
+    combination option"): the shot's choice wins, then the scene's, then the usual links."""
+    w = _jl(shot["opts"] if "opts" in shot.keys() else "{}", {}).get("wear") or {}
+    if ref_id in w:
+        return list(w[ref_id]), "shot"
+    if shot["scene_id"]:
+        row = db.one("SELECT wear FROM prod_scenes WHERE id=?", (shot["scene_id"],))
+        sw = _jl(row["wear"] if row else "{}", {})
+        if ref_id in sw:
+            return list(sw[ref_id]), "scene"
+    return None, "usual"
+
+
+def props_for(pid: str, shot, ref_id: str) -> list[str]:
+    """What comes with a character/place in this shot: its props (the shot's or scene's
+    choice, else the usual ones) and its linked style(s)."""
+    linked = linked_ids(pid, ref_id)
+    kinds = {r["id"]: r["kind"] for r in db.query("SELECT id, kind FROM prod_refs WHERE project_id=?", (pid,))}
+    styles = [x for x in linked if kinds.get(x) == "style"]
+    chosen, _ = wear_choice(pid, shot, ref_id) if shot is not None else (None, "usual")
+    props = [x for x in (chosen if chosen is not None else
+                         [y for y in linked if kinds.get(y) == "prop"]) if x in kinds]
+    return list(dict.fromkeys(props + styles))
+
+
 def _shot_ref_ids(shot) -> list[str]:
-    """A shot's references plus its scene's (the scene group's cast and set)."""
+    """A shot's references plus its scene's (the scene group's cast and set), plus what goes
+    with each character/place in THIS shot (outfit and objects, style)."""
     ids = list(_jl(shot["refs"], []))
     if shot["scene_id"]:
         row = db.one("SELECT refs FROM prod_scenes WHERE id=?", (shot["scene_id"],))
         ids += [r for r in _jl(row["refs"] if row else "[]", []) if r not in ids]
+    pid = shot["project_id"] if "project_id" in shot.keys() else None
+    if pid:
+        for rid in list(ids):
+            row = db.one("SELECT kind FROM prod_refs WHERE id=?", (rid,))
+            if row and row["kind"] in ("character", "location"):
+                ids += [x for x in props_for(pid, shot, rid) if x not in ids]
     return ids
+
+
+def _clean_wear(pid: str, w) -> dict:
+    """{character ref id: [prop ref ids]} with names resolved; [] = nothing extra."""
+    out = {}
+    if not isinstance(w, dict):
+        return out
+    for who, props in w.items():
+        rid = resolve_ref(pid, str(who))
+        if not rid:
+            continue
+        props = props if isinstance(props, list) else [props]
+        out[rid] = [p for p in (resolve_ref(pid, str(x)) for x in props) if p]
+    return out
+
+
+def set_links(pid: str, ref_id: str, wanted: list[str]) -> list[str]:
+    """This reference goes with exactly `wanted` (ids): its own links become those, and links
+    pointing at it from references not wanted are removed (links work both ways)."""
+    wanted = [w for w in dict.fromkeys(wanted) if w and w != ref_id and
+              db.one("SELECT 1 FROM prod_refs WHERE id=? AND project_id=?", (w, pid))]
+    db.run("UPDATE prod_refs SET links=? WHERE id=?", (json.dumps(wanted), ref_id))
+    for r in db.query("SELECT id, links FROM prod_refs WHERE project_id=? AND id!=?", (pid, ref_id)):
+        ls = _jl(r["links"], [])
+        if ref_id in ls and r["id"] not in wanted:
+            db.run("UPDATE prod_refs SET links=? WHERE id=?",
+                   (json.dumps([x for x in ls if x != ref_id]), r["id"]))
+    return wanted
 
 
 def _ref_ready(r) -> str:
@@ -1954,6 +2048,12 @@ def prepare_render(project, user: auth.User, shot_ids: list[str] | None,
 def _agent_shot_extras(pid: str, s) -> str:
     """The use-case settings of a shot, for the assistant's view of the production."""
     out = []
+    sw = _jl(s["opts"], {}).get("wear") or {}
+    if sw:
+        nm = {r["id"]: r["name"] for r in db.query("SELECT id, name FROM prod_refs WHERE project_id=?", (pid,))}
+        out.append("in this shot: " + "; ".join(
+            f"{nm.get(k, k)} has [{', '.join(nm.get(x, x) for x in v) or 'nothing extra'}]"
+            for k, v in sw.items()))
     vids = _ref_video_items(pid, s)
     if vids:
         out.append("ref_videos=[" + "; ".join(label for label, _ in vids) + "]")
@@ -2317,6 +2417,10 @@ def _clean_opts(pid: str, o: dict) -> dict:
         out["change"] = str(o["change"])[:800]
     if o.get("who"):
         out["who"] = str(o["who"])[:200]          # MCP recast: who the picture's person replaces
+    if isinstance(o.get("wear"), dict):
+        w = _clean_wear(pid, o["wear"])
+        if w:
+            out["wear"] = w
     return out
 
 
@@ -3123,10 +3227,11 @@ OPS = {"set_story", "add_scene", "edit_scene", "delete_scene", "add_shot", "edit
 # reported as failed, never as applied (2026-11-25: "remove the old scenes" was proposed
 # as three edit_scene items with only a scene_id, applied twice, and the scenes stayed).
 EDIT_FIELDS = {
-    "edit_scene": ("title", "summary", "position", "refs", "locked"),
+    "edit_scene": ("title", "summary", "position", "refs", "locked", "wear"),
     "edit_shot": ("title", "prompt", "seconds", "framing", "refs", "make", "position",
-                  "start_from", "opts", "scene_id", "image_id"),
-    "edit_ref": ("name", "description", "kind", "image_id", "speaker"),
+                  "start_from", "opts", "scene_id", "image_id", "wear"),
+    "edit_ref": ("name", "description", "kind", "image_id", "speaker", "voice_design",
+                 "links", "with"),
     "edit_clip": ("start_s", "trim_s", "duration_s", "gain_db", "fade_in", "fade_out",
                   "use_in_video", "track", "name"),
 }
@@ -3242,6 +3347,7 @@ def apply_changes(project, user: auth.User, changes: list, guard: bool = False) 
         return [x for x in dict.fromkeys(rref(r) for r in vs or []) if x]
 
     done, failed = [], []
+    pending_links: list[tuple[str, list]] = []      # (ref key/id, names) resolved at the end
     for n, c in enumerate(changes):
       try:
         project = db.one("SELECT * FROM projects WHERE id=?", (pid,))
@@ -3272,11 +3378,15 @@ def apply_changes(project, user: auth.User, changes: list, guard: bool = False) 
             keys[c.get("key") or f"scene{len(keys)}"] = add_scene(
                 project, c.get("title", ""), c.get("summary", ""), c.get("position"),
                 rrefs(c.get("refs")))
+            if isinstance(c.get("wear"), dict):
+                edit_scene(db.one("SELECT * FROM projects WHERE id=?", (pid,)),
+                           keys[c.get("key") or f"scene{len(keys) - 1}"], wear=c["wear"])
         elif op == "edit_scene":
             edit_scene(project, rid(c.get("scene_id")), c.get("title"), c.get("summary"),
                        c.get("position"),
                        rrefs(c["refs"]) if isinstance(c.get("refs"), list) else None,
-                       c.get("locked") if not guard else None)
+                       c.get("locked") if not guard else None,
+                       c.get("wear") if isinstance(c.get("wear"), dict) else None)
         elif op == "delete_scene":
             delete_scene(project, rid(c.get("scene_id")))
         elif op == "add_shot":
@@ -3286,9 +3396,25 @@ def apply_changes(project, user: auth.User, changes: list, guard: bool = False) 
                 c.get("make") or ("perform" if db.params_of(project).get("video_refs")
                                   else "animate"), c.get("position"), c.get("image_id"), user,
                 c.get("start_from", ""))
+            if isinstance(c.get("wear"), dict) and _clean_wear(pid, c["wear"]):
+                edit_shot(db.one("SELECT * FROM projects WHERE id=?", (pid,)),
+                          keys[c.get("key") or f"shot{len(keys) - 1}"],
+                          opts={"wear": _clean_wear(pid, c["wear"])})
         elif op == "edit_shot":
             fields = {k: c.get(k) for k in ("title", "prompt", "seconds", "framing", "refs",
                                             "make", "position", "start_from", "opts") if k in c}
+            if isinstance(c.get("wear"), dict):
+                # what each character has in THIS shot (merged per character; null = as the scene)
+                cur = _jl(_shot(pid, rid(c.get("shot_id")))["opts"], {}).get("wear") or {}
+                for who, props in c["wear"].items():
+                    w_id = resolve_ref(pid, str(who))
+                    if not w_id:
+                        continue
+                    if props is None:
+                        cur.pop(w_id, None)
+                    else:
+                        cur[w_id] = _clean_wear(pid, {w_id: props}).get(w_id, [])
+                fields["opts"] = {**(fields.get("opts") or {}), "wear": cur}
             if "scene_id" in c:
                 fields["scene_id"] = rid(c["scene_id"])
             if fields.get("refs") is not None:
@@ -3319,6 +3445,8 @@ def apply_changes(project, user: auth.User, changes: list, guard: bool = False) 
                                                       "duck_db") if k in c})
         elif op == "add_ref":
             key = c.get("key") or f"ref{len(keys)}"
+            if c.get("links") or c.get("with"):
+                pending_links.append((key, c.get("links") or c.get("with")))
             src = c.get("from_ref_id") or c.get("from_ref")
             have = ref_by_name(pid, c.get("name", "")) if c.get("name") else None
             if src:
@@ -3346,6 +3474,9 @@ def apply_changes(project, user: auth.User, changes: list, guard: bool = False) 
                     voice_design=str(c.get("voice") or c.get("voice_design") or ""))
         elif op == "edit_ref":
             target = rref(c.get("ref_id") or c.get("name"))
+            if c.get("links") is not None or c.get("with") is not None:
+                pending_links.append((target, c.get("links") if c.get("links") is not None
+                                      else c.get("with")))
             edit_ref(project, target, user=user,
                      **{k: c.get(k) for k in ("name", "description", "kind", "image_id",
                                               "speaker", "voice_design") if k in c and not
@@ -3355,6 +3486,19 @@ def apply_changes(project, user: auth.User, changes: list, guard: bool = False) 
         done.append(op)
       except HTTPException as exc:
         failed.append(f"change {n + 1} ({c.get('op')}): {exc.detail}")
+    for who, names in pending_links:
+        rid_ = rref(who)
+        if not rid_ or not db.one("SELECT 1 FROM prod_refs WHERE id=? AND project_id=?", (rid_, pid)):
+            failed.append(f"links: no reference {who!r}")
+            continue
+        names = names if isinstance(names, list) else [names]
+        ids = [rref(str(x)) for x in names]
+        missing = [str(x) for x, i in zip(names, ids) if not i or not str(i).startswith("ref_")]
+        set_links(pid, rid_, [i for i in ids if i and str(i).startswith("ref_")])
+        if missing:
+            failed.append(f"links of {who}: no reference called {', '.join(missing)}")
+    if pending_links:
+        _touch(pid)
     out = {"applied": done, "new_ids": keys}
     if failed:
         out["failed"] = failed
@@ -3411,8 +3555,10 @@ def state(project, base: str) -> dict:
     for sc in scenes_of(pid):
         scenes.append({"id": sc["id"], "title": sc["title"], "summary": sc["summary"],
                        "refs": _jl(sc["refs"], []), "locked": bool(sc["locked"]),
+                       "wear": _jl(sc["wear"], {}),
                        "shots": [s["id"] for s in shots if s["scene_id"] == sc["id"]]})
     shot_views = []
+    kinds_by_id = {r["id"]: r["kind"] for r in refs}
     for n, s in enumerate(shots):
         start, secs = tm[s["id"]]
         clip_ok = bool(s["clip_path"] and Path(s["clip_path"]).exists())
@@ -3422,6 +3568,8 @@ def state(project, base: str) -> dict:
             "make": s["make"] or "animate", "refs": _jl(s["refs"], []), "status": s["status"],
             "start_from": s["start_from"] or "",
             "opts": _jl(s["opts"], {}),
+            "wear": {rid: {"props": props_for(pid, s, rid), "from": wear_choice(pid, s, rid)[1]}
+                     for rid in _shot_ref_ids(s) if kinds_by_id.get(rid) == "character"},
             "needs_picture": needs_picture(pid, s),
             "ref_videos": [{"i": i, "label": lbl} for i, (lbl, _) in
                            enumerate(_ref_video_items(pid, s))],
@@ -3456,6 +3604,7 @@ def state(project, base: str) -> dict:
                           "voice": f"/api/editor/{pid}/refs/{r['id']}/voice"
                           if r["voice_path"] else None,
                           "voice_design": r["voice_design"] or "",
+                          "links": linked_ids(pid, r["id"]),
                           "voice_designed": bool(r["voice_text"]) and bool(r["voice_path"]),
                           "voice_pending": bool(r["voice_job"]) or (
                               bool(r["voice_auto"]) and needs_voice(r))})
@@ -3542,18 +3691,24 @@ def describe_for_agent(project_id: str, focus_shot: str | None = None, compact: 
     refs = db.query("SELECT * FROM prod_refs WHERE project_id=? ORDER BY idx", (project_id,))
     if refs:
         lines.append("References:")
+        ref_names = {r["id"]: r["name"] for r in refs}
         for r in refs:
             bits = [f"picture image_id={r['image_id']}" if r["image_id"] else "no picture",
                     "voice sample" if r["voice_path"] else
                     (f"speaker {r['speaker']}" if r["speaker"] else "no voice")]
+            goes = [ref_names.get(x, x) for x in linked_ids(project_id, r["id"])]
             lines.append(f"- ref_id={r['id']} {r['kind']} \"{r['name']}\": "
-                         f"{r['description'][:260 if compact >= 2 else 700]} [{', '.join(bits)}]")
+                         f"{r['description'][:260 if compact >= 2 else 700]} [{', '.join(bits)}]"
+                         + (f" goes with: {', '.join(goes)}" if goes else ""))
     shots = ordered_shots(project_id)
     names = {r["id"]: r["name"] for r in refs}
     for sc in scenes_of(project_id):
         cast = [names.get(r, r) for r in _jl(sc["refs"], [])]
+        sw = _jl(sc["wear"] if "wear" in sc.keys() else "{}", {})
+        wear_txt = "; ".join(f"{names.get(k, k)} has [{', '.join(names.get(x, x) for x in v) or 'nothing extra'}]"
+                             for k, v in sw.items())
         lines.append(f"SCENE scene_id={sc['id']} \"{sc['title']}\"{' LOCKED-BY-THE-PERSON' if sc['locked'] else ''} assets=[{', '.join(cast)}]: "
-                     f"{sc['summary'][:300]}")
+                     f"{sc['summary'][:300]}" + (f" | in this scene: {wear_txt}" if wear_txt else ""))
         in_scene = [x for x in shots if x["scene_id"] == sc["id"]]
         brief = compact >= 1 and sc["id"] != focus_scene
         if brief and in_scene:
@@ -3669,6 +3824,7 @@ def storyboard_changes(project_id: str, args: dict) -> list:
                         "description": r.get("description", ""),
                         **({"from_ref_id": r["from_ref_id"]} if r.get("from_ref_id") else {}),
                         **({"voice": r["voice"]} if r.get("voice") else {}),
+                        **({"with": r.get("with") or r.get("links")} if r.get("with") or r.get("links") else {}),
                         **({"speaker": r["speaker"]} if r.get("speaker") in speech.SPEAKERS else {})})
     for si, sc in enumerate(args.get("scenes") or []):
         if not isinstance(sc, dict):
@@ -3680,6 +3836,7 @@ def storyboard_changes(project_id: str, args: dict) -> list:
         # "Scene 1", that scene is used; otherwise the scene is added after the others.
         changes.append({"op": "add_scene", "key": key, "title": sc.get("title", ""),
                         "summary": sc.get("summary", ""), "refs": cast,
+                        **({"wear": sc["wear"]} if isinstance(sc.get("wear"), dict) else {}),
                         **({"fill_empty": True} if si == 0 else {})})
         for hi, sh in enumerate(sc.get("shots") or []):
             if not isinstance(sh, dict):
@@ -3690,7 +3847,7 @@ def storyboard_changes(project_id: str, args: dict) -> list:
                      and (d.get("text") or d.get("line"))]
             shot = {"op": "add_shot", "key": f"s{si}_{hi}", "scene_id": key,
                     **{k: sh[k] for k in ("title", "framing", "seconds", "prompt", "make",
-                                          "start_from") if sh.get(k) is not None},
+                                          "start_from", "wear") if sh.get(k) is not None},
                     "refs": [r for r in refs if r]}
             if sh.get("continues") is not None and hi > 0:
                 shot["start_from"] = "prev_last" if sh.get("continues") else ""
@@ -4050,7 +4207,7 @@ AGENT_TOOLS = {
                         "delete_shot{shot_id}; edit_clip{clip_id,start_s,trim_s,duration_s,"
                         "gain_db,fade_in,fade_out,use_in_video,track}; delete_clip{clip_id}; "
                         "set_mix{dialogue:{gain_db,mute},ambience:{..},music:{..},shot:{..},"
-                        "duck_db}; add_ref{key,kind,name,description,image_id,speaker,from_ref_id "
+                        "duck_db}; add_ref{key,kind,name,description,image_id,speaker,links:[names],from_ref_id "
                         "(copy one of the person's characters from another production)}; "
                         "edit_ref{ref_id,...}; delete_ref{ref_id}; add_line{shot_id,ref_id,text,"
                         "instruct}. REMOVING something is delete_scene/delete_shot/delete_ref/"
@@ -4073,20 +4230,26 @@ AGENT_TOOLS = {
             **_PID,
             "story": {"type": "string", "description": "the full story text (optional)"},
             "refs": {"type": "array", "items": {"type": "object"},
-                     "description": "characters/places: {name, kind, description, voice} -- "
-                                    "voice (characters): how they sound, for designing their own "
-                                    "voice: gender, age, pitch, timbre, pace, accent, emotion"},
+                     "description": "characters/places/props/styles: {name, kind, description, "
+                                    "voice, with} -- voice (characters): how they sound (gender, "
+                                    "age, pitch, timbre, pace, accent, emotion); with: names of the "
+                                    "props (outfit, objects) and style that always go with this "
+                                    "character or place"},
             "scenes": {"type": "array", "items": {"type": "object"}, "description":
                        "in order: {title, summary, refs:[the characters/places in the scene, by "
-                       "name], shots:[{title, framing, seconds, prompt, make, refs, "
+                       "name], wear:{character: [props they have in this scene]} (only where it "
+                       "differs from their usual), shots:[{title, framing, seconds, prompt, make, "
+                       "refs, wear (only where it differs from the scene), "
                        "continues (true when it is one continuous take with the shot before), "
                        "dialogue:[{speaker: character name or 'Narrator', text, delivery}]}]} "
                        "(shots inherit the scene's refs; every line of the script goes in "
                        "`dialogue` of the shot where it is said, word for word)"},
             "proposal_title": {"type": "string"}, "summary": {"type": "string"}}},
         "description": "Lay out a story (or a part of it) as scenes and shots in one go, in a "
-                       "natural nested shape; it becomes one proposal the person applies. Use "
-                       "this for breakdowns; one call per 1-3 scenes keeps each answer short."},
+                       "natural nested shape. ALWAYS include the outfit/object props and the style "
+                       "as refs, link them to characters and places with `with`, and give scenes/"
+                       "shots `wear` where outfits or objects change. One call per 1-3 scenes "
+                       "keeps each answer short."},
     "make_ref_picture": {
         "handler": _t_ref_picture,
         "schema": {"type": "object", "required": ["project_id"], "properties": {
@@ -4534,6 +4697,8 @@ async def api_add_ref(pid: str, request: Request):
                   str(form.get("speaker") or "") or None, vraw or None,
                   getattr(voice, "filename", "") if vraw else "", user,
                   voice_design=str(form.get("voice_design") or ""))
+    if form.get("links"):
+        set_links(pid, rid, [x.strip() for x in str(form.get("links")).split(",") if x.strip()])
     return {"id": rid}
 
 
@@ -4543,7 +4708,7 @@ async def api_edit_ref(pid: str, rid: str, request: Request):
     project = production(user, pid)
     form = await request.form()
     f = {k: form.get(k) for k in ("name", "description", "kind", "speaker", "image_id",
-                                  "voice_design") if form.get(k) is not None}
+                                  "voice_design", "links") if form.get(k) is not None}
     pic = form.get("picture")
     if pic is not None and hasattr(pic, "read"):
         raw = await pic.read()

@@ -565,3 +565,9 @@ body:has(.ed) footer, body:has(.ed) .retention-note { display: none; }
 /* Edit a picture (change part of it, keep the rest) */
 .ed-stage-edit { position: absolute; right: 10px; bottom: 10px; z-index: 3; }
 .rf-editbox textarea { width: 100%; margin: 6px 0; }
+
+/* "Goes with": props / styles linked to a character or place */
+.ed-chip.lk { grid-template-columns: auto minmax(0, 1fr); padding: 6px 8px; }
+.ed-chip.lk input { width: auto; margin: 0; }
+.ed-wear { margin: 6px 0 10px; }
+.ed-wear .h { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }

@@ -462,10 +462,14 @@ def _migrate(conn) -> None:
                             # sample says (for cloning), the design job, design automatically
                             "voice_design": "TEXT NOT NULL DEFAULT ''",
                             "voice_text": "TEXT", "voice_job": "TEXT",
-                            "voice_auto": "INTEGER NOT NULL DEFAULT 0"},
+                            "voice_auto": "INTEGER NOT NULL DEFAULT 0",
+                            # props/styles that go with a character or place (2026-11-25)
+                            "links": "TEXT NOT NULL DEFAULT '[]'"},
               "agent_lessons": {"project_id": "TEXT"},
               "prod_clips": {"instruct": "TEXT NOT NULL DEFAULT ''", "auto": "INTEGER NOT NULL DEFAULT 0"},
               "prod_scenes": {"refs": "TEXT NOT NULL DEFAULT '[]'",
+                              # per character, the props they have in this scene (2026-11-25)
+                              "wear": "TEXT NOT NULL DEFAULT '{}'",
                               "locked": "INTEGER NOT NULL DEFAULT 0"},
               "shots": {"title": "TEXT NOT NULL DEFAULT ''", "scene_id": "TEXT",
                         "framing": "TEXT NOT NULL DEFAULT ''", "refs": "TEXT NOT NULL DEFAULT '[]'",

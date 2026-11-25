@@ -717,6 +717,12 @@ audio, mix) is given to you in every turn; the person sees the same thing on scr
      the places. Ask only if something essential is missing.
   2. SCENES: identify ALL the scenes in one build_storyboard call: each with title, summary and
      refs = the characters and places in it (add them as refs). Shots may wait for stage 3.
+     In the SAME breakdown, ALWAYS (the person's rule, 2026-11-25 -- clothes kept changing):
+     a. a `prop` ref for each character's outfit (described exactly: garment, colour, fabric)
+        and for each object a character keeps using, plus ONE `style` ref for the film's look;
+     b. on every character and place ref, `with: [their usual outfit/objects and the style]`;
+     c. on every scene and shot where an outfit or object changes, `wear: {character: [props]}`
+        (and make those props too). Never leave clothes to each picture's imagination.
   3. SCENE ASSETS, scene by scene: lay out that scene's shots (build_storyboard for the scene,
      or propose_changes add_shot), then draw_pictures (every character/place picture and view,
      then each shot's picture; shot_picture_options to offer choices for one shot).
@@ -763,6 +769,15 @@ audio, mix) is given to you in every turn; the person sees the same thing on scr
     look agrees with this story; pass the story's description anyway. If it disagrees (age,
     skin, hair, costume), add a fresh reference instead.
   * make_ref_picture takes the reference's NAME (ref), so it works right after you add it.
+  * WHAT GOES WITH A CHARACTER OR PLACE: an outfit that must stay the same, an object they
+    always have, the film's look -- make each a reference (kind prop or style) and LINK it
+    (`with: [names]` on the character/place in build_storyboard refs, or add_ref/edit_ref
+    `links`). Linked props and style then come with that character into every shot, so the
+    clothes do not change between scenes. WHEN IT CHANGES (another outfit in a scene, a prop
+    picked up or put down in a shot): make that prop too and set `wear` on the scene
+    (edit_scene{wear: {"Abhi": ["Abhi's kurta"]}}) or the shot (edit_shot{wear: {...}}), or give
+    `wear` on scenes/shots in build_storyboard. A shot's wear beats its scene's, which beats the
+    character's usual links; {"Abhi": null} goes back to the scene's / usual.
   * TO CHANGE PART OF A PICTURE (a shot's or a character's) use edit_picture with only what
     should change ("she is not smiling", "evening light"): it keeps everything else. Draw a
     picture again only when the person wants a different picture altogether.

@@ -61,7 +61,10 @@ Write `prompt` as a description of that single image, 50-110 words, present tens
 - each visible person's pose mid-action and expression at that instant;
 - the setting details that matter to the story (e.g. "on the raised concrete sidewalk beside
   the road, not on the road"), the light, the time of day;
-- the film's style (e.g. photorealistic) as given.
+- the film's style (e.g. photorealistic) as given;
+- each visible person in EXACTLY the clothes, accessories and hair their cast entry gives (and
+  what it says they wear or carry): never invent, swap or recolour an outfit between shots
+  (2026-11-25: the clothes kept changing from scene to scene).
 Never write camera movement, shot titles, sound, dialogue or on-screen text. Never add people
 who are not in the shot. `visible`: the exact names (from the cast list) of the characters who
 can be seen in THIS frame -- only them. `place`: the name of the place it happens in, or null.
@@ -114,8 +117,18 @@ def _brief(pid: str, shot) -> str:
     shots = editor.ordered_shots(pid)
     i = [s["id"] for s in shots].index(shot["id"]) if shot["id"] in [s["id"] for s in shots] else 0
     prev = shots[i - 1] if i > 0 else None
-    cast = "\n".join(f"- {r['name']} ({r['kind']}): {(r['description'] or '').strip()[:300]}"
-                     for r in _cast(pid, shot)) or "- (none listed)"
+    rows = _cast(pid, shot)
+    names = {r["id"]: r for r in rows}
+
+    def entry(r) -> str:
+        line = f"- {r['name']} ({r['kind']}): {(r['description'] or '').strip()[:700]}"
+        goes = [names[x] for x in editor.props_for(pid, shot, r["id"]) if x in names
+                and names[x]["kind"] in ("prop", "style")] if r["kind"] in ("character", "location") else []
+        if goes:
+            line += " | in this shot with: " + "; ".join(
+                f"{g['name']} ({g['kind']}): {(g['description'] or '').strip()[:200]}" for g in goes)
+        return line
+    cast = "\n".join(entry(r) for r in rows) or "- (none listed)"
     params = db.params_of(project)
     return (f"Story: {(project['story'] or '').strip()[:1500]}\n"
             f"Scene: {scene['title'] + ': ' + (scene['summary'] or '') if scene else '-'}\n"
@@ -198,9 +211,16 @@ def sources_for(user, pid: str, shot, plan: dict | None, prompt: str) -> tuple[l
     chars = [r for r in cast if r["kind"] == "character" and r["name"].lower() in names]
     srcs, lines = [], []
     per = 2 if len(chars) == 1 else 1
+    close = (shot["framing"] or "") in ("CU", "ECU", "MCU")
     for r in chars[:3]:
         nums = []
-        for _, i in editor._identity_pictures(r)[:per]:
+        pics = editor._identity_pictures(r)
+        if not close and r["image_id"] and editor._img_done(r["image_id"]):
+            # Wider than a close-up: the full-body picture first, so the OUTFIT is a source too
+            # (with two people each got only the face close-up, and clothes drifted).
+            pics = [(f"a photo of {r['name']}", r["image_id"])] + \
+                   [p for p in pics if p[1] != r["image_id"]]
+        for _, i in pics[:per]:
             if len(srcs) >= images.MAX_SOURCES:
                 break
             try:
@@ -212,6 +232,24 @@ def sources_for(user, pid: str, shot, plan: dict | None, prompt: str) -> tuple[l
             lines.append(f"{r['name']} has exactly the face, hair and clothes of picture"
                          f"{'s' if len(nums) > 1 else ''} {' and '.join(nums)} (only the "
                          "person, not that picture's pose or background)")
+    # What visible characters always have (a costume, an object): its picture if there is room,
+    # its description always.
+    for r in chars[:3]:
+        for x in editor.props_for(pid, shot, r["id"]):
+            g = next((c for c in cast if c["id"] == x and c["kind"] == "prop"), None)
+            if g is None:
+                continue
+            said = f"{r['name']} wears/has {g['name']}: {(g['description'] or '').strip()[:160]}"
+            if g["image_id"] and editor._img_done(g["image_id"]) and len(srcs) < images.MAX_SOURCES - 1:
+                try:
+                    srcs.append(images.source_from_image(user, g["image_id"]))
+                    said += f" (exactly as in picture {len(srcs)})"
+                except Exception:                              # noqa: BLE001
+                    pass
+            lines.append(said)
+    styles = [c for c in cast if c["kind"] == "style" and (c["description"] or "").strip()]
+    if styles:
+        lines.append("Style: " + "; ".join((c["description"] or "").strip()[:200] for c in styles[:2]))
     place_name = ((plan or {}).get("place") or "").lower()
     if (shot["framing"] or "") in WIDE and len(srcs) < images.MAX_SOURCES:
         for r in cast:
