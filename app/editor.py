@@ -1594,8 +1594,8 @@ async def make_angles(project, user: auth.User, ref_id: str, only: list | None =
                     "plain soft background; character turnaround reference.")
         angles[key] = await images.create(user, (text + more)[:1900], src,
                                           orientation=params.get("orientation", "portrait"),
-                                          model=model or (PLACE_VIEW_MODEL if r["kind"] == "location"
-                                                          else None))
+                                          model=model or default_image_model(pid) or
+                                          (PLACE_VIEW_MODEL if r["kind"] == "location" else None))
     db.run("UPDATE prod_refs SET angles=? WHERE id=?", (json.dumps(angles), ref_id))
     _touch(pid)
     return angles
@@ -1701,10 +1701,20 @@ async def picture_options(project, user: auth.User, shot_id: str, prompt: str = 
     for i in range(count):
         ids.append(await images.create(user, text[:1900], sources,
                                        orientation=params.get("orientation", "portrait"),
-                                       model=shotpics.option_model(i, model), seed=shotpics.seed()))
+                                       model=shotpics.option_model(i, model or default_image_model(pid)),
+                                       seed=shotpics.seed()))
     if check and cfg.PROMPT_POLISH:
         asyncio.create_task(_check_options_later(pid, shot_id, ids))
     return ids
+
+
+def default_image_model(pid: str) -> str | None:
+    """The production's picture model for everything drawn automatically (character and place
+    pictures, views, shot pictures), set in the ⋯ menu. None = Auto (each picture's usual
+    model). 2026-11-25, the person: "set a default image model option ... when doing auto gen"."""
+    p = db.one("SELECT params_json FROM projects WHERE id=?", (pid,))
+    m = (json.loads(p["params_json"] or "{}").get("image_model") if p else None) or None
+    return m if m in images.MODELS else None
 
 
 # --------------------------------------------------------------------------- picture edits
@@ -2557,7 +2567,8 @@ async def remake_picture_options(project, user: auth.User, shot, count: int) -> 
     ids = []
     for _ in range(max(1, min(4, count))):
         ids.append(await images.create(user, text[:1900], sources, orientation="landscape"
-                                       if w > h else "portrait"))
+                                       if w > h else "portrait",
+                                       model=default_image_model(project["id"])))
     return ids
 
 
@@ -3477,6 +3488,7 @@ def state(project, base: str) -> dict:
         "mix": _mix(project), "duration": sum(s["seconds"] for s in shot_views),
         "proposals": props, "export": export_view, "ai": ai_activity(project),
         "agent_applies": bool(params.get("agent_applies")),
+        "image_model": params.get("image_model") or "",
         "planner": cfg.PLANNER_MODEL,
         "video_refs": bool(params.get("video_refs")),
         "thread_id": thread["id"] if thread else None,
@@ -3589,6 +3601,9 @@ def describe_for_agent(project_id: str, focus_shot: str | None = None, compact: 
     if props:
         lines.append("Open proposals (waiting for the person): " +
                      "; ".join(f"{p['id']} {p['title']}" for p in props))
+    if params.get("image_model"):
+        lines.append(f"Pictures are drawn with {params['image_model']} (the person's choice for this "
+                     "production): don't pass another model unless they ask.")
     lines.append(f"Total {sum(tm[s['id']][1] for s in shots):g}s. Shot length caps: animate "
                  f"{cap_seconds('animate')}s, perform {cap_seconds('perform')}s, lipsync "
                  f"{cap_seconds('lipsync')}s. "
@@ -3738,7 +3753,8 @@ async def ref_picture_options(project, user: auth.User, ref_id: str, prompt: str
     text = (prompt.strip() or ref_prompt(project, r))[:1900]
     orient = "landscape" if r["kind"] == "location" and params.get("orientation") == "landscape" else \
         params.get("orientation", "portrait")
-    return [await images.create(user, text, [], orientation=orient, model=model)
+    return [await images.create(user, text, [], orientation=orient,
+                                model=model or default_image_model(project["id"]))
             for _ in range(max(1, min(4, int(count or 2))))]
 
 
@@ -3760,7 +3776,7 @@ async def make_ref_picture(project, user: auth.User, ref_id: str, prompt: str = 
                  f"the {'photo' if len(src) == 1 else str(len(src)) + ' photos'}: same face, "
                  "features, build and colours.")
     image_id = await images.create(user, text[:1900], src, orientation=params.get("orientation", "portrait"),
-                                   model=model)
+                                   model=model or default_image_model(pid))
     db.run("UPDATE prod_refs SET image_id=? WHERE id=?", (image_id, ref_id))
     _want_angles(pid, ref_id)
     _touch(pid)
@@ -4292,6 +4308,14 @@ async def api_settings(pid: str, request: Request):
         params = db.params_of(db.one("SELECT * FROM projects WHERE id=?", (pid,)))
         params["agent_applies"] = bool(b["agent_applies"])
         db.set_params(pid, params)
+    if "image_model" in b:
+        m = str(b.get("image_model") or "")
+        if m and m not in images.MODELS:
+            raise HTTPException(400, f"image_model must be one of {', '.join(images.MODELS)}")
+        params = db.params_of(db.one("SELECT * FROM projects WHERE id=?", (pid,)))
+        params["image_model"] = m or None
+        db.set_params(pid, params)
+        out["image_model"] = m or None
     if "mix" in b and isinstance(b["mix"], dict):
         set_mix(db.one("SELECT * FROM projects WHERE id=?", (pid,)), **b["mix"])
     return out

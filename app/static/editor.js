@@ -89,6 +89,7 @@
     const n = S.proposals.length; $("prop-n").hidden = !n; $("prop-n").textContent = n;
     paintPropbar();
     $("applies").checked = S.agent_applies;
+    if ($("img-model") && document.activeElement !== $("img-model")) $("img-model").innerHTML = IMG_MODELS.filter(([v]) => v !== "qwen-image-edit-2511").map(([v, t]) => `<option value="${v}" ${v === (S.image_model || "") ? "selected" : ""}>${v ? t : "Auto (klein + Qwen mix)"}</option>`).join("");
     const d = String(S.mix.duck_db <= -0.5 ? Math.round(S.mix.duck_db) : 0);
     if (![...$("duck").options].some((o) => o.value === d)) $("duck").insertAdjacentHTML("beforeend", `<option value="${d}">${d} dB</option>`);
     $("duck").value = d;
@@ -1408,6 +1409,7 @@
   }
   ["story", "scene", "shot"].forEach((k) => $("scope-" + k).onclick = () => { scope = k; paintScope(); });
   ["quick", "quick-empty"].forEach((id) => $(id)?.addEventListener("click", (e) => { const b = e.target.closest("button"); if (b) chatSend(b.textContent); }));
+  if ($("img-model")) $("img-model").onchange = async () => { const v = $("img-model").value; try { await api(`/api/editor/${PID}/settings`, {image_model: v}); S.image_model = v; toast(v ? `New pictures are drawn with ${IMG_MODELS.find((m) => m[0] === v)[1].split(" —")[0]}` : "New pictures use the usual mix of models"); } catch (e) { toast(e.message); } };
   $("applies").onchange = async () => { await api(`/api/editor/${PID}/settings`, {agent_applies: $("applies").checked}); toast($("applies").checked ? "The agent applies its edits directly" : "The agent proposes; you apply"); };
 
   let threadId = null, lastAgentStatus = null, threadP = null, chatP = null;
