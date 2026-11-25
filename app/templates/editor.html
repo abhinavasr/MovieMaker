@@ -99,9 +99,9 @@
           </div></div>
           <button class="ws-btn ws-jump" id="jump" type="button" hidden>↓ New activity</button>
           <div class="ws-dock"><div class="ws-col">
-            <div class="ed-scopebar">Working on <button type="button" id="scope-story" title="Level 1: defines the scenes and their shots">the story</button><button type="button" id="scope-scene" title="Level 2: defines the shots this scene should have">this scene</button><button type="button" id="scope-shot" class="on" title="Level 3: defines this specific shot">this shot</button>
-              <label class="ed-switch" style="margin-left:auto" title="Let the assistant apply edits without asking"><input type="checkbox" id="applies"> apply directly</label></div>
-            <div class="ed-quick" id="quick"></div>
+            <div class="ed-scopebar"><span class="lbl">Working on</span> <button type="button" id="scope-story" title="Level 1: defines the scenes and their shots">the story</button><button type="button" id="scope-scene" title="Level 2: defines the shots this scene should have">this scene</button><button type="button" id="scope-shot" class="on" title="Level 3: defines this specific shot">this shot</button>
+              <span class="ed-quickwrap"><button type="button" class="ed-quickbtn" id="quick-btn" aria-haspopup="true" aria-expanded="false" title="Things to ask">⚡ Ideas ▾</button><div class="ed-quick pop" id="quick" hidden></div></span>
+              <label class="ed-switch" style="margin-left:auto" title="Let the assistant apply its edits without asking you first"><input type="checkbox" id="applies"> apply directly</label></div>
             <div class="ws-status" id="status" aria-live="polite"><span class="ws-dot" id="st-dot"></span><span class="txt" id="st-txt">Ready.</span><button class="ws-btn sm danger" id="stop" type="button" hidden>■ Stop</button></div>
             <div class="ws-pending" id="pending"></div>
             <form class="ws-box" id="say">

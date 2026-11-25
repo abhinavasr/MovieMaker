@@ -164,6 +164,7 @@ window.AgentChat = (() => {
       if ($("st-txt")) $("st-txt").innerHTML = busy || watching ? `<b>${esc(stage)}</b> · ${esc(act)} <span style="font-variant-numeric:tabular-nums">· ${elapsed()}</span>`
         : current ? "Ready — say what's next, or give feedback on anything above." : "Ready.";
       if ($("stop")) $("stop").hidden = !(busy || watching);
+      if ($("status")) $("status").classList.toggle("idle", !(busy || watching));
       liveEl.hidden = !(busy || watching);
       liveEl.className = "ws-live" + (watching ? " watching" : "");
       liveEl.querySelector(".stage").textContent = busy ? (act ? act.charAt(0).toUpperCase() + act.slice(1) : stage) : "Watching running work";

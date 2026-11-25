@@ -1481,7 +1481,12 @@
     paintInspectorHead();
   }
   ["story", "scene", "shot"].forEach((k) => $("scope-" + k).onclick = () => { scope = k; paintScope(); });
-  ["quick", "quick-empty"].forEach((id) => $(id)?.addEventListener("click", (e) => { const b = e.target.closest("button"); if (b) chatSend(b.textContent); }));
+  ["quick", "quick-empty"].forEach((id) => $(id)?.addEventListener("click", (e) => { const b = e.target.closest("button"); if (b) { $("quick").hidden = true; $("quick-btn")?.setAttribute("aria-expanded", "false"); chatSend(b.textContent); } }));
+  // The quick asks live in a popup (2026-11-25: one per line, they took half the panel).
+  if ($("quick-btn")) {
+    $("quick-btn").onclick = (e) => { e.stopPropagation(); const open = $("quick").hidden; $("quick").hidden = !open; $("quick-btn").setAttribute("aria-expanded", String(open)); };
+    document.addEventListener("click", (e) => { if (!$("quick").hidden && !e.target.closest(".ed-quickwrap")) { $("quick").hidden = true; $("quick-btn").setAttribute("aria-expanded", "false"); } });
+  }
   if ($("wait-cast")) $("wait-cast").onchange = async () => { try { await api(`/api/editor/${PID}/settings`, {wait_for_cast: $("wait-cast").checked}); S.wait_for_cast = $("wait-cast").checked; toast($("wait-cast").checked ? "Shots, voices and videos wait until you choose each character" : "Characters don't need your choice first"); load(true); } catch (e) { toast(e.message); } };
   if ($("refs-approve")) $("refs-approve").onclick = async () => { try { const d = await api(`/api/editor/${PID}/approve-looks`, {}); toast(d.chosen ? `${d.chosen} look(s) chosen — their shots go ahead` : "Every character is already chosen"); load(true); } catch (e) { toast(e.message); } };
   if ($("img-model")) $("img-model").onchange = async () => { const v = $("img-model").value; try { await api(`/api/editor/${PID}/settings`, {image_model: v}); S.image_model = v; toast(v ? `New pictures are drawn with ${IMG_MODELS.find((m) => m[0] === v)[1].split(" —")[0]}` : "New pictures use the usual mix of models"); } catch (e) { toast(e.message); } };
