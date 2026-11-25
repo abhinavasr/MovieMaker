@@ -763,6 +763,10 @@ audio, mix) is given to you in every turn; the person sees the same thing on scr
     look agrees with this story; pass the story's description anyway. If it disagrees (age,
     skin, hair, costume), add a fresh reference instead.
   * make_ref_picture takes the reference's NAME (ref), so it works right after you add it.
+  * A PICTURE THE PERSON GIVES FOR A CHARACTER is that character's look: set it at once with
+    edit_ref{ref_id or name, image_id: "@F<n>"} (never draw a new one instead). A character
+    sheet (several views side by side) is cut into its views automatically. Then redraw the
+    pictures of the shots that character is in, and check the result says it was applied.
   * EVERY CHARACTER GETS ITS OWN VOICE, designed from a voice brief: give each character ref a
     `voice` (one sentence: gender, age, pitch, timbre, pace, accent the setting implies, how they
     usually sound -- e.g. "A woman in her fifties, warm low voice, soft Indian English accent,

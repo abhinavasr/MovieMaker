@@ -586,7 +586,8 @@ def add_ref(project, kind: str, name: str, description: str = "", image_id: str 
            (rid, pid, idx, kind, name.strip()[:80], description[:1500], image_id, voice_path,
             speaker or None, db.now()))
     if image_id and kind in ("character", "location"):
-        _want_angles(pid, rid)
+        if not apply_sheet(project, user, rid, image_id):
+            _want_angles(pid, rid)
     if kind in VOICE_KINDS and not voice_path and not speaker:
         # Part of creating a character: its own voice is designed from its description.
         db.run("UPDATE prod_refs SET voice_auto=1, voice_design=? WHERE id=?",
@@ -632,6 +633,8 @@ def edit_ref(project, ref_id: str, user: auth.User | None = None, **f) -> None:
     if sets:
         cols = ", ".join(f"{k}=?" for k in sets)
         db.run(f"UPDATE prod_refs SET {cols} WHERE id=?", (*sets.values(), ref_id))
+        if sets.get("image_id"):
+            apply_sheet(project, user, ref_id, sets["image_id"])
         if "voice_path" in sets:
             # The person's own sample: its transcript is not known (Whisper hears it).
             db.run("UPDATE prod_refs SET voice_text=NULL WHERE id=?", (ref_id,))
@@ -1427,6 +1430,52 @@ def _keep_mine(angles: dict) -> dict:
     return out
 
 
+def apply_sheet(project, user: auth.User | None, ref_id: str, image_id: str) -> list[str] | None:
+    """If this picture is a character sheet (several views side by side), cut it into its
+    views: the front becomes the main picture, 3/4 / side / back / face the character's own
+    views (marked theirs, never redrawn). Returns the views made, or None (not a sheet).
+    See app/sheets.py for why (2026-11-25)."""
+    from io import BytesIO
+    from app import sheets
+    r = _ref(project["id"], ref_id)
+    if user is None or r["kind"] != "character":
+        return None
+    row = db.one("SELECT path FROM images WHERE id=?", (image_id,))
+    if not row or not row["path"] or not Path(row["path"]).exists() or \
+            not sheets.is_sheet(row["path"]):
+        return None
+    parts = sheets.split(row["path"])
+    if not parts:
+        return None
+    ids = {}
+    for k, im in parts.items():
+        buf = BytesIO()
+        im.save(buf, format="PNG")
+        ids[k] = _import_picture(user, f"{r['name']}-{k}.png", buf.getvalue())
+    angles = {k: v for k, v in _jl(r["angles"], {}).items() if k != "_auto"}
+    mine, skip = _marks(angles)
+    for k in views_for("character"):
+        if k in ids:
+            angles[k] = ids[k]
+            mine.add(k)
+            skip.discard(k)
+    n = 1
+    for k in sorted(x for x in ids if x.startswith("extra_")):
+        while f"photo_{n}" in angles:
+            n += 1
+        if n > MAX_EXTRA_PHOTOS:
+            break
+        angles[f"photo_{n}"] = ids[k]
+        mine.add(f"photo_{n}")
+    angles["_mine"] = sorted(mine)
+    angles["_skip"] = sorted(skip)
+    db.run("UPDATE prod_refs SET image_id=?, angles=? WHERE id=?",
+           (ids["front"], json.dumps(angles), ref_id))
+    _touch(project["id"])
+    log.info("character sheet for %s cut into %s", r["name"], ", ".join(sorted(ids)))
+    return sorted(ids)
+
+
 def add_ref_photos(project, user: auth.User, ref_id: str, files: list[tuple[str, bytes]],
                    slot: str | None = None) -> dict:
     pid = project["id"]
@@ -1438,6 +1487,21 @@ def add_ref_photos(project, user: auth.User, ref_id: str, files: list[tuple[str,
     if not ids:
         raise HTTPException(400, "no photo")
     placed = []
+    if slot in (None, "main"):
+        # A character sheet among them is cut into views instead of being one photo.
+        rest = []
+        for i in ids:
+            made = apply_sheet(project, user, ref_id, i)
+            if made:
+                placed += ["main" if k == "front" else k for k in made]
+            else:
+                rest.append(i)
+        if not rest:
+            return {"placed": placed, "dropped": 0}
+        ids = rest
+        r = _ref(pid, ref_id)
+        angles = {k: v for k, v in _jl(r["angles"], {}).items() if k != "_auto"}
+        mine, skip = _marks(angles)
     if slot:
         if slot == "main":
             db.run("UPDATE prod_refs SET image_id=? WHERE id=?", (ids[0], ref_id))
@@ -3049,6 +3113,13 @@ _FRAMING_WORDS = {"extreme wide": "EWS", "wide": "WS", "medium close": "MCU", "m
 def _normalise(c: dict) -> dict:
     """Accept the near-misses a model writes: `type`/`mode` for make, words for framing."""
     c = dict(c)
+    if c.get("op") in ("add_ref", "edit_ref") and not c.get("image_id"):
+        # 2026-11-25: the planner wrote {"picture": "img_..."}; it was dropped and the person's
+        # sheet never reached the character.
+        for alias in ("picture", "image", "photo", "picture_id", "image_ref", "photo_id"):
+            if isinstance(c.get(alias), str) and c[alias].strip():
+                c["image_id"] = c.pop(alias).strip()
+                break
     if c.get("op") in ("add_shot", "edit_shot"):
         for alias in ("type", "mode", "kind"):
             if c.get(alias) in MAKES and not c.get("make"):
