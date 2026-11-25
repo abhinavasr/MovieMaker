@@ -28,6 +28,10 @@ people, action, expression, light, camera. Describe the result, never give instr
 ("a woman with green hair", not "change her hair to green"). Keep every name and every tag
 such as <Picture 1>, <Video 1>, <Subject 1>, [Shot 1] and every timestamp exactly as given.
 Never add characters, spoken words, captions or on-screen text that are not in the input.
+Describe ONLY the events written in "This shot". The "Context" (story, scene, cast) is background
+for looks and setting: NEVER add an action from it -- the scene's later beats belong to the next
+shots (2026-11-25: a "walks along and spots her" shot was given the scene's "breaks into a
+sprint", and he ran out of frame). Keep the shot's pace: walking stays walking.
 Answer with JSON only."""
 
 GUIDE = {
@@ -69,6 +73,7 @@ GUIDE = {
                "the TARGET video (never 'remove', 'change' or 'make').",
 }
 
+VERSION = 2          # bump to rewrite every cached prompt under new rules
 SCHEMA = {"type": "object", "properties": {"prompt": {"type": "string"},
                                            "motion_prompt": {"type": "string"}},
           "required": ["prompt"]}
@@ -89,15 +94,22 @@ def draft(pid: str, shot) -> str:
     make = shot["make"] or "animate"
     if make in editor.REMAKE_MAKES:
         return editor.remake_prompt(pid, shot, editor._remake_frames(shot["seconds"]))
-    ctx = editor._shot_context(pid, shot)
-    return " ".join(x for x in ((shot["prompt"] or "").strip(), ctx) if x)
+    return (shot["prompt"] or "").strip()
+
+
+def context(pid: str, shot) -> str:
+    """Who and where, as background (never events to add)."""
+    from app import editor
+    if (shot["make"] or "animate") in editor.REMAKE_MAKES:
+        return ""
+    return editor._shot_context(pid, shot)
 
 
 def _key(pid: str, shot, text: str) -> str:
     refs = [db.one("SELECT name, description, image_id FROM prod_refs WHERE id=?", (r,))
             for r in _jl(shot["refs"], [])]
     opts = {k: v for k, v in _jl(shot["opts"], {}).items() if not k.startswith("_")}
-    raw = json.dumps([shot["make"], text, opts, [dict(r) for r in refs if r],
+    raw = json.dumps([VERSION, shot["make"], text, context(pid, shot), opts, [dict(r) for r in refs if r],
                       shot["seconds"], cfg.PLANNER_MODEL], sort_keys=True, default=str)
     return hashlib.sha1(raw.encode()).hexdigest()[:16]
 
@@ -123,10 +135,11 @@ def _ok(make: str, text: str, out: dict) -> bool:
     return True
 
 
-async def _ask(make: str, title: str, text: str) -> dict | None:
+async def _ask(make: str, title: str, text: str, ctx: str = "") -> dict | None:
     from app import agent
     user = (f"Use case: {make}. {GUIDE.get(make, GUIDE['animate'])}\n"
-            f"Shot title: {title or '-'}\n\nInput:\n{text}")
+            f"Shot title: {title or '-'}\n\nThis shot (the ONLY events to describe):\n{text}"
+            + (f"\n\nContext (background only -- do not add its events):\n{ctx}" if ctx else ""))
     res = await agent._ollama("/api/chat", {
         "model": cfg.PLANNER_MODEL, "stream": False, "think": False, "format": SCHEMA,
         "messages": [{"role": "system", "content": COMMON}, {"role": "user", "content": user}],
@@ -161,7 +174,8 @@ async def polish_shots(project_id: str, shot_ids: list[str], report=None) -> int
         await turn.acquire()
         for shot, text, key in todo:
             try:
-                out = await _ask(shot["make"] or "animate", shot["title"], text)
+                out = await _ask(shot["make"] or "animate", shot["title"], text,
+                                 context(project_id, shot))
             except Exception as exc:                          # noqa: BLE001
                 log.warning("prompt for %s not rewritten: %s", shot["id"], exc)
                 out = None
