@@ -19,7 +19,11 @@
       {% if user %}
         <p>Signed in as <strong>{{ user.username }}</strong>.</p>
       {% else %}
-        <label>Username <input name="username" autocomplete="username" autofocus required></label>
+        {% if batiyao_on() %}
+        <a class="btn primary bt-login" href="/auth/batiyao/start?next={{ (request.url.path ~ '?' ~ request.url.query)|urlencode }}" formnovalidate>Continue with Batiyao</a>
+        <p class="muted or"><span>or with a studio password</span></p>
+        {% endif %}
+        <label>Username <input name="username" autocomplete="username" required></label>
         <label>Password <input name="password" type="password" autocomplete="current-password" required></label>
       {% endif %}
       <button class="btn primary" type="submit" name="action" value="allow">Allow</button>

@@ -43,6 +43,9 @@ from app.service import keep_a_copy_note  # noqa: E402
 templates.env.globals["keep_a_copy"] = keep_a_copy_note
 from app.main_assets import ASSET_V  # noqa: E402  (the same ?v= stamp as the other pages)
 templates.env.globals["asset_v"] = ASSET_V
+# base.html asks this on every page; this template set renders base.html too (2026-11-25: the
+# connect page crashed with "'batiyao_on' is undefined" and ChatGPT could not connect).
+templates.env.globals["batiyao_on"] = lambda: __import__("app.batiyao", fromlist=["enabled"]).enabled()
 
 ACCESS_TTL = 3600
 REFRESH_TTL = 30 * 86400
