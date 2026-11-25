@@ -3508,6 +3508,11 @@ def apply_changes(project, user: auth.User, changes: list, guard: bool = False) 
             have = ref_by_name(pid, c.get("name", "")) if c.get("name") else None
             if src:
                 keys[key] = import_ref(project, user, str(src))
+                if guard and not c.get("image_id"):
+                    # the assistant reused a character from another story: the person still
+                    # chooses it here (2026-11-25: imported characters skipped the choice and
+                    # their lines were voiced at once)
+                    approve_refs(pid, [keys[key]], False)
                 # The story's own description wins over the copied one.
                 fix = {k: c[k] for k in ("description", "name") if c.get(k)}
                 if fix:
