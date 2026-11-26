@@ -1520,7 +1520,15 @@
   ["quick", "quick-empty"].forEach((id) => $(id)?.addEventListener("click", (e) => { const b = e.target.closest("button"); if (b) { $("quick").hidden = true; $("quick-btn")?.setAttribute("aria-expanded", "false"); chatSend(b.textContent); } }));
   // The quick asks live in a popup (2026-11-25: one per line, they took half the panel).
   if ($("quick-btn")) {
-    $("quick-btn").onclick = (e) => { e.stopPropagation(); const open = $("quick").hidden; $("quick").hidden = !open; $("quick-btn").setAttribute("aria-expanded", String(open)); };
+    $("quick-btn").onclick = (e) => {
+      e.stopPropagation(); const open = $("quick").hidden; const q = $("quick");
+      if (open) {   // the chip row scrolls sideways, which would clip a popup inside it: place it on the window
+        const r = $("quick-btn").getBoundingClientRect();
+        Object.assign(q.style, {position: "fixed", bottom: `${innerHeight - r.top + 6}px`,
+          left: `${Math.max(8, Math.min(r.left, innerWidth - Math.min(360, innerWidth * .8) - 8))}px`});
+      }
+      q.hidden = !open; $("quick-btn").setAttribute("aria-expanded", String(open));
+    };
     document.addEventListener("click", (e) => { if (!$("quick").hidden && !e.target.closest(".ed-quickwrap")) { $("quick").hidden = true; $("quick-btn").setAttribute("aria-expanded", "false"); } });
   }
   if ($("wait-cast")) $("wait-cast").onchange = async () => { try { await api(`/api/editor/${PID}/settings`, {wait_for_cast: $("wait-cast").checked}); S.wait_for_cast = $("wait-cast").checked; toast($("wait-cast").checked ? "Shots, voices and videos wait until you choose each character" : "Characters don't need your choice first"); load(true); } catch (e) { toast(e.message); } };
