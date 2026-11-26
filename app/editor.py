@@ -3744,6 +3744,7 @@ def apply_changes(project, user: auth.User, changes: list, guard: bool = False) 
             failed.append(f"links of {who}: no reference called {', '.join(missing)}")
     if pending_links:
         _touch(pid)
+    heal(pid)
     out = {"applied": done, "new_ids": keys}
     if failed:
         out["failed"] = failed
@@ -3788,8 +3789,75 @@ def _img_done(image_id: str) -> bool:
     return bool(row and row["status"] == "succeeded")
 
 
+def heal(pid: str) -> dict:
+    """Keep a production consistent whatever was changed, by whom (the person, the assistant,
+    an import): no shot, scene, outfit, talk-shot speaker or character link points at a
+    character that no longer exists, and a line that lost its speaker goes back to the
+    character its name tag says. Writes only when something is wrong.
+
+    2026-11-26, after deleted podcast hosts left lines without a speaker and scenes with dead
+    ids: "sure user can ask to change characters, but your scene should not have these issues
+    ... fix it permanently"."""
+    refs = db.query("SELECT id, name, links FROM prod_refs WHERE project_id=?", (pid,))
+    live = {r["id"] for r in refs}
+    by_name = {name_key(r["name"]): r["id"] for r in refs}
+    fixed: dict[str, int] = {}
+
+    def bump(k):
+        fixed[k] = fixed.get(k, 0) + 1
+
+    for sh in db.query("SELECT id, refs, opts FROM shots WHERE project_id=?", (pid,)):
+        r = _jl(sh["refs"], [])
+        o = _jl(sh["opts"], {})
+        r2 = [x for x in r if x in live]
+        o2 = dict(o)
+        if isinstance(o.get("wear"), dict):
+            o2["wear"] = {k: [x for x in v if x in live] for k, v in o["wear"].items()
+                          if k in live and isinstance(v, list)}
+        if isinstance(o.get("speakers"), list):
+            o2["speakers"] = [dict(x, ref=x.get("ref") if x.get("ref") in live else None)
+                              for x in o["speakers"] if isinstance(x, dict)]
+        if isinstance(o.get("cast"), list):
+            o2["cast"] = [x for x in o["cast"] if isinstance(x, dict) and x.get("ref") in live]
+        if r2 != r or o2 != o:
+            db.run("UPDATE shots SET refs=?, opts=? WHERE id=?", (json.dumps(r2), json.dumps(o2), sh["id"]))
+            bump("shots")
+    for sc in db.query("SELECT id, refs, wear FROM prod_scenes WHERE project_id=?", (pid,)):
+        r, w = _jl(sc["refs"], []), _jl(sc["wear"], {})
+        r2 = [x for x in r if x in live]
+        w2 = {k: [x for x in v if x in live] for k, v in w.items() if k in live and isinstance(v, list)}
+        if r2 != r or w2 != w:
+            db.run("UPDATE prod_scenes SET refs=?, wear=? WHERE id=?", (json.dumps(r2), json.dumps(w2), sc["id"]))
+            bump("scenes")
+    for r in refs:
+        l = _jl(r["links"], [])
+        l2 = [x for x in l if x in live and x != r["id"]]
+        if l2 != l:
+            db.run("UPDATE prod_refs SET links=? WHERE id=?", (json.dumps(l2), r["id"]))
+            bump("links")
+    for c in db.query("SELECT id, ref_id, name, status FROM prod_clips WHERE project_id=? AND "
+                      "track='dialogue' AND (ref_id IS NULL OR ref_id NOT IN (SELECT id FROM "
+                      "prod_refs WHERE project_id=?))", (pid, pid)):
+        who = (c["name"] or "").split(":", 1)[0] if ":" in (c["name"] or "") else ""
+        rid = by_name.get(name_key(who)) if who else None
+        if rid:
+            # back with its speaker; a line voiced (or being voiced) without them is voiced again
+            db.run("UPDATE prod_clips SET ref_id=?, status=CASE WHEN status IN ('ready','pending') "
+                   "THEN 'script' ELSE status END, source_id=CASE WHEN status IN ('ready','pending') "
+                   "THEN NULL ELSE source_id END, auto=1 WHERE id=?", (rid, c["id"]))
+            bump("lines")
+        elif c["ref_id"] is not None:
+            db.run("UPDATE prod_clips SET ref_id=NULL WHERE id=?", (c["id"],))
+            bump("dead line speakers")
+    if fixed:
+        log.info("healed %s: %s", pid, fixed)
+        _touch(pid)
+    return fixed
+
+
 def state(project, base: str) -> dict:
     pid = project["id"]
+    heal(pid)
     refresh_clips(pid)
     project = db.one("SELECT * FROM projects WHERE id=?", (pid,))
     params = db.params_of(project)
@@ -3921,6 +3989,7 @@ def describe_for_agent(project_id: str, focus_shot: str | None = None, compact: 
            case, length, status, picture, cast and the use-case settings -- reference videos,
            voices, recast cast, restyle change -- stay, so the planner can act on any shot);
       >=2  also shortens reference descriptions."""
+    heal(project_id)
     project = db.one("SELECT * FROM projects WHERE id=?", (project_id,))
     if project is None:
         return ""
