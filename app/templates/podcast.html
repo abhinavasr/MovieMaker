@@ -1,0 +1,132 @@
+{% extends "base.html" %}
+{% block title %}Podcast · Story Studio{% endblock %}
+{% block body %}
+<link rel="stylesheet" href="/static/podcast.css?v={{ asset_v }}">
+<h1>Podcast</h1>
+<p class="muted">Two hosts debate a question. Research agents read the web for each side, fact-checkers
+  check every claim against fresh sources, a neutral orchestrator keeps only the points where the hosts
+  really collide, and the script is written segment by segment. The result opens in the
+  <a href="/edit">editor</a> as a production: the hosts as characters with their own designed voices,
+  a scene per segment, and talking shots (InfiniteTalk) with every line already under them.
+  {% if not unlimited %}Up to {{ per_day }} podcasts a day.{% endif %}
+  You can also just ask the <a href="/assistant">assistant</a>: “make a podcast about …”.</p>
+
+<form class="card stack pc-form" id="pc-form">
+  <label><span class="field-head"><span>What should they debate?</span><span class="count" id="topic-n"></span></span>
+    <textarea name="topic" rows="3" maxlength="1500" required
+      placeholder="Should AI infrastructure be regulated as a public utility?"></textarea></label>
+  <div class="chips">
+    {% for c in ["Should AI infrastructure be regulated as a public utility?",
+                 "Is a four-day work week good for the economy?",
+                 "Should cities ban cars from their centres?",
+                 "Is nuclear power the answer to climate change?",
+                 "Should social media be banned for under-16s?"] %}
+      <button type="button" class="chip" data-topic="{{ c }}">{{ c }}</button>
+    {% endfor %}
+  </div>
+
+  <div class="grid3">
+    <label>Episode title <span class="muted">(optional — the agents suggest one)</span>
+      <input name="title" maxlength="120"></label>
+    <label>Length
+      <select name="minutes">
+        {% for m in [5, 8, 12, 15, 20] %}<option value="{{ m }}" {% if m == 8 %}selected{% endif %}>about {{ m }} minutes</option>{% endfor %}
+      </select></label>
+    <label>Video shape
+      <select name="aspect">
+        <option value="16:9" selected>▭ 16:9 widescreen</option>
+        <option value="9:16">▯ 9:16 vertical</option>
+        <option value="1:1">□ 1:1 square</option>
+      </select></label>
+  </div>
+
+  <label>The two sides
+    <select name="lenses" id="lenses">
+      <option value="left_right">Left vs right</option>
+      <option value="optimist_skeptic">Optimist vs skeptic</option>
+      <option value="reform_tradition">Reformer vs traditionalist</option>
+      <option value="custom">My own…</option>
+    </select></label>
+
+  <div class="pc-hosts">
+    {% for h in hosts %}
+    <fieldset class="pc-host">
+      <legend>Host {{ "A" if loop.index0 == 0 else "B" }}</legend>
+      <label>Name <input name="name{{ loop.index0 }}" value="{{ h.name }}" maxlength="60"></label>
+      <label>Their side <input name="lens{{ loop.index0 }}" maxlength="300"
+        value="{{ lenses['left_right'][loop.index0] }}"></label>
+      <details><summary>Look and voice</summary>
+        <label>Look <textarea name="look{{ loop.index0 }}" rows="2" maxlength="600">{{ h.look }}</textarea></label>
+        <label>Voice <textarea name="voice{{ loop.index0 }}" rows="2" maxlength="600">{{ h.voice }}</textarea></label>
+        <p class="hint">The voice is designed from this description (say if they are a man or a woman, their age and accent).</p>
+      </details>
+    </fieldset>
+    {% endfor %}
+  </div>
+
+  <details><summary>More</summary>
+    <div class="stack" style="margin-top:10px">
+      <label>Research focus or constraints <span class="muted">(optional)</span>
+        <textarea name="focus" rows="2" maxlength="1500" placeholder="e.g. focus on Europe since 2020; use official statistics where possible"></textarea></label>
+      <label>Language of the script
+        <select name="language">{% for l in ["English", "Hindi", "Spanish", "French", "German", "Portuguese", "Japanese", "Chinese"] %}<option>{{ l }}</option>{% endfor %}</select></label>
+      <div class="pc-checks">
+        <span class="muted">Stop and let me review:</span>
+        <label class="switch"><input type="checkbox" name="review" value="research"> the research and fact-checks</label>
+        <label class="switch"><input type="checkbox" name="review" value="points"> the debate points (I can edit them)</label>
+      </div>
+    </div>
+  </details>
+
+  <div class="formbar"><button class="btn primary" type="submit">Research and write it →</button>
+    <span class="muted" id="pc-msg"></span></div>
+</form>
+
+{% if runs %}
+<h2 style="margin-top:28px">Your podcasts</h2>
+<div class="pc-list">
+  {% for r in runs %}
+  <a class="card pc-item" href="/podcast/{{ r.podcast_id }}">
+    <div><b>{{ r.title or r.topic[:90] }}</b>
+      <div class="muted">{{ r.hosts[0].name }} vs {{ r.hosts[1].name }} · about {{ r.minutes|int }} min · {{ r.message }}</div></div>
+    <span class="pill {{ 'succeeded' if r.status == 'done' else 'failed' if r.status in ('failed', 'cancelled') else 'running' }}">{{ r.status.replace('_', ' ') }}</span>
+  </a>
+  {% endfor %}
+</div>
+{% endif %}
+{% endblock %}
+{% block scripts %}
+<script>
+(() => {
+  const f = document.getElementById("pc-form");
+  const lenses = {{ lenses|tojson }};
+  const topic = f.elements.topic, n = document.getElementById("topic-n");
+  const count = () => { n.textContent = `${topic.value.length}/1500`; };
+  topic.addEventListener("input", count); count();
+  document.querySelectorAll("[data-topic]").forEach((b) => b.onclick = () => { topic.value = b.dataset.topic; count(); topic.focus(); });
+  document.getElementById("lenses").onchange = (e) => {
+    const l = lenses[e.target.value];
+    if (l) { f.elements.lens0.value = l[0]; f.elements.lens1.value = l[1]; }
+    else { f.elements.lens0.value = ""; f.elements.lens1.value = ""; f.elements.lens0.focus(); }
+  };
+  f.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const b = f.querySelector("button[type=submit]"), msg = document.getElementById("pc-msg");
+    const v = (k) => (f.elements[k]?.value || "").trim();
+    const body = {
+      topic: v("topic"), title: v("title"), minutes: Number(v("minutes")), aspect: v("aspect"),
+      focus: v("focus"), language: v("language"),
+      review: [...f.querySelectorAll("input[name=review]:checked")].map((x) => x.value),
+      hosts: [0, 1].map((i) => ({name: v(`name${i}`), lens: v(`lens${i}`), look: v(`look${i}`), voice: v(`voice${i}`)})),
+    };
+    b.disabled = true; msg.textContent = "Starting…";
+    try {
+      const r = await fetch("/api/podcasts", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.detail || d.error || `HTTP ${r.status}`);
+      location.href = `/podcast/${d.podcast_id}`;
+    } catch (err) { msg.textContent = err.message; b.disabled = false; }
+  });
+})();
+</script>
+{% endblock %}

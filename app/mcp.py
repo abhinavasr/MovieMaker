@@ -48,6 +48,11 @@ show the person the pictures and let them choose (choose_looks; their own pictur
 draw_scene_pictures -> render_video. Nothing is made with a character before their look is \
 chosen. edit_picture changes part of a picture and keeps the rest.
 
+PODCASTS: for a podcast, debate or two-person discussion episode, call make_podcast with the \
+topic (it researches the web, fact-checks, writes the script and builds an editor production \
+with InfiniteTalk talking shots); poll get_podcast every minute or two and give the person \
+editor_url when it is done.
+
 THE EDITOR: every storyboard opens in the studio's editor at its `editor_url` (scenes, shots, \
 characters, voices, music, the mix, the studio's own assistant). Give the person editor_url when \
 they want to see or work on it there. A project with in_editor true is the person's production: \
@@ -1165,6 +1170,82 @@ def _get_voice_job(user, args, base):
     return _job_out(voices.owned_job(user, str(args.get("job_id") or "")), base)
 
 
+# --------------------------------------------------------------------------- podcasts
+# A researched, fact-checked two-host debate that lands in the editor as a production with
+# InfiniteTalk shots (app/podcast.py). The person: "our assistant should be able to help
+# initiate this workflow if user simply chats through it".
+
+def _podcast_out(row, base: str, full: bool = False) -> dict:
+    from app import podcast
+    v = podcast.view(row, full=True)
+    out = {k: v[k] for k in ("podcast_id", "title", "topic", "status", "message", "progress",
+                             "hosts", "minutes", "deleted_on") if k in v}
+    out["page_url"] = f"{base}/podcast/{row['id']}"
+    if v.get("error"):
+        out["error"] = v["error"]
+    if v.get("project_id"):
+        out["project_id"] = v["project_id"]
+        out["editor_url"] = base + v["editor_path"]
+    out["sources_read"] = len(v.get("sources") or [])
+    if v.get("orchestrator") and (full or row["status"] == "review_points"):
+        out["debate_points"] = v["orchestrator"]["points"]
+    if full or row["status"] == "review_research":
+        for side in ("a", "b"):
+            fc = v.get(f"{side}_factcheck")
+            if fc:
+                out[f"{side}_fact_checks"] = [f"[{x['status']}] {x['statement']}" for x in fc["verdicts"]]
+    if full and v.get("script"):
+        out["script"] = [{"segment": s["title"], "lines": [f"{l['speaker']}: {l['text']}" for l in s["lines"]]}
+                         for s in v["script"]]
+    out["next"] = {
+        "review_research": "the research is ready for the person to review (page_url); when they "
+                           "are happy call continue_podcast",
+        "review_points": "the debate points are ready for the person to review or edit; call "
+                         "continue_podcast (with `points` if they changed them)",
+        "done": "it is in the editor (editor_url): the person chooses the hosts' looks there; "
+                "their voices are designed and every line voiced, then the shot pictures are "
+                "drawn and the InfiniteTalk shots rendered",
+        "failed": "call retry_podcast to continue from where it stopped",
+    }.get(row["status"], "researching and writing; check again with get_podcast in a minute or two "
+                         "(a podcast takes ~10-25 minutes)")
+    return out
+
+
+def _make_podcast(user, args, base):
+    from app import agent, podcast
+    thread = str(args.pop("_thread", "") or "") or None
+    if thread:
+        row = db.one("SELECT user_id FROM agent_threads WHERE id=?", (thread,))
+        thread = thread if row and row["user_id"] == user.id else None
+    pid = podcast.create(user, args, thread_id=thread)
+    return _podcast_out(db.one("SELECT * FROM podcasts WHERE id=?", (pid,)), base)
+
+
+def _get_podcast(user, args, base):
+    from app import podcast
+    return _podcast_out(podcast.owned(user, str(args.get("podcast_id") or "")), base,
+                        full=bool(args.get("full")))
+
+
+def _list_podcasts(user, args, base):
+    rows = db.query("SELECT * FROM podcasts WHERE user_id=? ORDER BY created_at DESC LIMIT 20",
+                    (user.id,))
+    return {"podcasts": [{k: v for k, v in _podcast_out(r, base).items() if k != "next"}
+                         for r in rows]}
+
+
+def _continue_podcast(user, args, base):
+    from app import podcast
+    podcast.proceed(user, str(args.get("podcast_id") or ""), args.get("points"))
+    return _get_podcast(user, args, base)
+
+
+def _retry_podcast(user, args, base):
+    from app import podcast
+    podcast.retry(user, str(args.get("podcast_id") or ""))
+    return _get_podcast(user, args, base)
+
+
 def _tool(name, title, description, handler, properties=None, required=(), *,
           read_only=False, destructive=False, meta=None):
     return {
@@ -1706,6 +1787,50 @@ TOOLS = [
            "text": {"type": "string"}, "rating": {"type": "string", "enum": ["sfw", "suggestive", "nsfw"]},
            "confirm_spend": {"type": "boolean"}},
           ["kind", "id", "mode"]),
+    _tool("make_podcast", "Make a podcast",
+          "Make a two-host DEBATE PODCAST about a topic, end to end: research agents read the web "
+          "for each side, fact-checkers check every claim against fresh sources, a neutral "
+          "orchestrator keeps the points where the hosts really collide, and the script is written "
+          "segment by segment. It lands in the studio's editor as a new production: the two hosts "
+          "as characters (the person chooses their looks; voices designed from the description), "
+          "a scene per segment, and InfiniteTalk talking shots with every line under them. Takes "
+          "~10-25 minutes; returns podcast_id at once. Use it whenever the person asks for a "
+          "podcast, debate, discussion show or two-person conversation episode. Defaults: left vs "
+          "right hosts Elena Vance and Marcus Sterling, about 8 minutes, 16:9.",
+          _make_podcast,
+          {"topic": {"type": "string", "description": "The question or topic they debate."},
+           "title": {"type": "string"},
+           "minutes": {"type": "number", "description": "3-30, default 8."},
+           "lenses": {"type": "string", "enum": ["left_right", "optimist_skeptic", "reform_tradition"],
+                      "description": "The two sides, unless hosts[].lens says otherwise."},
+           "hosts": {"type": "array", "maxItems": 2, "items": {"type": "object", "properties": {
+               "name": {"type": "string"}, "lens": {"type": "string", "description": "Their side or worldview."},
+               "look": {"type": "string", "description": "Appearance: gender, age, hair, clothes."},
+               "voice": {"type": "string", "description": "Voice description: gender, age, accent, manner."}}}},
+           "aspect": {"type": "string", "enum": ["16:9", "9:16", "1:1"]},
+           "language": {"type": "string", "description": "Language of the script, default English."},
+           "focus": {"type": "string", "description": "Research focus or constraints."},
+           "review": {"type": "array", "items": {"type": "string", "enum": ["research", "points"]},
+                      "description": "Stop for the person to review these first (default: none)."}},
+          ["topic"]),
+    _tool("get_podcast", "Check a podcast",
+          "Where a podcast run stands (status, progress, message); at a review gate the research "
+          "or debate points; when done, project_id and editor_url. full=true adds the fact-checks, "
+          "debate points and script.",
+          _get_podcast, {"podcast_id": {"type": "string"}, "full": {"type": "boolean"}},
+          ["podcast_id"], read_only=True),
+    _tool("list_podcasts", "List podcasts", "The person's podcast runs, newest first.",
+          _list_podcasts, read_only=True),
+    _tool("continue_podcast", "Continue a podcast",
+          "Continue a podcast waiting for review (status review_research or review_points). At "
+          "review_points, `points` replaces the debate points (each: title, debateQuestion, "
+          "aPosition, bPosition, factualGround, philosophicalVulnerability).",
+          _continue_podcast,
+          {"podcast_id": {"type": "string"},
+           "points": {"type": "array", "items": {"type": "object"}}}, ["podcast_id"]),
+    _tool("retry_podcast", "Retry a podcast",
+          "Continue a failed or cancelled podcast from where it stopped (finished steps are kept).",
+          _retry_podcast, {"podcast_id": {"type": "string"}}, ["podcast_id"]),
     _tool("get_voice_job", "Check a voice job",
           "A resing/song/speech job: when it has succeeded, audio_url and stems (links work for "
           "7 days; files are deleted after 90 days).",

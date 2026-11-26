@@ -404,6 +404,28 @@ CREATE TABLE IF NOT EXISTS batiyao_pending (
     next       TEXT NOT NULL DEFAULT '/',
     created_at REAL NOT NULL
 );
+-- Podcast runs (app/podcast.py): research -> fact-check -> debate points -> script ->
+-- an editor production. `state` holds every agent's output, so a restart resumes mid-run.
+CREATE TABLE IF NOT EXISTS podcasts (
+    id          TEXT PRIMARY KEY,
+    user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    title       TEXT NOT NULL DEFAULT '',
+    topic       TEXT NOT NULL,
+    config      TEXT NOT NULL DEFAULT '{}',
+    status      TEXT NOT NULL,              -- queued|researching|review_research|debating|
+                                            -- review_points|writing|building|done|failed|cancelled
+    message     TEXT NOT NULL DEFAULT '',
+    progress    INTEGER NOT NULL DEFAULT 0,
+    error       TEXT,
+    state       TEXT NOT NULL DEFAULT '{}',
+    log         TEXT NOT NULL DEFAULT '[]',
+    project_id  TEXT,
+    thread_id   TEXT,                       -- the assistant conversation that asked for it
+    created_at  REAL NOT NULL,
+    updated_at  REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS podcasts_user ON podcasts(user_id, created_at);
+
 -- What was shared, for the person's own record and support.
 CREATE TABLE IF NOT EXISTS batiyao_shares (
     id         TEXT PRIMARY KEY,

@@ -1390,6 +1390,7 @@ def refresh_clips(pid: str) -> None:
                    (row["path"], secs, secs, db.now(), c["id"]))
             if c["track"] == "dialogue":
                 _fit_lipsync(pid, c["id"])
+                _fit_talk(pid, c["id"])
         elif row["status"] in ("failed", "cancelled"):
             db.run("UPDATE prod_clips SET status='failed', error=?, updated_at=? WHERE id=?",
                    (row["error"] or row["status"], db.now(), c["id"]))
@@ -2158,8 +2159,9 @@ def _agent_shot_extras(pid: str, s) -> str:
         out.append("ref_videos=[" + "; ".join(label for label, _ in vids) + "]")
     o = _jl(s["opts"], {})
     if s["make"] in TALK_MAKES:
-        sp = [x.get("clip") or "none" for x in (o.get("speakers") or [])]
-        out.append(f"voices=[{', '.join(sp) or 'none yet'}]"
+        sp = [x["id"] + ("" if x["status"] == "ready" else f" ({x['status']})")
+              for x in talk_clips(pid, s)]
+        out.append(f"voices=[{', '.join(sp) or 'none yet: write its line(s) under it'}]"
                    + (f" first-speaker={'right' if o.get('layout') == 'right_left' else 'left'}"
                       if s["make"] == "talk2" else ""))
     if s["make"] == "recast":
@@ -2467,6 +2469,12 @@ def render_shots(project, user: auth.User, shot_ids: list[str] | None = None):
         cap = cap_seconds(s["make"])
         if int(s["seconds"] or 0) > cap:
             problems.append(f"{label} is longer than {cap} s")
+        if s["make"] in TALK_MAKES:
+            need = 2 if s["make"] == "talk2" else 1
+            ready = len(_speaker_audio(pid, s))
+            if ready < need:
+                problems.append(f"{label} needs {'two voiced lines' if need == 2 else 'its voiced line'} "
+                                f"under it ({ready} ready) — voices first, then the video")
         if s["make"] == "lipsync" and not _dialogue_under(pid, s["id"]):
             problems.append(f"{label} is a lip-sync shot with no dialogue under it marked "
                             "\"use in video\" — add a line on the dialogue track first")
@@ -2538,14 +2546,59 @@ def _clean_opts(pid: str, o: dict) -> dict:
     return out
 
 
+def talk_clips(pid: str, shot) -> list:
+    """The voice clips of a talk shot, in speaking order: the ones chosen in its settings,
+    else the lines written under it (2026-11-26, podcasts: "the agent should be able to
+    select the correct model type (infinite talk) with other relevant settings" -- the
+    lines of a talking shot ARE its voices, so nobody has to wire clip ids by hand)."""
+    need = 2 if shot["make"] == "talk2" else 1
+    chosen = [s.get("clip") for s in _jl(shot["opts"], {}).get("speakers") or [] if s.get("clip")]
+    rows = [db.one("SELECT * FROM prod_clips WHERE id=? AND project_id=?", (c, pid)) for c in chosen]
+    rows = [r for r in rows if r is not None]
+    if rows:
+        return rows[:need]
+    start, length = timings(pid).get(shot["id"], (0.0, 0.0))
+    under = [c for c in db.query("SELECT * FROM prod_clips WHERE project_id=? AND track='dialogue' "
+                                 "AND use_in_video=1 AND status != 'failed' ORDER BY start_s", (pid,))
+             if start <= c["start_s"] < start + length]
+    return under[:need]
+
+
 def _speaker_audio(pid: str, shot) -> list[Path]:
-    paths = []
-    for s in _jl(shot["opts"], {}).get("speakers") or []:
-        row = db.one("SELECT path, status FROM prod_clips WHERE id=? AND project_id=?",
-                     (s.get("clip"), pid)) if s.get("clip") else None
-        if row and row["status"] == "ready" and row["path"] and Path(row["path"]).exists():
-            paths.append(Path(row["path"]))
-    return paths
+    return [Path(r["path"]) for r in talk_clips(pid, shot)
+            if r["status"] == "ready" and r["path"] and Path(r["path"]).exists()]
+
+
+def _fit_talk(pid: str, clip_id: str) -> None:
+    """Once a talk shot's voices are ready: they play back to back from the shot's start
+    (InfiniteTalk speaks them one after the other) and the shot lasts as long as they do;
+    the shots after it move along with their lines."""
+    c = db.one("SELECT start_s FROM prod_clips WHERE id=?", (clip_id,))
+    if c is None:
+        return
+    for sid, (st, ln) in timings(pid).items():
+        shot = db.one("SELECT * FROM shots WHERE id=?", (sid,))
+        if shot is None or shot["make"] not in TALK_MAKES:
+            continue
+        clips = talk_clips(pid, shot)
+        if clip_id not in [x["id"] for x in clips]:
+            continue
+        if not all(x["status"] == "ready" and x["path"] for x in clips):
+            return
+        project = db.one("SELECT * FROM projects WHERE id=?", (pid,))
+        if service.is_rendering(project):
+            return
+        lengths = [_probe_seconds(x["path"]) or (x["duration_s"] or 0) for x in clips]
+        want = max(1, min(cfg.TALK_MAX_SECONDS, math.ceil(sum(lengths) + 0.4)))
+        if want != int(shot["seconds"] or 0):
+            edit_shot(project, sid, seconds=want)
+        st = timings(pid).get(sid, (st, ln))[0]
+        at = st + 0.1
+        for x, secs in zip(clips, lengths):
+            db.run("UPDATE prod_clips SET start_s=?, updated_at=? WHERE id=?",
+                   (round(at, 3), db.now(), x["id"]))
+            at += secs
+        return
 
 
 def _sync_talk_seconds(pid: str, shot_id: str) -> None:

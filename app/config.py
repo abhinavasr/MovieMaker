@@ -143,6 +143,8 @@ class Config:
     USER_IMAGES_PER_HOUR = _i("STUDIO_USER_IMAGES_PER_HOUR", 20)
     USER_SPEECH_PER_HOUR = _i("STUDIO_USER_SPEECH_PER_HOUR", 30)
     USER_MUSIC_PER_HOUR = _i("STUDIO_USER_MUSIC_PER_HOUR", 12)
+    # Podcasts: each runs ~15-25 planner calls and reads ~20 web pages.
+    USER_PODCASTS_PER_DAY = _i("STUDIO_USER_PODCASTS_PER_DAY", 6)
     # How long a finished project's files stay on disk.
     RETENTION_DAYS = _i("STUDIO_RETENTION_DAYS", 90)
 

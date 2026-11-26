@@ -23,7 +23,7 @@ from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
                                PlainTextResponse, RedirectResponse)
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from app import (agent, agentfiles, auth, batiyao, editor, db, gpuqueue, images, mcp, music, oauth, render, service, speech, styles,
+from app import (agent, agentfiles, auth, batiyao, editor, db, gpuqueue, images, mcp, music, oauth, podcast, render, service, speech, styles,
                  voices, wis)
 from app.config import cfg
 
@@ -58,7 +58,8 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(_reap_loop())
     agent_tasks = [asyncio.create_task(editor.pending_loop())]
     if cfg.AGENT_WORKER:
-        agent_tasks += [asyncio.create_task(agent.worker()), asyncio.create_task(agent.monitor())]
+        agent_tasks += [asyncio.create_task(agent.worker()), asyncio.create_task(agent.monitor()),
+                        asyncio.create_task(podcast.worker())]
     else:
         log.info("agent worker off (STUDIO_AGENT_WORKER=0)")
     log.info("story studio up; upstream %s", cfg.WIS_BASE_URL)
@@ -128,6 +129,7 @@ app.include_router(styles.router)
 app.include_router(agent.router)
 app.include_router(editor.router)
 app.include_router(batiyao.router)
+app.include_router(podcast.router)
 
 
 async def _reap_loop() -> None:
@@ -146,6 +148,7 @@ async def _reap_loop() -> None:
             music.purge_older_than(cutoff)
             await voices.purge_older_than(cutoff)
             agent.purge_older_than(cutoff)     # trained voices + profiles are kept
+            podcast.purge_older_than(cutoff)
         except Exception:                                      # noqa: BLE001
             log.exception("reaper survived an error")
         await asyncio.sleep(3600)

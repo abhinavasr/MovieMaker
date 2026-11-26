@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block title %}{{ run.title or "Podcast" }} · Story Studio{% endblock %}
+{% block body %}
+<link rel="stylesheet" href="/static/podcast.css?v={{ asset_v }}">
+<a class="back" href="/podcast">← Podcasts</a>
+<div id="pc-run"></div>
+{% endblock %}
+{% block scripts %}
+<script>window.PODCAST = {{ run|tojson }};</script>
+<script src="/static/podcast.js?v={{ asset_v }}"></script>
+{% endblock %}

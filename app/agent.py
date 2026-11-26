@@ -71,11 +71,12 @@ HIDDEN_ARGS = {"file", "source_file"}   # chat-client file handles; "@F<n>" repl
 # Where each kind of delegated work is checked, and which id it is checked by.
 WATCH = {"project": ("get_status", "project_id"), "image": ("get_image", "image_id"),
          "speech": ("get_speech", "speech_id"), "music": ("get_music", "music_id"),
-         "voice_job": ("get_voice_job", "job_id")}
+         "voice_job": ("get_voice_job", "job_id"), "podcast": ("get_podcast", "podcast_id")}
 
 CREATES = {"generate_image": "image", "generate_speech": "speech", "generate_music": "music",
            "resing_song": "voice_job", "sing_song": "voice_job", "speak_as_voice": "voice_job",
-           "train_voice": "voice_job"}
+           "train_voice": "voice_job", "make_podcast": "podcast", "retry_podcast": "podcast",
+           "continue_podcast": "podcast"}
 
 _wake = asyncio.Event()
 _active: dict[str, asyncio.Task] = {}
@@ -408,6 +409,8 @@ async def _run_tool(user, name: str, args: dict, base: str,
                                               args.get("start", 0), args.get("length", 12000)), None
         if thread_id:
             args = agentfiles.materialize(thread_id, agentfiles.filename_for(thread_id, args))
+            if name == "make_podcast":
+                args = {**args, "_thread": thread_id}   # the podcast reports back to this chat
         out = tool["handler"](user, args, base)
         if inspect.isawaitable(out):
             out = await out
@@ -451,7 +454,10 @@ PLANNER_VRAM_MB = 20500
 PRODUCTION_ABOUT = ("Story Studio makes films on one local GPU: pictures (FLUX.2 klein, Qwen-Image), "
                     "video clips per shot (the model of each shot's use case), voices (Qwen3-TTS; "
                     "VoxCPM2 for Burmese and Hindi voices), music and ambience (ACE-Step). Work "
-                    "only through the production tools below; files are kept 90 days.")
+                    "only through the production tools below; files are kept 90 days. A request "
+                    "for a podcast, debate or two-host discussion episode is make_podcast (web "
+                    "research, fact-checks, script, then a NEW production with InfiniteTalk shots); "
+                    "check it with get_podcast and give the person its editor_url.")
 
 # The planner's context window. Measured 2026-11-25 on the RTX 4090 with qwen3.8:27b
 # (hybrid attention: ~1.1 GB per extra 32k tokens, but Ollama's placement reserve grows too):
@@ -559,24 +565,36 @@ def _fit_window(messages: list[dict], think: int = PLANNER_THINK_TOKENS
         msgs.pop(drop)
 
 
-class GpuTurn:
-    """Hold the card for the planner: pause the studio queue, take a WIS lease."""
+# One planner on the card at a time: the assistant's turns and the podcast pipeline
+# (app/podcast.py) both take the GPU through GpuTurn, and two would not fit.
+_planner_lock = asyncio.Lock()
 
-    def __init__(self, thread_id: str):
+
+class GpuTurn:
+    """Hold the card for the planner: pause the studio queue, take a WIS lease.
+    `say` reports what it is waiting for (the assistant's thread, or a podcast run)."""
+
+    def __init__(self, thread_id: str, say=None):
         self.thread_id, self.lease, self.held = thread_id, None, False
+        self.say = say or (lambda text: _activity(thread_id, text))
+        self._locked = False
 
     async def acquire(self) -> None:
+        if _planner_lock.locked():
+            self.say("waiting for the planner model (another job is using it)")
+        await _planner_lock.acquire()
+        self._locked = True
         gpuqueue.pause()
         self.held = True
         try:
             waited = 0
             while not gpuqueue.idle():
-                _activity(self.thread_id, "waiting for a speech/music job on the GPU to finish, "
-                                          "then the planner takes its turn")
+                self.say("waiting for a speech/music job on the GPU to finish, "
+                         "then the planner takes its turn")
                 await asyncio.sleep(2)
                 waited += 2
-            _activity(self.thread_id, "waiting for a turn on the GPU (the picture or video "
-                                      "shot in progress finishes first; new GPU work is held)")
+            self.say("waiting for a turn on the GPU (the picture or video "
+                     "shot in progress finishes first; new GPU work is held)")
             while True:
                 try:
                     self.lease = await wis.lease_gpu("studio-planner", LEASE_HOLD_S)
@@ -602,7 +620,7 @@ class GpuTurn:
         So: wait until the free memory is really there, and drop a planner copy that a
         previous load left mostly on the CPU so it loads again onto the card.
         """
-        _activity(self.thread_id, "waiting for the GPU memory to clear")
+        self.say("waiting for the GPU memory to clear")
         free = None
         for _ in range(45):
             try:
@@ -632,6 +650,9 @@ class GpuTurn:
 
     async def release(self) -> None:
         if not self.held:
+            if self._locked:
+                self._locked = False
+                _planner_lock.release()
             return
         self.held = False
         try:
@@ -642,6 +663,9 @@ class GpuTurn:
         finally:
             self.lease = None
             gpuqueue.resume()
+            if self._locked:
+                self._locked = False
+                _planner_lock.release()
 
 
 PLAN_SCHEMA_BASE = {
@@ -831,7 +855,13 @@ audio, mix) is given to you in every turn; the person sees the same thing on scr
 - For every new or changed shot, fill `framing` (EWS|WS|MS|MCU|CU|ECU|OTS|POV|2S|INSERT) and
   `make` (animate|perform|lipsync|motion|longtalk|talk2|recast|restyle) explicitly; a close-up is framing "CU", not just a
   word in the prompt. A shot where a character speaks on camera is `lipsync` (voiced first,
-  video from the voice); `perform` only when the person asks for it. `motion` = the person in
+  video from the voice); `perform` only when the person asks for it. PEOPLE TALKING AT LENGTH
+  (a podcast, interview, debate, talk show, vlog, speech, or any line over ~12 s) is InfiniteTalk:
+  `longtalk` = one person (MCU/CU, up to 60 s, ONE line under the shot); `talk2` = two people
+  in one picture (framing 2S, both characters in refs, the two lines under the shot in speaking
+  order, opts.layout "left_right" when the person on the LEFT speaks first, else "right_left").
+  The lines under a talk shot ARE its voices: no clip ids needed, and the shot's length follows
+  its voices once they are voiced. Alternate 2S exchanges with single-speaker close-ups. `motion` = the person in
   the shot's picture copies a reference video's movements exactly (a dance, a gesture): set
   make "motion" and add the video with add_reference_video. `longtalk` = one person talks or
   sings for up to a minute; `talk2` = two people in the picture talk (shot opts.speakers: a
