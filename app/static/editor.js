@@ -85,9 +85,15 @@
     let el = $("progress-card");
     const p = S.progress;
     if (!p) { if (el) el.remove(); return; }
-    if (!el) { el = document.createElement("div"); el.id = "progress-card"; el.className = "ed-progress"; el.setAttribute("role", "status"); document.body.appendChild(el);
-      // Small by default on phones (the full card blocked the view); tap to open / close.
-      el.addEventListener("click", (e) => { if (e.target.closest("#pc-looks")) return; progressOpen = !el.classList.contains("open"); paintProgress(); }); }
+    if (!el) {
+      // A pill in the top bar, never over the work (2026-11-26: the floating card covered the
+      // timeline's lanes -- "how can anyone use UI?"). Its details open under it on a click.
+      el = document.createElement("div"); el.id = "progress-card"; el.className = "ed-progress"; el.setAttribute("role", "status");
+      const top = document.querySelector(".ed-top"), right = document.querySelector(".ed-topr");
+      if (top && right) top.insertBefore(el, right); else document.body.appendChild(el);
+      el.addEventListener("click", (e) => { if (e.target.closest("#pc-looks")) return; e.stopPropagation(); progressOpen = !el.classList.contains("open"); paintProgress(); });
+      document.addEventListener("click", (e) => { if (progressOpen && !e.target.closest("#progress-card")) { progressOpen = false; paintProgress(); } });
+    }
     const looks = (p.waiting_for_looks || []).length;
     const fracShots = p.shots_total ? p.shots_done / p.shots_total : 0;
     const allPics = p.pictures_done + p.pictures_pending;
@@ -99,7 +105,9 @@
     const eta = p.eta_s ? (p.eta_s < 90 ? "about a minute left" : `about ${Math.round(p.eta_s / 60)} min left`) : "";
     const since = p.since ? Math.max(0, Math.round((S.now - p.since) / 60)) : null;
     const mini = `${looks ? "⚠ choose looks" : `🖼 ${p.pictures_done}/${p.pictures_done + p.pictures_pending}`}${eta && !looks ? " · " + eta.replace("about ", "").replace(" left", "") : ""}`;
-    el.classList.toggle("open", progressOpen === null ? !matchMedia("(max-width: 780px)").matches : progressOpen);
+    el.classList.toggle("open", !!progressOpen);
+    el.classList.toggle("ask", !!looks);
+    el.title = looks ? "Choose the characters' looks to continue" : "What is being made — click for details";
     el.innerHTML = `<span class="mini">${mini}</span><div class="full"><div class="t">${what}<span class="x" title="Make it small">✕</span></div>
       <div class="bar ${looks ? "" : "live"}"><i style="width:${Math.round(Math.max(0.04, frac) * 100)}%"></i></div>
       <div class="m">${p.shots_done} of ${p.shots_total} shots ready · ${p.pictures_done} picture${p.pictures_done === 1 ? "" : "s"} drawn${eta && !looks ? " · " + eta : ""}${p.queue > 1 && !looks ? ` · the GPU is working through ${p.queue} jobs` : ""}${since != null ? ` · started ${since} min ago` : ""}</div>

@@ -596,25 +596,17 @@ body:has(.ed) footer, body:has(.ed) .retention-note { display: none; }
 @media (max-width: 520px) { .ed-scopebar .lbl { display: none; } }
 
 /* Progress card: visible whenever pictures are being made */
-.ed-progress { position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%); z-index: 60; width: min(520px, calc(100vw - 24px)); padding: 10px 14px; border-radius: 14px; background: var(--panel); border: 1px solid var(--gold); box-shadow: 0 14px 40px rgba(0,0,0,.5); font-size: .82rem; display: grid; gap: 6px; }
-.ed-progress .t { font-weight: 650; }
+.ed-progress { position: relative; flex: none; display: inline-flex; align-items: center; cursor: pointer; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--line); background: var(--panel-2); font-size: .76rem; font-weight: 600; white-space: nowrap; z-index: 40; }
+.ed-progress:hover { border-color: var(--gold); }
+.ed-progress.ask { border-color: var(--gold); color: var(--gold); }
+.ed-progress .full { display: none; position: absolute; top: calc(100% + 8px); right: 0; width: min(380px, calc(100vw - 24px)); padding: 10px 14px; border-radius: 12px; background: var(--panel); border: 1px solid var(--gold); box-shadow: 0 14px 40px rgba(0,0,0,.5); font-weight: 400; white-space: normal; cursor: default; display: none; gap: 6px; }
+.ed-progress.open .full { display: grid; }
+.ed-progress .t { font-weight: 650; display: flex; justify-content: space-between; gap: 10px; }
+.ed-progress .x { color: var(--muted); font-weight: 400; cursor: pointer; }
 .ed-progress .m { color: var(--muted); font-size: .76rem; }
 .ed-progress .bar { height: 6px; border-radius: 6px; background: var(--panel-3); overflow: hidden; position: relative; }
 .ed-progress .bar i { display: block; height: 100%; background: var(--gold); border-radius: 6px; transition: width .6s; }
 .ed-progress .bar.live::after { content: ""; position: absolute; inset: 0; background: linear-gradient(90deg, transparent, rgba(255,255,255,.25), transparent); animation: ws-ind 1.6s linear infinite; }
 .ed-progress button { justify-self: start; }
-@media (max-width: 780px) { .ed-progress { bottom: 74px; } }
-/* Small pill unless opened (tap / ✕): it never blocks the view ("Blocked view on mobile") */
-.ed-progress { cursor: pointer; }
-.ed-progress .mini { display: none; }
-.ed-progress:not(.open) { width: auto; left: auto; right: 12px; transform: none; padding: 5px 12px; border-radius: 999px; }
-.ed-progress:not(.open) .full { display: none; }
-.ed-progress:not(.open) .mini { display: inline; font-size: .76rem; font-weight: 600; white-space: nowrap; }
-.ed-progress .t { display: flex; justify-content: space-between; gap: 10px; }
-.ed-progress .x { color: var(--muted); font-weight: 400; }
-@media (max-width: 780px) {
-  .ed-progress { top: calc(var(--hdr, 50px) + 56px); bottom: auto; }
-  .ed-progress.open { width: calc(100vw - 16px); font-size: .74rem; }
-  .ed-progress:not(.open) { right: 8px; padding: 4px 10px; }
-}
+@media (max-width: 780px) { .ed-progress { order: 4; } .ed-progress .full { position: fixed; top: calc(var(--hdr, 50px) + 52px); right: 8px; left: 8px; width: auto; } }
 .ed-stage .empty .spin { display: inline-block; width: 26px; height: 26px; border-radius: 50%; border: 3px solid var(--line); border-top-color: var(--gold); animation: ws-spin .9s linear infinite; }
