@@ -48,6 +48,13 @@ show the person the pictures and let them choose (choose_looks; their own pictur
 draw_scene_pictures -> render_video. Nothing is made with a character before their look is \
 chosen. edit_picture changes part of a picture and keeps the rest.
 
+THE EDITOR: every storyboard opens in the studio's editor at its `editor_url` (scenes, shots, \
+characters, voices, music, the mix, the studio's own assistant). Give the person editor_url when \
+they want to see or work on it there. A project with in_editor true is the person's production: \
+make fixes IN it (set_scenes, set_characters, edit_picture, render_video with `scenes` for just \
+the changed ones) -- never copy it into a new project, which leaves the person with several \
+half-versions and none of them in their editor.
+
 A project is made one of two ways, and `update_project` can switch it:
 - storyboard = WITH scenes. One picture per scene, each animated for a few seconds, joined \
 into one film. Silent unless a soundtrack was uploaded. Each scene has its own prompt, which \
@@ -198,6 +205,11 @@ def _describe(project_id: str, base: str) -> dict:
         "page_url": f"{base}/projects/{project_id}",
     }
     if not single:
+        # 2026-11-26: ChatGPT had no way to send the person to the editor and the project page
+        # had no button, so "the projects are unable to move to the editor".
+        out["editor_url"] = f"{base}/edit/{project_id}"
+        out["in_editor"] = bool(params.get("editor"))
+    if not single:
         out["scenes"] = _scenes(project_id, images)
         chars = db.query("SELECT name, kind, approved FROM prod_refs WHERE project_id=? ORDER BY idx", (project_id,))
         if chars:
@@ -303,6 +315,7 @@ def _list_projects(user, args, base):
         out.append({"project_id": p["id"], "title": p["title"], "mode": p["mode"],
                     "status": p["status"], "pictures": counts["n"],
                     "has_video": _video_url(p, base) is not None,
+                    **({"in_editor": bool(db.params_of(p).get("editor"))} if p["mode"] == "storyboard" else {}),
                     **service.retention(p["updated_at"])})
     return {"projects": out}
 

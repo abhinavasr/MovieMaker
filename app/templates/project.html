@@ -3,6 +3,8 @@
 {% block body %}
 <a class="back" href="/studio">← Projects</a>
 <h1>{{ p.title }}</h1>
+{% if p.mode == 'storyboard' %}<p><a class="btn primary" href="/edit/{{ p.id }}">Open in the editor →</a>
+  <span class="muted">scenes, shots, characters, voices, music and the mix, with the assistant</span></p>{% endif %}
 <p class="{% if deletes.days_left < 14 %}expiring{% else %}muted{% endif %}">This project and its files will be deleted on
   <strong>{{ deletes.deleted_on }}</strong> ({{ deletes.days_left }} days, counted from the last change). Download the video and anything else you want to keep.</p>
 <p class="muted">
