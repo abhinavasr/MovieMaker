@@ -1872,19 +1872,69 @@ async def picture_options(project, user: auth.User, shot_id: str, prompt: str = 
         x for x in (framing, shot["prompt"], _shot_context(pid, shot)) if x)
     if not text:
         raise HTTPException(400, "describe the picture, or give the shot a title and prompt")
-    sources, who = shotpics.sources_for(user, pid, shot, plan, text)
+    params = db.params_of(project)
+    chosen = model or default_image_model(pid)
+    people = shotpics.visible_chars(pid, shot, plan, text)
+    master = setup_master(pid, shot, plan, text) if people else None
+    if people and (not chosen or chosen == shotpics.IDENTITY_MODEL):
+        # People in the frame: the identity model, from each person's cast card (face close-up +
+        # whole look). A later shot of a camera set-up already drawn is made FROM that master
+        # frame, so room, camera and faces stay the same shot to shot (2026-11-26).
+        if master:
+            first = ("master.png", Path(master["path"]).read_bytes())
+            sources, who = shotpics.identity_sources(
+                user, pid, shot, plan, text, first,
+                "is the established frame of this camera set-up: keep exactly the same room, "
+                "camera position, lens, lighting and the same people; change only their pose, "
+                "gesture and expression as described")
+            log.info("picture for %s from the master frame of %s", shot_id, master["shot_id"])
+            # An edit of an approved frame: one candidate at 12 steps looked the same as 40 steps
+            # at a third of the time (2026-11-26: 63 s vs 215 s).
+            count, steps = 1, shotpics.IDENTITY_STEPS_DERIVED
+        else:
+            sources, who = shotpics.identity_sources(user, pid, shot, plan, text)
+            steps = shotpics.IDENTITY_STEPS
+        models = [shotpics.IDENTITY_MODEL] * count
+    else:
+        sources, who = shotpics.sources_for(user, pid, shot, plan, text)
+        models = [shotpics.option_model(i, chosen) for i in range(count)]
+        steps = None
     if who:
         text += " " + who
-    params = db.params_of(project)
     ids = []
     for i in range(count):
         ids.append(await images.create(user, text[:1900], sources,
                                        orientation=params.get("orientation", "portrait"),
-                                       model=shotpics.option_model(i, model or default_image_model(pid)),
-                                       seed=shotpics.seed()))
+                                       model=models[i], seed=shotpics.seed(), steps=steps))
     if check and cfg.PROMPT_POLISH:
         asyncio.create_task(_check_options_later(pid, shot_id, ids))
     return ids
+
+
+def setup_key(pid: str, shot, plan: dict | None, text: str) -> str:
+    """A camera set-up: the framing, who is in the frame and where. Shots that share one are
+    the same camera on the same people (a podcast's two-shot, a host's close-up)."""
+    from app import shotpics
+    who = sorted(r["id"] for r in shotpics.visible_chars(pid, shot, plan, text))
+    place = sorted(r["id"] for r in shotpics._cast(pid, shot) if r["kind"] == "location")
+    return "|".join([shot["framing"] or "", ",".join(who), ",".join(place)])
+
+
+def setup_master(pid: str, shot, plan: dict | None, text: str) -> dict | None:
+    """The finished picture of another shot with the same camera set-up (the earliest), or None."""
+    from app import shotpics
+    if not (shot["framing"] or ""):
+        return None
+    key = setup_key(pid, shot, plan, text)
+    for s in ordered_shots(pid):
+        if s["id"] == shot["id"] or not s["asset_id"]:
+            continue
+        if setup_key(pid, s, shotpics.cached(pid, s), s["prompt"] or "") != key:
+            continue
+        a = db.one("SELECT path FROM assets WHERE id=?", (s["asset_id"],))
+        if a and a["path"] and Path(a["path"]).exists():
+            return {"shot_id": s["id"], "path": a["path"]}
+    return None
 
 
 def default_image_model(pid: str) -> str | None:
@@ -2434,6 +2484,15 @@ async def _run_auto_shots() -> None:
         if stopped_since(pid, started):
             log.info("auto shots in %s: stopped by the person; nothing sent", pid)
             continue
+        # The first shot (in film order) of each camera set-up is drawn first; the others wait
+        # for it and are then drawn FROM it (setup_master), so the set-up looks the same.
+        from app import shotpics as _sp
+        first_of: dict[str, str] = {}
+        for s in ordered_shots(pid):
+            if any(j["shot"] == s["id"] for j in jobs) and not s["asset_id"]:
+                k = setup_key(pid, s, _sp.cached(pid, s), s["prompt"] or "")
+                if k.split("|")[1]:                   # only set-ups with people in them
+                    first_of.setdefault(k, s["id"])
         for j in jobs:
             if stopped_since(pid, started):
                 break
@@ -2492,7 +2551,15 @@ async def _run_auto_shots() -> None:
                 if j["stage"] == "picture" and shot["asset_id"]:
                     j["stage"] = "render"                  # the person set one meanwhile
                 elif j["stage"] == "picture" and not j.get("images"):
-                    # Two options from two models, the planner picks (shotpics).
+                    key = setup_key(pid, shot, _sp.cached(pid, shot), shot["prompt"] or "")
+                    if first_of.get(key) not in (None, shot["id"]) and \
+                            setup_master(pid, shot, _sp.cached(pid, shot), shot["prompt"] or "") is None:
+                        j["waiting_master"] = first_of[key]
+                        keep.append(j)                 # this set-up's first picture comes first
+                        continue
+                    j.pop("waiting_master", None)
+                    # Two options (people: the identity model from cast cards / the master frame;
+                    # otherwise two models), the planner picks (shotpics).
                     j["images"] = await picture_options(proj, user, shot["id"], "", 2, check=False)
                     made += j["images"]
                 elif j["stage"] == "picture":
@@ -2507,12 +2574,33 @@ async def _run_auto_shots() -> None:
                         res = await shotpics.judge(pid, shot, j["images"]) if cfg.PROMPT_POLISH else None
                         best = res["best"] if res else next(r["id"] for r in rows
                                                             if r["status"] == "succeeded")
-                        if res and res["scores"][best] < shotpics.PASS_SCORE and not j.get("retried"):
-                            # Neither fits: two more, and the best of all four is kept.
+                        log.info("judged %s: %s", shot["id"], {k[-6:]: v for k, v in (res or {}).get("scores", {}).items()})
+                        derived = setup_master(pid, shot, _sp.cached(pid, shot), shot["prompt"] or "") is not None
+                        score = res["scores"][best] if res else 10
+                        fix = ((res or {}).get("fix") or {}).get(best, "")
+                        # The reviewer's verdict is acted on here, not by a person (2026-11-26:
+                        # "why are you not making the validation part of the agent and tweaking
+                        # as part of its capabilities?"): a fixable flaw (a misspelt sign, a hand,
+                        # a stray object) is edited away and judged again; a picture past saving
+                        # (wrong person, a collage) gets fresh candidates. Each at most once.
+                        if res and score < shotpics.PASS_SCORE and fix and not j.get("fixed") \
+                                and score >= shotpics.FIXABLE_SCORE:
+                            j["fixed"] = 1
+                            path = db.one("SELECT path FROM images WHERE id=?", (best,))["path"]
+                            more = await edit_picture(user, Path(path), fix, 1, shotpics.IDENTITY_MODEL)
+                            await own_pictures(pid, f"shot:{shot['id']}:options", more)
+                            made += more
+                            j["images"] = j["images"] + more
+                            j.setdefault("review", []).append(f"fixing {best[-6:]} ({score:.0f}/10): {fix[:160]}")
+                            log.info("review %s: fixing %s (%.0f/10): %s", shot["id"], best, score, fix[:200])
+                        elif res and score < shotpics.PASS_SCORE and not j.get("retried") and not derived:
+                            # Past saving: two more, and the best of all is kept.
                             j["retried"] = 1
                             more = await picture_options(proj, user, shot["id"], "", 2, check=False)
                             made += more
                             j["images"] = j["images"] + more
+                            j.setdefault("review", []).append(f"redrawing ({score:.0f}/10): "
+                                                              + "; ".join((res.get("fails") or {}).get(best, [])[:3]))
                         else:
                             set_picture(proj, user, shot["id"], best)
                             log.info("picture for %s: %s%s", shot["id"], best,

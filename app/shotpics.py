@@ -81,14 +81,26 @@ the moment the shot starts, BEFORE its main event (an impact, a reaction, an arr
 never mark a picture down because that event has not happened yet. For each picture, score 0-10
 how well it matches the checks and the framing, who is in it and where, the setting, natural
 anatomy (count hands, limbs and faces; no extra people) and a natural, not pasted-in, look.
-List the checks it fails, briefly. Answer with JSON only."""
+IDENTITY COMES FIRST: when reference cards of the characters are attached after the pictures,
+each person must be recognisably THE SAME person as their card (face shape, eyes, nose, hair,
+skin, age, build). A different-looking person scores 3 at most, however good the picture is.
+Also check: it is ONE single photograph (a collage, split screen, panels or a reference sheet
+scores 2 at most); the right number of people; any written text (signs, screens) spelled exactly
+as the shot says, or not readable at all; and, when this camera set-up's MASTER frame is
+attached, the same room, camera position and people as the master.
+List the checks it fails, briefly. For each picture also give `fix`: ONE short instruction that
+would repair it by editing just that part while keeping everything else (e.g. "make the neon
+sign read exactly 'Batiyao'", "give her five fingers on the raised hand"), or "" if it needs no
+edit or cannot be saved by an edit (wrong person, collage). Answer with JSON only."""
 
 JUDGE_SCHEMA = {"type": "object", "properties": {"pictures": {"type": "array", "items": {
     "type": "object", "properties": {"n": {"type": "integer"}, "score": {"type": "number"},
-                                     "fails": {"type": "array", "items": {"type": "string"}}},
+                                     "fails": {"type": "array", "items": {"type": "string"}},
+                                     "fix": {"type": "string"}},
     "required": ["n", "score"]}}, "best": {"type": "integer"}}, "required": ["pictures", "best"]}
 
 PASS_SCORE = 6
+FIXABLE_SCORE = 4          # below this a picture is redrawn rather than edited
 
 
 def _jl(text, default):
@@ -205,15 +217,87 @@ async def plan_many(pid: str, shot_ids: list[str], turn=None, since: float | Non
     return done
 
 
+def visible_chars(pid: str, shot, plan: dict | None, prompt: str) -> list:
+    cast = _cast(pid, shot)
+    names = [n.lower() for n in (plan or {}).get("visible") or []]
+    if not names:          # no plan (the assistant wrote the prompt): who it names
+        names = [r["name"].lower() for r in cast if r["name"].lower() in prompt.lower()]
+    return [r for r in cast if r["kind"] == "character" and r["name"].lower() in names]
+
+
+def identity_sources(user, pid: str, shot, plan: dict | None, prompt: str,
+                     first: tuple[str, bytes] | None = None,
+                     first_says: str = "") -> tuple[list, str]:
+    """For the identity model: [first?] + one cast card per visible character (face close-up
+    and whole look side by side) + the place if there is room. At most IDENTITY_MAX_SOURCES."""
+    from app import editor
+    chars = visible_chars(pid, shot, plan, prompt)
+    srcs, lines = ([first], [f"Picture 1 {first_says}"]) if first else ([], [])
+    if len(chars) == 1 and len(srcs) + 2 <= IDENTITY_MAX_SOURCES:
+        # One person: their face close-up and whole look as two separate pictures. A combined
+        # card was copied as a split-panel layout in a close-up (2026-11-26 test).
+        r = chars[0]
+        face = next((i for label, i in editor._identity_pictures(r) if "face" in label), None)
+        for i, what in ((face, "face close-up"), (r["image_id"], "whole look")):
+            if i and editor._img_done(i):
+                try:
+                    srcs.append(images.source_from_image(user, i))
+                    lines.append(f"Picture {len(srcs)} is {r['name']}'s {what}")
+                except Exception:                              # noqa: BLE001
+                    pass
+        lines.append(f"{r['name']} has exactly that face, hair and clothes -- the same person, "
+                     "not a look-alike (not those pictures' pose or background)")
+        chars_left = []
+    else:
+        chars_left = chars
+    for r in chars_left:
+        if len(srcs) >= IDENTITY_MAX_SOURCES:
+            break
+        card = cast_card(user, r)
+        if card is None:
+            continue
+        srcs.append(card)
+        dressed = any((db.one("SELECT kind FROM prod_refs WHERE id=?", (x,)) or {"kind": ""})["kind"] == "prop"
+                      for x in editor.props_for(pid, shot, r["id"]))
+        lines.append(f"Picture {len(srcs)} shows {r['name']}: their face close-up and their whole "
+                     f"look. {r['name']} has exactly that face and hair"
+                     f"{'' if dressed else ' and those clothes'} -- the same person, not a "
+                     "look-alike (not that picture's pose or background)")
+    for r in chars:
+        for x in editor.props_for(pid, shot, r["id"]):
+            g = next((c for c in _cast(pid, shot) if c["id"] == x and c["kind"] == "prop"), None)
+            if g is not None:
+                lines.append(f"{r['name']} wears/has {g['name']}: {(g['description'] or '').strip()[:160]}")
+    place_name = ((plan or {}).get("place") or "").lower()
+    # The place too whenever there is room (a close-up given no place invented a garbled neon
+    # sign behind the host; 2026-11-26).
+    if not first and len(srcs) < IDENTITY_MAX_SOURCES:
+        for r in _cast(pid, shot):
+            if r["kind"] == "location" and r["image_id"] and editor._img_done(r["image_id"]) \
+                    and (not place_name or r["name"].lower() == place_name
+                         or r["name"].lower() in prompt.lower()):
+                try:
+                    srcs.append(images.source_from_image(user, r["image_id"]))
+                    lines.append(f"Picture {len(srcs)} shows {r['name']} (the room, materials, "
+                                 "colours, light) -- not the camera position: compose the frame "
+                                 "as described")
+                except Exception:                              # noqa: BLE001
+                    pass
+                break
+    styles = [c for c in _cast(pid, shot) if c["kind"] == "style" and (c["description"] or "").strip()]
+    if styles:
+        lines.append("Style: " + "; ".join((c["description"] or "").strip()[:200] for c in styles[:2]))
+    lines.append("Make ONE single photograph of the scene -- not a collage, split screen, panels "
+                 "or a reference sheet")
+    return srcs, ". ".join(lines) + ("." if lines else "")
+
+
 def sources_for(user, pid: str, shot, plan: dict | None, prompt: str) -> tuple[list, str]:
     """Source pictures and the sentence naming them: only the characters visible in the
     frame (face close-up first), the place only for wide framings, labelled as a look."""
     from app import editor
     cast = _cast(pid, shot)
-    names = [n.lower() for n in (plan or {}).get("visible") or []]
-    if not names:          # no plan (the assistant wrote the prompt): who it names
-        names = [r["name"].lower() for r in cast if r["name"].lower() in prompt.lower()]
-    chars = [r for r in cast if r["kind"] == "character" and r["name"].lower() in names]
+    chars = visible_chars(pid, shot, plan, prompt)
     srcs, lines = [], []
     per = 2 if len(chars) == 1 else 1
     close = (shot["framing"] or "") in ("CU", "ECU", "MCU")
@@ -278,6 +362,52 @@ def sources_for(user, pid: str, shot, plan: dict | None, prompt: str) -> tuple[l
 
 OPTION_MODELS = ["flux-2-klein-9b", "qwen-image-2.1"]
 
+# People shots are drawn with the model made to keep a person's identity (2026-11-26: in the
+# podcast's two-shots the outfits matched but the faces drifted in every shot; each person had
+# been given ONE source -- the full-body picture -- and klein / Qwen-Image drew a generic face).
+IDENTITY_MODEL = "qwen-image-edit-2511"
+IDENTITY_MAX_SOURCES = 3            # what Qwen-Image-Edit takes
+IDENTITY_STEPS = 20                 # a new frame (WIS default 40: 215 s; 20: ~100 s, same look)
+IDENTITY_STEPS_DERIVED = 12         # an edit of a set-up's master frame (~60 s)
+
+
+def cast_card(user, r) -> tuple[str, bytes] | None:
+    """One source picture per character with BOTH their face close-up and their full look side
+    by side, so a shot with two or three people still gives the model each face and outfit."""
+    from app import editor
+    from PIL import Image
+    import io
+    face = next((i for label, i in editor._identity_pictures(r) if "face" in label), None)
+    body = r["image_id"] if r["image_id"] and editor._img_done(r["image_id"]) else None
+    ids = [i for i in (face, body) if i]
+    if not ids:
+        return None
+    key = hashlib.sha1("|".join([r["id"]] + ids).encode()).hexdigest()[:16]
+    out = cfg.DATA_DIR / "cards" / f"{key}.png"
+    if not out.exists():
+        tiles = []
+        for i in ids:
+            row = db.one("SELECT path FROM images WHERE id=?", (i,))
+            if not row or not row["path"] or not Path(row["path"]).exists():
+                continue
+            with Image.open(row["path"]) as im:
+                im = im.convert("RGB")
+                h = 768
+                tiles.append(im.resize((max(1, round(im.width * h / im.height)), h)))
+        if not tiles:
+            return None
+        gap = 16
+        card = Image.new("RGB", (sum(t.width for t in tiles) + gap * (len(tiles) - 1), 768), (128, 128, 128))
+        x = 0
+        for t in tiles:
+            card.paste(t, (x, 0))
+            x += t.width + gap
+        out.parent.mkdir(parents=True, exist_ok=True)
+        buf = io.BytesIO()
+        card.save(buf, "PNG")
+        out.write_bytes(buf.getvalue())
+    return f"card_{r['id']}.png", out.read_bytes()
+
 
 def option_model(i: int, model: str | None) -> str | None:
     """Different models for different options, so the person has a real choice."""
@@ -286,6 +416,20 @@ def option_model(i: int, model: str | None) -> str | None:
 
 def seed() -> int:
     return random.randint(1, 2 ** 31)
+
+
+def expected_text(pid: str, shot, plan: dict | None) -> list[str]:
+    """Words that should be readable in the frame: quoted text in the plan, the shot and its
+    place's description (e.g. a sign reading 'Batiyao')."""
+    import re as _re
+    bits = [(plan or {}).get("prompt") or "", shot["prompt"] or ""]
+    bits += [r["description"] or "" for r in _cast(pid, shot) if r["kind"] in ("location", "prop")]
+    found = []
+    for b in bits:
+        for m in _re.findall(r"(?:reading|reads|says|saying|spelling|text|written|logo)\s*[:\-]?\s*['\"“‘]([^'\"”’]{2,40})['\"”’]", b, _re.I):
+            if m.strip() and m.strip() not in found:
+                found.append(m.strip())
+    return found[:4]
 
 
 async def judge(pid: str, shot, image_ids: list[str], turn=None) -> dict | None:
@@ -321,15 +465,52 @@ async def judge(pid: str, shot, image_ids: list[str], turn=None) -> dict | None:
             await plan_many(pid, [shot["id"]], turn)
             shot = db.one("SELECT * FROM shots WHERE id=?", (shot["id"],))
         plan = cached(pid, shot) or {}
-        checks = plan.get("checks") or [
+        checks = list(plan.get("checks") or [
             f"framing: {FRAMING.get(shot['framing'] or '', 'as the shot needs')}",
-            f"it shows the moment the shot starts: {(shot['prompt'] or shot['title'])[:200]}"]
+            f"it shows the moment the shot starts: {(shot['prompt'] or shot['title'])[:200]}"])
+        words = expected_text(pid, shot, plan)
+        checks.append("READ EVERY LETTER of any visible text: it must be real, correctly spelled "
+                      "words that belong in the scene" +
+                      (f" -- here {', '.join(repr(w) for w in words)} (a sign may be partly hidden "
+                       "behind someone, but what shows must be those letters)" if words else "") +
+                      "; gibberish, garbled or misspelt letters FAIL and need a fix")
+        # the characters' cards, after the candidates, so identity can be checked
+        cards, names = [], []
+        owner = db.one("SELECT user_id FROM projects WHERE id=?", (pid,))
+        user = agent.load_user(owner["user_id"]) if owner else None
+        for r in visible_chars(pid, shot, plan, plan.get("prompt") or shot["prompt"] or "") if user else []:
+            card = cast_card(user, r)
+            if card:
+                from PIL import Image
+                import io
+                with Image.open(io.BytesIO(card[1])) as im:
+                    im = im.convert("RGB")
+                    im.thumbnail((768, 768))
+                    buf = io.BytesIO()
+                    im.save(buf, "JPEG", quality=85)
+                cards.append(base64.b64encode(buf.getvalue()).decode())
+                names.append(r["name"])
+        from app import editor as _ed
+        master = _ed.setup_master(pid, shot, plan, plan.get("prompt") or shot["prompt"] or "")
+        if master:
+            from PIL import Image
+            import io
+            with Image.open(master["path"]) as im:
+                im = im.convert("RGB")
+                im.thumbnail((768, 768))
+                buf = io.BytesIO()
+                im.save(buf, "JPEG", quality=85)
+            cards.append(base64.b64encode(buf.getvalue()).decode())
+            names.append("the MASTER frame of this camera set-up")
+        refs = (f"\nAfter them come {len(cards)} reference picture(s): " +
+                ", ".join(f"picture {len(rows) + i + 1} = {n}" for i, n in enumerate(names)) +
+                ". Check each person against their card, and the room against the master.") if cards else ""
         out = await _ask([{"role": "system", "content": JUDGE_RULES},
-                          {"role": "user", "images": pics, "content":
+                          {"role": "user", "images": pics + cards, "content":
                            f"Shot: \"{shot['title']}\" ({shot['framing'] or 'framing not set'}). "
                            f"The first frame should show: {(plan.get('prompt') or shot['prompt'] or '')[:500]}\nChecks:\n" +
                            "\n".join(f"- {c}" for c in checks) +
-                           f"\n\nThere are {len(rows)} pictures, numbered 1-{len(rows)} in order."}],
+                           f"\n\nThere are {len(rows)} candidate pictures, numbered 1-{len(rows)} in order." + refs}],
                          JUDGE_SCHEMA, num_predict=800)
     except Exception as exc:                                   # noqa: BLE001
         log.warning("judging pictures for %s: %s", shot["id"], exc)
@@ -337,13 +518,14 @@ async def judge(pid: str, shot, image_ids: list[str], turn=None) -> dict | None:
     finally:
         if own:
             await turn.release()
-    scores, fails = {}, {}
+    scores, fails, fixes = {}, {}, {}
     for p in out.get("pictures") or []:
         n = int(p.get("n") or 0)
         if 1 <= n <= len(rows):
             scores[rows[n - 1]["id"]] = float(p.get("score") or 0)
             fails[rows[n - 1]["id"]] = [str(f) for f in (p.get("fails") or [])][:4]
+            fixes[rows[n - 1]["id"]] = " ".join(str(p.get("fix") or "").split())[:300]
     if not scores:
         return None
     best = max(scores, key=scores.get)
-    return {"best": best, "scores": scores, "fails": fails}
+    return {"best": best, "scores": scores, "fails": fails, "fix": fixes}
