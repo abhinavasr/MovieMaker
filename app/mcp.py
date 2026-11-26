@@ -48,10 +48,15 @@ show the person the pictures and let them choose (choose_looks; their own pictur
 draw_scene_pictures -> render_video. Nothing is made with a character before their look is \
 chosen. edit_picture changes part of a picture and keeps the rest.
 
-PODCASTS: for a podcast, debate or two-person discussion episode, call make_podcast with the \
-topic (it researches the web, fact-checks, writes the script and builds an editor production \
-with InfiniteTalk talking shots); poll get_podcast every minute or two and give the person \
-editor_url when it is done.
+PODCASTS: for a podcast, debate, interview or two-person discussion episode, call make_podcast \
+(it researches the web, fact-checks, writes the script and builds an editor production with \
+InfiniteTalk talking shots). If the person gave only a broad subject, ask ONE round of short \
+questions (the angle or question that interests them, length, language) and then start; never \
+more. Pass the topic in the person's own words plus their angle; leave hosts and lenses out \
+unless the person named them -- the podcast's showrunner picks the format (debate, \
+conversation or interview), the central question, the tone and two fitting hosts from the \
+topic. Poll get_podcast every minute or two; give the person editor_url when it is done. If \
+the person says stop, cancel it (cancel_podcast).
 
 THE EDITOR: every storyboard opens in the studio's editor at its `editor_url` (scenes, shots, \
 characters, voices, music, the mix, the studio's own assistant). Give the person editor_url when \
@@ -1240,6 +1245,12 @@ def _continue_podcast(user, args, base):
     return _get_podcast(user, args, base)
 
 
+def _cancel_podcast(user, args, base):
+    from app import podcast
+    podcast.cancel(user, str(args.get("podcast_id") or ""))
+    return _get_podcast(user, args, base)
+
+
 def _retry_podcast(user, args, base):
     from app import podcast
     podcast.retry(user, str(args.get("podcast_id") or ""))
@@ -1800,13 +1811,15 @@ TOOLS = [
           "for Y; a yes/no question one for and one against; left vs right (the default, hosts "
           "Elena Vance and Marcus Sterling) only for political policy questions. Give each host a "
           "name, look and voice that suit their side (e.g. an Indian host arguing for India). "
-          "Defaults: about 8 minutes, 16:9.",
+          "Leave hosts out and the podcast's own research planner draws two fitting sides and "
+          "hosts from the topic. Defaults: about 8 minutes, 16:9.",
           _make_podcast,
           {"topic": {"type": "string", "description": "The question or topic they debate."},
            "title": {"type": "string"},
            "minutes": {"type": "number", "description": "3-30, default 8."},
            "lenses": {"type": "string", "enum": ["left_right", "optimist_skeptic", "reform_tradition"],
-                      "description": "The two sides, unless hosts[].lens says otherwise."},
+                      "description": "Only if the person asked for exactly these sides; otherwise "
+                                     "leave it out (the sides are drawn from the topic)."},
            "hosts": {"type": "array", "maxItems": 2, "items": {"type": "object", "properties": {
                "name": {"type": "string"}, "lens": {"type": "string", "description": "Their side or worldview."},
                "look": {"type": "string", "description": "Appearance: gender, age, hair, clothes."},
@@ -1832,6 +1845,10 @@ TOOLS = [
           _continue_podcast,
           {"podcast_id": {"type": "string"},
            "points": {"type": "array", "items": {"type": "object"}}}, ["podcast_id"]),
+    _tool("cancel_podcast", "Cancel a podcast",
+          "Stop a podcast run now (frees the GPU). Use it the moment the person says stop or "
+          "changes their mind about the topic.",
+          _cancel_podcast, {"podcast_id": {"type": "string"}}, ["podcast_id"], destructive=True),
     _tool("retry_podcast", "Retry a podcast",
           "Continue a failed or cancelled podcast from where it stopped (finished steps are kept).",
           _retry_podcast, {"podcast_id": {"type": "string"}}, ["podcast_id"]),

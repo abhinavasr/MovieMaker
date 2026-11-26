@@ -114,7 +114,7 @@
     const b = f.querySelector("button[type=submit]"), msg = document.getElementById("pc-msg");
     const v = (k) => (f.elements[k]?.value || "").trim();
     const body = {
-      topic: v("topic"), title: v("title"), minutes: Number(v("minutes")), aspect: v("aspect"),
+      topic: v("topic"), title: v("title"), minutes: Number(v("minutes")), aspect: v("aspect"), sides_given: true,
       focus: v("focus"), language: v("language"),
       review: [...f.querySelectorAll("input[name=review]:checked")].map((x) => x.value),
       hosts: [0, 1].map((i) => ({name: v(`name${i}`), lens: v(`lens${i}`), look: v(`look${i}`), voice: v(`voice${i}`)})),

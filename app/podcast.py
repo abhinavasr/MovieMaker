@@ -86,6 +86,7 @@ CHECK_PAGES_PER_CLAIM = 2
 MAX_PAGES = 40
 
 STEPS = [  # (state key, label, progress when done) -- for the page's tier view
+    ("show", "Showrunner: format, central question, tone and hosts from the topic", 2),
     ("queries", "Research plan: search queries for both hosts", 4),
     ("read", "Reading the web", 14),
     ("a_collect", "Tier 4 · Information collection (host A)", 22),
@@ -180,6 +181,11 @@ def _clean_config(body: dict) -> dict:
     preset = str(body.get("lenses") or "left_right")
     lenses = LENSES.get(preset, LENSES["left_right"])
     hosts_in = body.get("hosts") if isinstance(body.get("hosts"), list) else []
+    # Sides nobody spelled out are drawn from the topic by the research planner (2026-11-26: an
+    # assistant picked "left vs right" for India-vs-US democracy, then "reformer vs traditionalist"
+    # for immigration and Indigenous societies). The page's form always sends its sides.
+    auto_sides = not any(isinstance(h, dict) and (h.get("lens") or h.get("view")) for h in hosts_in) \
+        and not body.get("sides_given") and not body.get("lenses")
     hosts = []
     for i in range(2):
         h = hosts_in[i] if i < len(hosts_in) and isinstance(hosts_in[i], dict) else {}
@@ -210,6 +216,7 @@ def _clean_config(body: dict) -> dict:
         "language": " ".join(str(body.get("language") or "English").split())[:30],
         "focus": " ".join(str(body.get("focus") or "").split())[:1500],
         "review": review,
+        "auto_sides": bool(auto_sides),
     }
 
 
@@ -237,7 +244,9 @@ def create(user: auth.User, body: dict, thread_id: str | None = None) -> str:
 async def _llm(podcast_id: str, turn, system: str, user: str, schema: dict, label: str,
                think: int = 8000) -> dict:
     from app import agent
-    messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+    row = _row(podcast_id)
+    brief = show_brief(_config(row)) if row is not None and label != "showrunner" else ""
+    messages = [{"role": "system", "content": brief + system}, {"role": "user", "content": user}]
     messages, ctx, est = agent._fit_window(messages, think)
     for attempt in range(3):
         _check(podcast_id)
@@ -275,6 +284,8 @@ STATUSES = ["Verified", "Partially Verified", "Needs Context", "Disputed"]
 
 QUERIES_SCHEMA = _obj({"title": S, "a_queries": _arr(S), "b_queries": _arr(S),
                        "background_queries": _arr(S)})
+SIDES_SCHEMA = _obj({"a_side": S, "b_side": S, "a_name": S, "a_look": S, "a_voice": S,
+                     "b_name": S, "b_look": S, "b_voice": S})
 COLLECT_SCHEMA = _obj({
     "sources": _arr(_obj({"page": S, "title": S, "type": S, "summary": S, "quote": S,
                           "citation": S})),
@@ -405,16 +416,133 @@ def _other(side: str) -> str:
     return "b" if side == "a" else "a"
 
 
-async def _queries(pid, turn, config, state):
+FORMATS = {
+    "debate": {
+        "what": "two hosts argue opposing positions on a genuinely contested question",
+        "points": "the overlapping friction points: the exact fault lines where both sides directly "
+                  "collide (discard points that talk past each other)",
+        "persona": "the sharp points where your position clashes with the other host's",
+        "segment": "Clash directly: each challenges the other's weak point, with concrete examples.",
+    },
+    "conversation": {
+        "what": "two co-hosts explore a question together from different perspectives; they build "
+                "on, question and gently challenge each other; disagreement only where it is real, "
+                "never manufactured",
+        "points": "the key questions where the two perspectives meet, differ or illuminate each "
+                  "other (discard points only one of them can speak to)",
+        "persona": "the points your perspective adds, and where you expect the other host to see "
+                   "it differently",
+        "segment": "Explore it together: each adds what their perspective sees, asks the other "
+                   "real questions, and says plainly where they disagree.",
+    },
+    "interview": {
+        "what": "host A interviews B, an expert; A asks sharp, curious questions, voices the "
+                "listener's doubts and pushes back; B answers with evidence and concrete examples",
+        "points": "the key questions the interview must answer, each where the expert's view is "
+                  "tested by a real doubt or counter-argument",
+        "persona": "as host: the doubts and questions a thoughtful listener has; as expert: the "
+                   "evidence-backed answers and where the common view is wrong",
+        "segment": "A asks and presses; B answers with evidence; A follows up on anything vague.",
+    },
+}
+SHOW_SCHEMA = _obj({
+    "format": {"type": "string", "enum": list(FORMATS)}, "why_format": S, "question": S,
+    "tone": S, "handle_with_care": _arr(S),
+    "a_role": S, "b_role": S, "a_research": S, "b_research": S,
+    "a_name": S, "a_look": S, "a_voice": S, "b_name": S, "b_look": S, "b_voice": S})
+
+
+async def _showrunner(pid, turn, config, state):
+    """Tier 0, the showrunner: what kind of episode THIS topic should be, and who is in it.
+
+    2026-11-26, after assistants set up an India-vs-US comparison as left vs right and
+    immigration's effect on Indigenous societies as reformer vs traditionalist, the person:
+    "help the system with prompts that will allow better mechanism by local llm ... based on
+    the topics". Every later agent gets this brief (see _llm)."""
+    given = not config.get("auto_sides")
     a, b = config["hosts"]
     out = await _llm(pid, turn,
-        "You plan web research for a two-host debate podcast. Write search-engine queries "
+        "You are the showrunner of a two-host podcast made by AI agents (research, fact-checking, "
+        "script, then a video with two people talking). From the topic, decide:\n"
+        "1. FORMAT: debate (" + FORMATS["debate"]["what"] + "); conversation ("
+        + FORMATS["conversation"]["what"] + "); interview (" + FORMATS["interview"]["what"] + "). "
+        "Pick what serves THIS topic: a contested yes/no or X-vs-Y question is a debate; a complex, "
+        "sensitive or multi-sided subject is usually a conversation; explaining a field, a history "
+        "or a technology is usually an interview.\n"
+        "2. QUESTION: the sharp central question of the episode, in one sentence.\n"
+        "3. TONE: how it should sound (e.g. lively and witty; serious and respectful; warm and curious).\n"
+        "4. HANDLE WITH CARE: what needs care on this topic (affected communities, respectful "
+        "terms, stereotypes to avoid, contested numbers); [] if nothing special.\n"
+        "5. THE TWO HOSTS: each one's role or side in one sentence (who they are, what they argue or "
+        "bring) -- for a debate the two positions that really collide on THIS topic (left vs right only "
+        "for political policy questions; X vs Y gets one host per side); what each one's research "
+        "should look for; and a fitting name, look (gender, age, appearance, clothes) and voice "
+        "(gender, age, accent, manner) -- one woman and one man, with backgrounds that suit the "
+        "topic, never stereotypes.\nReturn JSON only.",
+        f"Topic, in the person's words: {config['topic']}\n"
+        + (f"Focus: {config['focus']}\n" if config["focus"] else "")
+        + (f"Length: about {config['minutes']:g} minutes. Language: {config['language']}.\n")
+        + (f"The person already chose the hosts; keep them exactly (format debate):\n"
+           f"A: {a['name']} — {a['lens']}\nB: {b['name']} — {b['lens']}\n" if given else ""),
+        SHOW_SCHEMA, "showrunner", think=4000)
+    fmt = out.get("format") if out.get("format") in FORMATS else "debate"
+    if given:
+        fmt = "debate"
+    clean = lambda v, n: " ".join(str(v or "").split())[:n]
+    show = {"format": fmt, "why": clean(out.get("why_format"), 300),
+            "question": clean(out.get("question"), 300) or config["topic"][:300],
+            "tone": clean(out.get("tone"), 200),
+            "care": [clean(x, 200) for x in (out.get("handle_with_care") or [])][:5],
+            "research": {"a": clean(out.get("a_research"), 300), "b": clean(out.get("b_research"), 300)}}
+    if not given:
+        hosts = [dict(h) for h in config["hosts"]]
+        for i, k in enumerate(("a", "b")):
+            if clean(out.get(f"{k}_role"), 300):
+                hosts[i]["lens"] = clean(out.get(f"{k}_role"), 300)
+            for f, n in (("name", 60), ("look", 600), ("voice", 600)):
+                if clean(out.get(f"{k}_{f}"), n):
+                    hosts[i][f] = clean(out.get(f"{k}_{f}"), n)
+        if hosts[0]["name"].lower() == hosts[1]["name"].lower():
+            hosts = [dict(h, name=d["name"]) for h, d in zip(hosts, DEFAULT_HOSTS)]
+        config["hosts"] = hosts
+    config["show"] = show
+    config["auto_sides"] = False
+    db.run("UPDATE podcasts SET config=?, updated_at=? WHERE id=?", (json.dumps(config), db.now(), pid))
+    a, b = config["hosts"]
+    _log(pid, f"Showrunner: a {fmt} — “{show['question']}” — {show['tone']}. "
+              f"{a['name']}: {a['lens']} | {b['name']}: {b['lens']}")
+    return show
+
+
+def _fmt(config: dict) -> dict:
+    return FORMATS.get((config.get("show") or {}).get("format") or "debate", FORMATS["debate"])
+
+
+def show_brief(config: dict) -> str:
+    """What every agent is told about the episode (format, question, tone, care, the hosts)."""
+    show = config.get("show")
+    if not show:
+        return ""
+    a, b = config["hosts"]
+    f = FORMATS.get(show["format"], FORMATS["debate"])
+    return ("THE EPISODE (from the showrunner): a " + show["format"] + " -- " + f["what"] + ".\n"
+            f"Central question: {show['question']}\nTone: {show['tone']}\n"
+            + (f"Handle with care: {'; '.join(show['care'])}\n" if show["care"] else "")
+            + f"Host A, {a['name']}: {a['lens']}\nHost B, {b['name']}: {b['lens']}\n\n")
+
+
+async def _queries(pid, turn, config, state):
+    a, b = config["hosts"]
+    res = (config.get("show") or {}).get("research") or {}
+    out = await _llm(pid, turn,
+        "You plan web research for a two-host podcast. Write search-engine queries "
         "(3-8 words each, no quotes or operators) that will find real evidence: data, studies, "
         "official statistics, history, expert analysis. Return JSON only.",
         f"Topic: {config['topic']}\n"
         + (f"Research focus / constraints: {config['focus']}\n" if config["focus"] else "")
-        + f"Host A, {a['name']}: {a['lens']}\nHost B, {b['name']}: {b['lens']}\n\n"
-          "Give 3 queries that find the evidence host A would cite, 3 that find the evidence "
+        + (f"Host A's research should look for: {res['a']}\n" if res.get("a") else "")
+        + (f"Host B's research should look for: {res['b']}\n" if res.get("b") else "")
+        + "\nGive 3 queries that find the evidence host A would cite, 3 that find the evidence "
           "host B would cite, and 2 neutral background queries (definitions, key facts, recent "
           "developments). Also a short, catchy episode title (under 70 characters)."
         + (f" Write the title in {config['language']}." if config["language"] != "English" else ""),
@@ -744,16 +872,15 @@ def _final_brief(state: dict, side: str) -> dict:
 async def _persona(pid, turn, config, state, side):
     h, o = _host(config, side), _host(config, _other(side))
     out = await _llm(pid, turn,
-        f"You are {h['name']}, a Tier 1 Persona Agent embodying {h['lens']}. Your opponent is "
+        f"You are {h['name']}, a Tier 1 Persona Agent embodying {h['lens']}. The other host is "
         f"{o['name']} ({o['lens']}).\nUsing ONLY your validated synthesis and the fact-check "
-        "verdicts and guardrails, extract the core friction points: the sharp philosophical, "
-        "structural and practical contradictions where your worldview clashes with your "
-        "opponent's. Anchor each point in a Verified or Partially Verified fact; never in a "
-        "Disputed one. Return JSON only.",
+        f"verdicts and guardrails, extract your core points: {_fmt(config)['persona']} "
+        "(philosophical, structural, practical). Anchor each point in a Verified or Partially "
+        "Verified fact; never in a Disputed or withdrawn one. Return JSON only.",
         f"Topic: {config['topic']}\n\nSYNTHESIS (revised after the fact-check):\n"
         f"{json.dumps(_research(state, side), ensure_ascii=False)}"
         f"\n\nFACT-CHECK (final):\n{json.dumps(_final_brief(state, side), ensure_ascii=False)}"
-        "\n\nExtract 4 sharp, well-grounded friction points (intensity 1-10).",
+        "\n\nExtract 4 sharp, well-grounded points (intensity 1-10).",
         PERSONA_SCHEMA, f"{side}_persona")
     return {"coreStance": str(out.get("coreStance") or "")[:600],
             "frictionPoints": [{k: (str(fp.get(k) or "")[:600] if k != "intensity" else fp.get(k))
@@ -766,12 +893,11 @@ async def _orchestrate(pid, turn, config, state):
     a, b = config["hosts"]
     out = await _llm(pid, turn,
         "You are the Tier 2 Orchestrator & Synthesis Engine: strictly non-partisan and analytical. "
-        f"Analyse the friction points produced independently by host A, {a['name']} ({a['lens']}), "
-        f"and host B, {b['name']} ({b['lens']}), and isolate ONLY the overlapping friction points: "
-        "the exact philosophical and empirical fault lines where both sides directly collide. "
-        "Discard points that talk past each other. Each overlap carries a shared factual baseline "
-        "both hosts must acknowledge (from the fact-checks) and a sharp, neutral question that "
-        "drives that segment. Return JSON only.",
+        f"Analyse the points produced independently by host A, {a['name']} ({a['lens']}), "
+        f"and host B, {b['name']} ({b['lens']}), and isolate ONLY {_fmt(config)['points']}. "
+        "Each one carries a shared factual baseline both hosts must acknowledge (from the "
+        "fact-checks) and a sharp, neutral question that drives that segment. Order them so the "
+        "episode builds. Return JSON only.",
         f"Topic: {config['topic']}\n\nHOST A ({a['name']}):\n{json.dumps(state['a_persona'], ensure_ascii=False)}"
         f"\n\nHOST B ({b['name']}):\n{json.dumps(state['b_persona'], ensure_ascii=False)}"
         "\n\nIsolate 3 to 4 high-impact overlapping friction points and list the discarded ones.",
@@ -817,59 +943,121 @@ async def _write_segment(pid, turn, config, state, seg, prev_lines):
     a, b = config["hosts"]
     lang = config["language"]
     first = "B" if prev_lines and prev_lines[-1]["speaker"] == "A" else "A"
+    fmt = (config.get("show") or {}).get("format") or "debate"
     brief = {"opening": f"Open the episode. {a['name']} (A) welcomes the listeners, names the "
-                        f"episode and the question, introduces {b['name']} (B); B answers and "
-                        "states the stakes from their side. Frame the central tension in plain words.",
-             "closing": "Close the episode: each host gives a final reflection -- what they concede, "
-                        "what they still hold -- and A thanks the listeners and signs off."}.get(seg["key"])
+                        f"episode and its central question, introduces {b['name']} (B)"
+                        + (" as the guest and why they are the right person to ask" if fmt == "interview"
+                           else "") + "; B answers and says what is at stake for them. Frame it "
+                        "in plain words.",
+             "closing": ("Close the episode: A sums up what the listener learned and the question "
+                         "that stays open; B gives a last thought; A thanks B and the listeners and "
+                         "signs off." if fmt == "interview" else
+                         "Close the episode: each host gives a final reflection -- what they now "
+                         "grant the other, what they still hold -- and A thanks the listeners and "
+                         "signs off.")}.get(seg["key"])
     if brief is None:
         p = seg["point"]
         brief = (f"Segment: {p['title']}\nThe tension: {p['philosophicalVulnerability']}\n"
                  f"A's position: {p['aPosition']}\nB's position: {p['bPosition']}\n"
                  f"Shared factual ground both must acknowledge: {p['factualGround']}\n"
                  f"The question driving it: {p['debateQuestion']}\n"
-                 "Clash directly: each challenges the other's weak point, with concrete examples.")
+                 + _fmt(config)["segment"])
     sources = "\n".join(f"{s['id']}: {s['title']} ({s['url']})" + ("" if s["quote_ok"] else " [quote unchecked]")
                         for s in state["sources"].values())
     # 2026-11-26 test: "about 180 words" gave 2 long speeches, not a debate. Ask for the turns.
     turns = max(3 if seg["key"] in ("opening", "closing") else 4, round(seg["words"] / 45))
     order = ", ".join(("A" if (i % 2 == 0) == (first == "A") else "B") for i in range(turns))
-    best = []
-    for attempt in range(2):
-      out = await _llm(pid, turn,
-        "You are the Tier 3 Execution & Scripting Engine of a two-host debate podcast. Write the "
+    writer_rules = (
+        f"You are the Tier 3 Execution & Scripting Engine of a two-host podcast ({fmt}). Write the "
         f"lines of ONE segment. Only two speakers: A = {a['name']} ({a['lens']}) and "
-        f"B = {b['name']} ({b['lens']}); no moderator.\n"
+        f"B = {b['name']} ({b['lens']}); no moderator. Keep to the episode's tone.\n"
         "THESE LINES ARE SPOKEN ALOUD by a voice model and lip-synced on video, so:\n"
         "- `text` is exactly what is said: no stage directions, no markdown, no brackets, no "
         "source ids, no URLs; numbers, dates and abbreviations written the way they are said.\n"
-        f"- 15 to {MAX_LINE_WORDS} words per line; mix quick rebuttals with fuller arguments; "
+        f"- 15 to {MAX_LINE_WORDS} words per line; mix quick exchanges with fuller arguments; "
         "speakers alternate (A, B, A, B...).\n"
         "- `delivery`: a short performance cue (e.g. \"leaning in, measured\", \"amused, quick\").\n"
         "- `cites`: the source ids (S..) behind any fact in the line; [] if none.\n"
         "- Facts come ONLY from the fact-checks and sources given. A Disputed claim may only be "
-        "raised as contested, and the other host challenges it. Respect every guardrail.\n"
+        "raised as contested, and the other host challenges it; a withdrawn claim is never stated. "
+        "Respect every guardrail and everything marked handle-with-care.\n"
         "- Natural, sharp, intellectually honest; hosts use each other's first names now and then."
         + (f"\n- Write the lines in {lang}." if lang != "English" else "")
-        + " Return JSON only.",
-        f"Episode: {state.get('title') or config['topic']}\nTopic: {config['topic']}\n\n{brief}\n\n"
-        f"Write EXACTLY {turns} lines, in this speaker order: {order}. About {seg['words']} "
-        f"words in total (short rebuttals and fuller arguments mixed).\n\n"
-        + ("" if attempt == 0 else f"Your last answer had only {len(best)} lines: this time "
-           f"{turns} separate lines, each a separate turn.\n\n")
-        + f"FACT-CHECKS AND GUARDRAILS:\n{_facts_block(state)}\n\nSOURCES:\n{sources}\n\n"
-        + ("THE LINES JUST BEFORE THIS SEGMENT:\n"
-           + "\n".join(f"{l['speaker']}: {l['text']}" for l in prev_lines[-4:]) if prev_lines
-           else "This is the first segment."),
-        LINES_SCHEMA, f"script {seg['key']}", think=10000)
-      lines = _clean_lines(out, state)
-      if len(lines) > len(best):
-          best = lines
-      if len(best) >= max(3, turns // 2 + 1):
-          break
-    if len(best) < 2:
+        + " Return JSON only.")
+    context = (f"FACT-CHECKS AND GUARDRAILS:\n{_facts_block(state)}\n\nSOURCES:\n{sources}\n\n"
+               + ("THE LINES JUST BEFORE THIS SEGMENT:\n"
+                  + "\n".join(f"{l['speaker']}: {l['text']}" for l in prev_lines[-4:]) if prev_lines
+                  else "This is the first segment."))
+
+    async def draft(notes: str = "", previous: list | None = None) -> list[dict]:
+        best = []
+        for attempt in range(2):
+            out = await _llm(pid, turn, writer_rules,
+                f"Episode: {state.get('title') or config['topic']}\nTopic: {config['topic']}\n\n{brief}\n\n"
+                f"Write EXACTLY {turns} lines, in this speaker order: {order}. About {seg['words']} "
+                f"words in total.\n\n"
+                + ("" if attempt == 0 else f"Your last answer had only {len(best)} lines: this time "
+                   f"{turns} separate lines, each a separate turn.\n\n")
+                + (("YOUR DRAFT:\n" + "\n".join(f"{i + 1}. {l['speaker']}: {l['text']}"
+                                                 for i, l in enumerate(previous or [])) +
+                    f"\n\nTHE SCRIPT EDITOR'S NOTES -- fix every one, keep what works:\n{notes}\n\n")
+                   if notes else "")
+                + context,
+                LINES_SCHEMA, f"script {seg['key']}" + (" rewrite" if notes else ""), think=10000)
+            lines = _clean_lines(out, state)
+            if len(lines) > len(best):
+                best = lines
+            if len(best) >= max(3, turns // 2 + 1):
+                break
+        return best
+
+    lines = await draft()
+    if len(lines) < 2:
         raise RuntimeError(f"the script for “{seg['title']}” came back empty")
-    return best
+    # The script editor reads the draft and sends notes back to the writer (the same loop as
+    # fact-checker -> researcher): mechanical problems found by code, the rest by the model.
+    problems = _mechanical_problems(lines, turns, state)
+    review = await _llm(pid, turn,
+        "You are the script editor of this podcast. Review ONE segment's draft and list what must "
+        "change, line by line: off the segment's question; a host speaking against their own role "
+        "or side; a fact stated that is not in the fact-checks, or a Disputed claim stated as "
+        "settled, or a withdrawn claim used; anything careless about what must be handled with "
+        "care; wrong tone; repeating the lines before; stiff, written-sounding speech; a host "
+        "talking past the other instead of answering. Be strict but list only real problems; "
+        "ok=true when none. Return JSON only.",
+        f"{brief}\n\nDRAFT:\n" + "\n".join(f"{i + 1}. {l['speaker']}: {l['text']}" for i, l in enumerate(lines))
+        + f"\n\n{context}",
+        REVIEW_SCHEMA, f"review {seg['key']}", think=5000)
+    problems += [f"line {p.get('line')}: {p.get('problem')}" for p in review.get("problems") or []
+                 if str(p.get("problem") or "").strip()]
+    if not problems:
+        return lines
+    notes = "\n".join(f"- {x}" for x in problems[:12])
+    _log(pid, f"Script editor → writer on “{seg['title'][:60]}”: {len(problems)} note(s)")
+    again = await draft(notes, lines)
+    if len(again) >= max(2, int(len(lines) * 0.6)) and \
+            len(_mechanical_problems(again, turns, state)) <= len(_mechanical_problems(lines, turns, state)):
+        return again
+    return lines
+
+
+REVIEW_SCHEMA = _obj({"ok": {"type": "boolean"},
+                      "problems": _arr(_obj({"line": {"type": "integer"}, "problem": S}))})
+
+
+def _mechanical_problems(lines: list[dict], turns: int, state: dict) -> list[str]:
+    """What code can check for sure."""
+    out = []
+    for i, l in enumerate(lines):
+        if i and l["speaker"] == lines[i - 1]["speaker"]:
+            out.append(f"line {i + 1}: the same host speaks twice in a row; alternate")
+        if re.search(r"\bS\d+\b|https?://|www\.", l["text"]):
+            out.append(f"line {i + 1}: a source id or web address is in the spoken text")
+        if len(l["text"].split()) < 6:
+            out.append(f"line {i + 1}: too short to be a turn")
+    if len(lines) < max(2, turns // 2):
+        out.append(f"only {len(lines)} lines; write {turns}")
+    return out
 
 
 def _clean_lines(out: dict, state: dict) -> list[dict]:
@@ -1104,6 +1292,9 @@ async def _run(pid: str) -> None:
             status = row["status"]
             if status in ("queued", "researching"):
                 _set(pid, status="researching")
+                await _step(pid, state, "show",
+                            lambda t: _showrunner(pid, t, config, state), True, gpu)
+                config = _config(_row(pid))            # the showrunner may have set the hosts
                 q = await _step(pid, state, "queries",
                                 lambda t: _queries(pid, t, config, state), True, gpu)
                 if not config["title"] and q.get("title"):
