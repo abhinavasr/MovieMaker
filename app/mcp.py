@@ -1795,8 +1795,12 @@ TOOLS = [
           "as characters (the person chooses their looks; voices designed from the description), "
           "a scene per segment, and InfiniteTalk talking shots with every line under them. Takes "
           "~10-25 minutes; returns podcast_id at once. Use it whenever the person asks for a "
-          "podcast, debate, discussion show or two-person conversation episode. Defaults: left vs "
-          "right hosts Elena Vance and Marcus Sterling, about 8 minutes, 16:9.",
+          "podcast, debate, discussion show or two-person conversation episode. FIT THE SIDES TO "
+          "THE TOPIC with hosts[].lens: a comparison (X vs Y) gets one host arguing for X and one "
+          "for Y; a yes/no question one for and one against; left vs right (the default, hosts "
+          "Elena Vance and Marcus Sterling) only for political policy questions. Give each host a "
+          "name, look and voice that suit their side (e.g. an Indian host arguing for India). "
+          "Defaults: about 8 minutes, 16:9.",
           _make_podcast,
           {"topic": {"type": "string", "description": "The question or topic they debate."},
            "title": {"type": "string"},
