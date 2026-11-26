@@ -686,6 +686,7 @@ def hand_over(project, old: str, new: str) -> None:
         if old in refs:
             refs = list(dict.fromkeys(new if r == old else r for r in refs))
             db.run("UPDATE shots SET refs=? WHERE id=?", (json.dumps(refs), s["id"]))
+    _swap_in_scenes(pid, old, new)
     db.run("UPDATE prod_clips SET ref_id=?, status=CASE WHEN status IN ('ready','pending') THEN "
            "'script' ELSE status END, source_id=CASE WHEN status IN ('ready','pending') THEN NULL "
            "ELSE source_id END, auto=1 WHERE project_id=? AND ref_id=?", (new, pid, old))
@@ -702,8 +703,26 @@ def delete_ref(project, ref_id: str) -> None:
         if ref_id in refs:
             db.run("UPDATE shots SET refs=? WHERE id=?",
                    (json.dumps([r for r in refs if r != ref_id]), s["id"]))
+    # Scenes too (2026-11-26: deleted hosts stayed on every scene as dead ids; the scene list
+    # showed no characters).
+    _swap_in_scenes(pid, ref_id, None)
     db.run("UPDATE prod_clips SET ref_id=NULL WHERE ref_id=?", (ref_id,))
     _touch(pid)
+
+
+def _swap_in_scenes(pid: str, old: str, new: str | None) -> None:
+    """Replace (or, with new=None, remove) a reference in every scene's refs and outfits."""
+    for sc in db.query("SELECT id, refs, wear FROM prod_scenes WHERE project_id=?", (pid,)):
+        refs, wear = _jl(sc["refs"], []), _jl(sc["wear"], {})
+        if old not in refs and old not in wear:
+            continue
+        refs = list(dict.fromkeys(r for r in ((new if r == old else r) for r in refs) if r))
+        if old in wear:
+            items = wear.pop(old)
+            if new:
+                wear[new] = items
+        db.run("UPDATE prod_scenes SET refs=?, wear=? WHERE id=?",
+               (json.dumps(refs), json.dumps(wear), sc["id"]))
 
 
 def name_key(name: str) -> str:
