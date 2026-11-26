@@ -426,6 +426,18 @@ CREATE TABLE IF NOT EXISTS podcasts (
 );
 CREATE INDEX IF NOT EXISTS podcasts_user ON podcasts(user_id, created_at);
 
+-- Which production picture is for what (app/editor.py own_pictures): a newer request for the
+-- same slot replaces the older one, and deleting the owner cancels its pictures, so nothing is
+-- drawn for nobody (2026-11-26: "no point keep it running as orphan").
+CREATE TABLE IF NOT EXISTS prod_pictures (
+    image_id   TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    slot       TEXT NOT NULL,              -- view:<ref>:<key> | ref:<ref>:main|options|edit | shot:<shot>:options|edit
+    batch      TEXT NOT NULL,
+    created_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS prod_pictures_slot ON prod_pictures(project_id, slot);
+
 -- What was shared, for the person's own record and support.
 CREATE TABLE IF NOT EXISTS batiyao_shares (
     id         TEXT PRIMARY KEY,

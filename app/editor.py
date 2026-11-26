@@ -32,6 +32,7 @@ and clips is done straight away because nothing is lost by it.
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import logging
 import math
@@ -1320,6 +1321,12 @@ async def pending_loop() -> None:
             raise
         except Exception:                                  # noqa: BLE001
             log.exception("editor pending loop survived an error")
+        try:
+            await sweep_orphan_pictures()
+        except asyncio.CancelledError:
+            raise
+        except Exception:                                  # noqa: BLE001
+            log.exception("orphan picture sweep survived an error")
         await asyncio.sleep(15)
 
 
@@ -1610,6 +1617,89 @@ def add_ref_photos(project, user: auth.User, ref_id: str, files: list[tuple[str,
     return {"placed": placed, "dropped": len(ids) - len(placed)}
 
 
+async def drop_picture(image_id: str | None, why: str) -> bool:
+    """A picture nobody will use any more (its view was deleted or redrawn): if it is still
+    being made, cancel it in WIS too, so the card does not draw it for nothing. 2026-11-26:
+    deleting and redrawing a character's views three times left 15 such pictures queued."""
+    if not image_id:
+        return False
+    row = db.one("SELECT status, wis_job_id FROM images WHERE id=?", (image_id,))
+    if row is None or row["status"] in images.TERMINAL:
+        return False
+    if row["wis_job_id"]:
+        try:
+            await wis.cancel_job(row["wis_job_id"], route="images")
+        except Exception:                                      # noqa: BLE001
+            pass
+    db.run("UPDATE images SET status='cancelled', error=?, updated_at=? WHERE id=?",
+           (why, db.now(), image_id))
+    return True
+
+
+async def own_pictures(pid: str, slot: str, ids: list) -> None:
+    """Register what these pictures are for. A newer request for the same slot replaces the
+    older one: its pictures still being made are cancelled (finished ones are kept)."""
+    ids = [i for i in ids if isinstance(i, str) and i]
+    if not ids:
+        return
+    batch = db.new_id("bat")
+    for i in ids:
+        db.run("INSERT OR REPLACE INTO prod_pictures (image_id, project_id, slot, batch, created_at) "
+               "VALUES (?,?,?,?,?)", (i, pid, slot, batch, db.now()))
+    for r in db.query("SELECT image_id FROM prod_pictures WHERE project_id=? AND slot=? AND batch!=?",
+                      (pid, slot, batch)):
+        await drop_picture(r["image_id"], "replaced by a newer request for the same picture")
+
+
+def _owned(slot_of):
+    """Decorator: register the pictures a function returns under slot_of(*args) = (pid, slot)."""
+    def deco(fn):
+        @functools.wraps(fn)
+        async def run(*a, **k):
+            out = await fn(*a, **k)
+            ids = out[0] if isinstance(out, tuple) else out if isinstance(out, list) else [out]
+            try:
+                pid, slot = slot_of(*a, **k)
+                await own_pictures(pid, slot, list(ids or []))
+            except Exception:                                  # noqa: BLE001
+                log.warning("could not register pictures of %s", fn.__name__, exc_info=True)
+            return out
+        return run
+    return deco
+
+
+def _arg(a, k, i, name):
+    return k[name] if name in k else (a[i] if len(a) > i else None)
+
+
+async def sweep_orphan_pictures() -> int:
+    """Backstop: a production picture still being made whose owner is gone (the production,
+    the character, the shot) or that is no longer the view/main picture it was made for is
+    cancelled, whatever path removed it. 20 s grace for the owner to record it."""
+    n = 0
+    rows = db.query(
+        "SELECT p.image_id, p.project_id, p.slot, p.created_at FROM prod_pictures p JOIN images i "
+        "ON i.id=p.image_id WHERE i.status NOT IN ('succeeded','failed','cancelled','canceled') "
+        "AND p.created_at < ?", (db.now() - 20,))
+    for r in rows:
+        kind, owner, what = (r["slot"].split(":") + ["", "", ""])[:3]
+        gone = db.one("SELECT 1 FROM projects WHERE id=?", (r["project_id"],)) is None
+        if not gone and kind in ("view", "ref"):
+            ref = db.one("SELECT image_id, angles FROM prod_refs WHERE id=?", (owner,))
+            gone = ref is None or \
+                (kind == "view" and _jl(ref["angles"], {}).get(what) != r["image_id"]) or \
+                (kind == "ref" and what == "main" and ref["image_id"] != r["image_id"])
+        elif not gone and kind == "shot":
+            gone = db.one("SELECT 1 FROM shots WHERE id=?", (owner,)) is None
+        if gone and await drop_picture(r["image_id"], "cancelled: nothing uses this picture any more"):
+            n += 1
+    db.run("DELETE FROM prod_pictures WHERE created_at < ? AND image_id IN (SELECT id FROM images "
+           "WHERE status IN ('succeeded','failed','cancelled','canceled'))", (db.now() - 7 * 86400,))
+    if n:
+        log.info("cancelled %d orphan picture(s)", n)
+    return n
+
+
 def remove_ref_view(project, ref_id: str, key: str) -> None:
     pid = project["id"]
     r = _ref(pid, ref_id)
@@ -1671,6 +1761,7 @@ async def make_angles(project, user: auth.User, ref_id: str, only: list | None =
                                           orientation=params.get("orientation", "portrait"),
                                           model=model or default_image_model(pid) or
                                           (PLACE_VIEW_MODEL if r["kind"] == "location" else None))
+        await own_pictures(pid, f"view:{ref_id}:{key}", [angles[key]])
     db.run("UPDATE prod_refs SET angles=? WHERE id=?", (json.dumps(angles), ref_id))
     _touch(pid)
     return angles
@@ -1741,6 +1832,7 @@ def _shot_context(pid: str, shot) -> str:
     return " ".join(parts)
 
 
+@_owned(lambda *a, **k: (_arg(a, k, 0, "project")["id"], f"shot:{_arg(a, k, 2, 'shot_id')}:options"))
 async def picture_options(project, user: auth.User, shot_id: str, prompt: str = "",
                           count: int = 2, model: str | None = None,
                           check: bool = True) -> list[str]:
@@ -1836,6 +1928,7 @@ def _shot_picture_path(pid: str, shot) -> Path | None:
     return Path(a["path"]) if a and a["path"] else None
 
 
+@_owned(lambda *a, **k: (_arg(a, k, 0, "project")["id"], f"shot:{_arg(a, k, 2, 'shot_id')}:edit"))
 async def edit_shot_picture(project, user: auth.User, shot_id: str, instruction: str,
                             count: int = 2, model: str | None = None) -> tuple[list[str], str]:
     """Edited versions of a shot's picture, offered as options. Returns (ids, proposal id)."""
@@ -1845,6 +1938,7 @@ async def edit_shot_picture(project, user: auth.User, shot_id: str, instruction:
     return ids, prop
 
 
+@_owned(lambda *a, **k: (_arg(a, k, 0, "project")["id"], f"ref:{_arg(a, k, 2, 'ref_id')}:edit"))
 async def edit_ref_picture(project, user: auth.User, ref_id: str, instruction: str,
                            count: int = 2, model: str | None = None) -> list[str]:
     """Edited versions of a character's/place's main picture; the person picks one."""
@@ -2838,6 +2932,7 @@ non_diegetic_music:
 N/A"""
 
 
+@_owned(lambda *a, **k: (_arg(a, k, 0, "project")["id"], f"shot:{_arg(a, k, 2, 'shot')['id']}:options"))
 async def remake_picture_options(project, user: auth.User, shot, count: int) -> list[str]:
     """The painted frame: frame 12 of the source on the canvas, redrawn with the cast
     (recast) or the change (restyle). It becomes the shot's picture, and the remake
@@ -4230,6 +4325,7 @@ def ref_prompt(project, r) -> str:
     return f"{r['name']}, {r['description']}. {look}{style}".strip()
 
 
+@_owned(lambda *a, **k: (_arg(a, k, 0, "project")["id"], f"ref:{_arg(a, k, 2, 'ref_id')}:options"))
 async def ref_picture_options(project, user: auth.User, ref_id: str, prompt: str = "",
                               count: int = 2, model: str | None = None) -> list[str]:
     """Picture options for a reference; the person picks one (nothing is set yet)."""
@@ -4243,6 +4339,7 @@ async def ref_picture_options(project, user: auth.User, ref_id: str, prompt: str
             for _ in range(max(1, min(4, int(count or 2))))]
 
 
+@_owned(lambda *a, **k: (_arg(a, k, 0, "project")["id"], f"ref:{_arg(a, k, 2, 'ref_id')}:main"))
 async def make_ref_picture(project, user: auth.User, ref_id: str, prompt: str = "",
                            model: str | None = None) -> str:
     """A picture for a character/place reference (a clean, front-on look the shots copy)."""
@@ -5164,7 +5261,10 @@ async def api_ref_photos(pid: str, rid: str, request: Request):
 @router.post("/api/editor/{pid}/refs/{rid}/views/{key}/delete")
 async def api_ref_view_delete(pid: str, rid: str, key: str, request: Request):
     user = _user(request)
-    remove_ref_view(production(user, pid), rid, key)
+    project = production(user, pid)
+    old = _jl(_ref(pid, rid)["angles"], {}).get(key)
+    remove_ref_view(project, rid, key)
+    await drop_picture(old if isinstance(old, str) else None, "cancelled: the view was deleted")
     return {"ok": True}
 
 
