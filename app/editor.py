@@ -2388,6 +2388,12 @@ def _ready_for_video(shots, shot_ids: list[str] | None) -> tuple[list, list]:
     return now, skipped
 
 
+def stopped_since(pid: str, t: float) -> bool:
+    """Did the person press Stop on this production after time t?"""
+    row = db.one("SELECT params_json FROM projects WHERE id=?", (pid,))
+    return row is None or float(db.params_of(row).get("_stopped_at") or 0) > t
+
+
 async def _run_auto_shots() -> None:
     """Advance shots waiting for a picture: references -> shot picture -> render."""
     from app import agent
@@ -2397,6 +2403,8 @@ async def _run_auto_shots() -> None:
         jobs = db.params_of(project).get("_auto_shots") or []
         if not jobs:
             continue
+        started = db.now()
+        made: list[str] = []
         keep, to_render = [], {}
         checked: set = set()
         drawing: set = set()
@@ -2410,10 +2418,15 @@ async def _run_auto_shots() -> None:
             if need:
                 from app import shotpics
                 try:
-                    await shotpics.plan_many(pid, need)
+                    await shotpics.plan_many(pid, need, since=started)
                 except Exception as exc:                       # noqa: BLE001
                     log.warning("planning pictures for %s: %s", pid, exc)
+        if stopped_since(pid, started):
+            log.info("auto shots in %s: stopped by the person; nothing sent", pid)
+            continue
         for j in jobs:
+            if stopped_since(pid, started):
+                break
             shot = db.one("SELECT * FROM shots WHERE id=?", (j["shot"],))
             user = agent.load_user(j["user"])
             if shot is None or user is None or (db.now() - j.get("at", 0) > 12 * 3600
@@ -2471,6 +2484,7 @@ async def _run_auto_shots() -> None:
                 elif j["stage"] == "picture" and not j.get("images"):
                     # Two options from two models, the planner picks (shotpics).
                     j["images"] = await picture_options(proj, user, shot["id"], "", 2, check=False)
+                    made += j["images"]
                 elif j["stage"] == "picture":
                     rows = [await images.refresh(i) for i in j["images"]]
                     if any(r["status"] not in images.TERMINAL for r in rows):
@@ -2486,8 +2500,9 @@ async def _run_auto_shots() -> None:
                         if res and res["scores"][best] < shotpics.PASS_SCORE and not j.get("retried"):
                             # Neither fits: two more, and the best of all four is kept.
                             j["retried"] = 1
-                            j["images"] = j["images"] + await picture_options(
-                                proj, user, shot["id"], "", 2, check=False)
+                            more = await picture_options(proj, user, shot["id"], "", 2, check=False)
+                            made += more
+                            j["images"] = j["images"] + more
                         else:
                             set_picture(proj, user, shot["id"], best)
                             log.info("picture for %s: %s%s", shot["id"], best,
@@ -2534,6 +2549,14 @@ async def _run_auto_shots() -> None:
             to_render[uid].sort(key=lambda x: order.index(x) if x in order else 0)
             if not to_render[uid]:
                 del to_render[uid]
+        if stopped_since(pid, started):
+            # Stopped while this pass ran: what it just sent is cancelled, and the job list
+            # (cleared by Stop) is not written back.
+            for i in made:
+                await drop_picture(i, "stopped by you")
+            log.info("auto shots in %s: stopped by the person during the pass; %d picture(s) "
+                     "cancelled", pid, len(made))
+            continue
         proj = db.one("SELECT * FROM projects WHERE id=?", (pid,))
         for uid, ids in to_render.items():
             if service.is_rendering(proj):
@@ -2546,7 +2569,11 @@ async def _run_auto_shots() -> None:
                 log.warning("auto render in %s: %s", pid, exc.detail)
             proj = db.one("SELECT * FROM projects WHERE id=?", (pid,))
         p2 = db.params_of(db.one("SELECT * FROM projects WHERE id=?", (pid,)))
-        p2["_auto_shots"] = keep
+        if float(p2.get("_stopped_at") or 0) > started:
+            continue
+        # Shots queued while this pass ran (it can take minutes) are kept, not overwritten.
+        seen = {j["shot"] for j in jobs}
+        p2["_auto_shots"] = keep + [j for j in p2.get("_auto_shots") or [] if j.get("shot") not in seen]
         db.set_params(pid, p2)
 
 
@@ -5556,6 +5583,9 @@ async def stop_all(project, user: auth.User) -> dict:
     params = db.params_of(project)
     done["shots_waiting"] = len(params.get("_auto_shots") or []) + len(params.get("_render_after") or [])
     params["_auto_shots"], params["_render_after"] = [], []
+    # Work already in flight checks this (stopped_since): a batch that had spent minutes
+    # planning sent 22 pictures 3 s after the person pressed Stop (2026-11-26).
+    params["_stopped_at"] = db.now()
     db.set_params(pid, params)
     for r in db.query("SELECT id FROM prod_refs WHERE project_id=? AND angles LIKE '%_auto%'", (pid,)):
         db.run("UPDATE prod_refs SET angles='{}' WHERE id=?", (r["id"],))

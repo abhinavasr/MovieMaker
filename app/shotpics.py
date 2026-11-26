@@ -160,7 +160,7 @@ async def _ask(messages, schema, num_predict=1500) -> dict:
     return agent._parse_json((res.get("message") or {}).get("content", "")) or {}
 
 
-async def plan_many(pid: str, shot_ids: list[str], turn=None) -> int:
+async def plan_many(pid: str, shot_ids: list[str], turn=None, since: float | None = None) -> int:
     """Plan the pictures of these shots (those not already planned), in one GPU turn."""
     from app import agent
     todo = []
@@ -177,6 +177,11 @@ async def plan_many(pid: str, shot_ids: list[str], turn=None) -> int:
         if own:
             await turn.acquire()
         for s in todo:
+            if since is not None:
+                from app import editor
+                if editor.stopped_since(pid, since):
+                    log.info("%s: picture planning stopped by the person", pid)
+                    break
             try:
                 out = await _ask([{"role": "system", "content": PLAN_RULES},
                                   {"role": "user", "content": _brief(pid, s)}], PLAN_SCHEMA)
