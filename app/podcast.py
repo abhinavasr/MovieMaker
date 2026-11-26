@@ -1065,6 +1065,14 @@ class _Turn:
             await t.release()
 
 
+async def _yield(gpu: _Turn) -> None:
+    """A chat with the assistant is waiting for the planner: let it go first (a run holds
+    the planner for 10-25 minutes; 2026-11-26 a person's new chat sat behind one)."""
+    from app import agent
+    if gpu.turn is not None and agent.planner_wanted():
+        await gpu.release()
+
+
 async def _step(pid: str, state: dict, key: str, fn, needs_model: bool, gpu: _Turn):
     """Run one agent unless its output is already saved (resume after a restart)."""
     if key in state:
@@ -1077,6 +1085,7 @@ async def _step(pid: str, state: dict, key: str, fn, needs_model: bool, gpu: _Tu
     out = await (fn(turn) if needs_model else fn())
     state[key] = out
     _save_state(pid, state)
+    await _yield(gpu)
     prog = next((p for k, _, p in STEPS if k == key), None)
     if prog is not None:
         _set(pid, progress=prog)
@@ -1150,6 +1159,7 @@ async def _run(pid: str) -> None:
                         _save_state(pid, state)
                         _set(pid, progress=75 + int(17 * (n + 1) / len(segs)))
                         _log(pid, f"Script: “{seg['title']}” — {len(lines)} lines")
+                        await _yield(gpu)
                     state["script"] = done
                     state.pop("script_parts", None)
                     _save_state(pid, state)
@@ -1170,8 +1180,8 @@ async def _run(pid: str) -> None:
                           f"{len(state['script'])} scenes, InfiniteTalk shots with their lines")
                 _notify(pid, "is ready in the editor")
                 return
-    except Cancelled:
-        _log(pid, "Cancelled")
+    except (Cancelled, asyncio.CancelledError):
+        _log(pid, "Stopped; the GPU is free")
     except Exception as exc:                                   # noqa: BLE001
         log.exception("podcast %s failed", pid)
         row = _row(pid)
@@ -1214,7 +1224,16 @@ async def worker() -> None:
                 with suppress(asyncio.TimeoutError):
                     await asyncio.wait_for(_wake.wait(), timeout=5)
                 continue
-            await _run(row["id"])
+            task = asyncio.create_task(_run(row["id"]))
+            _current.update(id=row["id"], task=task)
+            try:
+                await task
+            except asyncio.CancelledError:
+                if not task.cancelled():
+                    raise                      # the worker itself is stopping
+                log.info("podcast %s stopped", row["id"])
+            finally:
+                _current.clear()
         except asyncio.CancelledError:
             raise
         except Exception:                                      # noqa: BLE001
@@ -1249,13 +1268,32 @@ def proceed(user: auth.User, podcast_id: str, points: list | None = None) -> dic
     return view(_row(podcast_id))
 
 
+_current: dict = {}          # the run in progress: {"id", "task"}
+
+
+def _stop_now(podcast_id: str, why: str) -> None:
+    """Cancelled: mark it, and stop the run at once (mid model call too), freeing the GPU."""
+    _set(podcast_id, status="cancelled", message="Cancelled")
+    _log(podcast_id, why)
+    if _current.get("id") == podcast_id and _current.get("task") is not None:
+        _current["task"].cancel()
+
+
 def cancel(user: auth.User, podcast_id: str) -> dict:
     row = owned(user, podcast_id)
     if row["status"] in FINAL:
         raise HTTPException(409, f"this podcast is already {row['status']}")
-    _set(podcast_id, status="cancelled", message="Cancelled")
-    _log(podcast_id, "Cancelled by the person")
+    _stop_now(podcast_id, "Cancelled by the person")
     return view(_row(podcast_id))
+
+
+def cancel_for_thread(thread_id: str) -> int:
+    """The assistant conversation that started these was stopped or deleted."""
+    rows = db.query("SELECT id FROM podcasts WHERE thread_id=? AND status IN (%s)"
+                    % ",".join("?" * (len(ACTIVE) + len(GATES))), (thread_id, *ACTIVE, *GATES))
+    for r in rows:
+        _stop_now(r["id"], "Cancelled: the conversation that asked for it was stopped")
+    return len(rows)
 
 
 def retry(user: auth.User, podcast_id: str) -> dict:

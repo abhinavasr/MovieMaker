@@ -568,6 +568,11 @@ def _fit_window(messages: list[dict], think: int = PLANNER_THINK_TOKENS
 # One planner on the card at a time: the assistant's turns and the podcast pipeline
 # (app/podcast.py) both take the GPU through GpuTurn, and two would not fit.
 _planner_lock = asyncio.Lock()
+_planner_waiting = 0        # turns queued for the planner; a podcast run yields to them
+
+
+def planner_wanted() -> bool:
+    return _planner_waiting > 0
 
 
 class GpuTurn:
@@ -580,9 +585,14 @@ class GpuTurn:
         self._locked = False
 
     async def acquire(self) -> None:
+        global _planner_waiting
         if _planner_lock.locked():
             self.say("waiting for the planner model (another job is using it)")
-        await _planner_lock.acquire()
+        _planner_waiting += 1
+        try:
+            await _planner_lock.acquire()
+        finally:
+            _planner_waiting -= 1
         self._locked = True
         gpuqueue.pause()
         self.held = True
@@ -1670,6 +1680,10 @@ def stop(thread_id: str) -> None:
     task = _active.get(thread_id)
     if task is not None:
         task.cancel()
+    # What this conversation started stops with it (2026-11-26: the person pressed Stop and
+    # deleted the chat, and the podcast it had started kept the GPU for minutes).
+    from app import podcast
+    podcast.cancel_for_thread(thread_id)
 
 
 def _command(user, thread, text: str) -> str | None:
