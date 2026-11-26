@@ -2303,7 +2303,14 @@ def prepare_render(project, user: auth.User, shot_ids: list[str] | None,
 
 
 SECONDS_PER_PICTURE = 25          # measured on the 4090: ~10-30 s per klein / Qwen picture
+# Pictures with people go through the identity model: a master ~100 s (two of them), a frame
+# made from it ~60 s, plus the reviewer -- measured 2026-11-26: 11 podcast shots in 22 min.
+SECONDS_PER_PEOPLE_PICTURE = 75
 _wis_q = {"at": 0.0, "n": 0}
+
+
+def _people_in(pid: str) -> bool:
+    return db.one("SELECT 1 FROM prod_refs WHERE project_id=? AND kind='character'", (pid,)) is not None
 
 
 def drawing_progress(pid: str) -> dict | None:
@@ -2332,7 +2339,8 @@ def drawing_progress(pid: str) -> dict | None:
             "queue": _wis_q["n"], "waiting_for_looks": waiting_looks,
             # this batch's pictures are already IN the WIS queue: the wait is the queue (or the
             # batch's own count if the queue is not known yet), not both added together
-            "eta_s": int(max(_wis_q["n"], pending_pics) * SECONDS_PER_PICTURE) if pending_pics else 0,
+            "eta_s": int(max(_wis_q["n"], pending_pics) * (SECONDS_PER_PEOPLE_PICTURE if _people_in(pid)
+                                                            else SECONDS_PER_PICTURE)) if pending_pics else 0,
             "since": batch.get("started")}
 
 
@@ -4200,6 +4208,24 @@ def _story_for_agent(story: str | None) -> str:
             f"for the rest if a scene you need is past this point):\n{text[:STORY_FOR_AGENT]}")
 
 
+def _now_line(pid: str, project) -> str:
+    """What is running for this production RIGHT NOW, so the planner does not trust older chat
+    messages over the state (2026-11-26: after the person's Stops it said "a draw pass is still
+    running, 0/11" when nothing was, and did nothing)."""
+    prog = drawing_progress(pid)
+    bits = []
+    if prog:
+        bits.append(f"pictures being drawn: {prog['shots_done']}/{prog['shots_total']} shots ready")
+    if service.is_rendering(project):
+        bits.append("videos rendering")
+    voicing = db.one("SELECT COUNT(*) AS n FROM prod_clips WHERE project_id=? AND status='pending'", (pid,))["n"]
+    if voicing:
+        bits.append(f"{voicing} line(s) being voiced")
+    return ("RIGHT NOW: " + "; ".join(bits) + ".") if bits else \
+        ("RIGHT NOW: nothing is being drawn, voiced or rendered for this production (earlier "
+         "messages about work in progress are out of date -- it finished or was stopped).")
+
+
 def describe_for_agent(project_id: str, focus_shot: str | None = None, compact: int = 0,
                        focus_scene: str | None = None) -> str:
     """The production as the planner reads it, compactly, with every id it needs.
@@ -4224,6 +4250,7 @@ def describe_for_agent(project_id: str, focus_shot: str | None = None, compact: 
              f"{', rendered 16:9 and cropped to scope: keep action in the middle band' if aspect_of(params) == '2.39:1' else ''}"
              f", render: {project['status']} "
              f"{project['progress']}% {project['message'] or ''})",
+             _now_line(project_id, project),
              _story_for_agent(project["story"])]
     refs = db.query("SELECT * FROM prod_refs WHERE project_id=? ORDER BY idx", (project_id,))
     if refs:
@@ -4577,10 +4604,27 @@ async def _t_refvid(user, args, base):
 
 async def _t_draw(user, args, base):
     project = _agent_project(user, args)
+    redrawn = 0
+    if args.get("redraw"):
+        # Draw these shots' pictures again with the current pipeline (cast cards, one master frame
+        # per camera set-up, the reviewer). The old picture stays in the shot's history.
+        # 2026-11-26: asked to fix inconsistent characters, the assistant had no way to redraw.
+        pid = project["id"]
+        want = args.get("shot_ids") or [s["id"] for s in ordered_shots(pid) if s["asset_id"]]
+        for sid in want:
+            sh = db.one("SELECT id FROM shots WHERE id=? AND project_id=?", (sid, pid))
+            if sh is None:
+                continue
+            db.run("UPDATE shots SET asset_id=NULL, status=CASE WHEN status='done' THEN 'stale' "
+                   "ELSE status END WHERE id=?", (sid,))
+            redrawn += 1
+        _touch(pid)
+        project = db.one("SELECT * FROM projects WHERE id=?", (pid,))
     before = {j["shot"] for j in db.params_of(project).get("_auto_shots") or []}
     _, later = prepare_render(project, user, args.get("shot_ids") or None, "pictures")
     already = [s for s in later if s in before]
     return {"project_id": project["id"], "drawing": len(later),
+            **({"redrawing": redrawn} if redrawn else {}),
             **({"already_in_progress": len(already),
                 "progress": drawing_progress(project["id"])} if already else {}),
             "note": "characters' and places' pictures and views, then each shot's picture; "
@@ -4872,9 +4916,18 @@ AGENT_TOOLS = {
         "handler": _t_draw,
         "schema": {"type": "object", "required": ["project_id"], "properties": {
             **_PID, "shot_ids": {"type": "array", "items": {"type": "string"},
-                                 "description": "omit = every shot without a picture"}}},
+                                 "description": "omit = every shot without a picture (with "
+                                                "redraw: every shot)"},
+            "redraw": {"type": "boolean", "description": "draw these shots' pictures AGAIN even "
+                       "though they have one (inconsistent faces, the wrong place, a bad picture)"}}},
         "description": "STEP 1: draw what the shots need -- missing character/place pictures "
-                       "and views, then a picture for each shot without one. Never makes video."},
+                       "and views, then a picture for each shot without one. Never makes video. "
+                       "Pictures with people are drawn to keep each character the same person "
+                       "(their face close-up and look as sources), the first shot of each camera "
+                       "set-up becomes its master frame and the others are made from it, and a "
+                       "reviewer checks faces, text and the room and fixes or redraws by itself. "
+                       "Time: about 2 minutes per shot with people in it (11 shots ~20-25 min); "
+                       "tell the person that, not less."},
     "render_shots": {
         "handler": _t_render,
         "schema": {"type": "object", "required": ["project_id"], "properties": {

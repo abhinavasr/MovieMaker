@@ -731,6 +731,12 @@ def _draw_scene_pictures(user, args, base):
     project = _project(user, args)
     shots = service.shots_of(project["id"])
     only = [shots[int(n) - 1]["id"] for n in (args.get("scenes") or []) if 1 <= int(n) <= len(shots)]
+    if args.get("redraw"):
+        # again, with the current pipeline (same faces, master frames, the reviewer)
+        for sid in only or [s["id"] for s in shots if s["asset_id"]]:
+            db.run("UPDATE shots SET asset_id=NULL, status=CASE WHEN status='done' THEN 'stale' "
+                   "ELSE status END WHERE id=?", (sid,))
+        project = db.one("SELECT * FROM projects WHERE id=?", (project["id"],))
     _, later = editor.prepare_render(project, user, only or None, "pictures")
     out = _status(project["id"], base)
     out["drawing_scenes"] = len(later)
@@ -1783,10 +1789,14 @@ TOOLS = [
           ["project_id", "image_id"]),
     _tool("draw_scene_pictures", "Draw scene pictures",
           "Storyboard only. Draw each scene's picture (or `scenes`) from its characters, their "
-          "outfits and its place: two options per scene, the better one kept. Runs in the "
-          "background; get_status shows progress. No video is made.",
+          "outfits and its place, keeping each character the same person; scenes of one camera "
+          "set-up are made from its first picture, and a reviewer checks faces, text and the room "
+          "and fixes or redraws by itself. redraw=true draws pictures again (e.g. when characters "
+          "look different from scene to scene). Runs in the background; get_status shows "
+          "progress. No video is made.",
           _draw_scene_pictures,
-          {**_PID, "scenes": {"type": "array", "items": {"type": "integer"}}}, ["project_id"]),
+          {**_PID, "scenes": {"type": "array", "items": {"type": "integer"}},
+           "redraw": {"type": "boolean"}}, ["project_id"]),
     _tool("share_to_batiyao", "Share to Batiyao",
           "Share a finished item to the person's Batiyao: kind project (its film), image, speech "
           "or music. mode post (text up to 500 characters, no #hashtags; COSTS the person 1.0 "

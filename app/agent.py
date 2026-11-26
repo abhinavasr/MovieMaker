@@ -399,6 +399,17 @@ def _resolve(value, results: dict):
     return value
 
 
+VIDEO_TOOLS = {"render_shots", "render_video"}
+_VIDEO_WORDS = re.compile(r"video|render|animat|clip|film|movie|motion|lip.?sync|talk|export|"
+                          r"वीडियो|ဗီဒီယို", re.I)
+
+
+def _asked_for_video(thread_id: str) -> bool:
+    row = db.one("SELECT content FROM agent_messages WHERE thread_id=? AND role='user' "
+                 "ORDER BY seq DESC LIMIT 1", (thread_id,))
+    return bool(row and _VIDEO_WORDS.search(row["content"] or ""))
+
+
 async def _run_tool(user, name: str, args: dict, base: str,
                     thread_id: str = "") -> tuple[bool, dict, bytes | None]:
     """(ok, result, preview_jpeg). A refusal is a result, not an exception."""
@@ -407,6 +418,13 @@ async def _run_tool(user, name: str, args: dict, base: str,
         if name == "read_file":
             return True, agentfiles.read_text(thread_id, str(args.get("file", "")),
                                               args.get("start", 0), args.get("length", 12000)), None
+        if thread_id and name in VIDEO_TOOLS and not _asked_for_video(thread_id):
+            # A rule in the prompt was not enough: asked only to fix pictures, the planner added
+            # render_shots for all 11 shots (2026-11-26). Videos are hours of GPU; the person
+            # starts them.
+            return False, {"error": "not run: the person's latest message does not ask for "
+                                    "videos. Do the pictures only, then ask whether they want "
+                                    "the videos made."}, None
         if thread_id:
             args = agentfiles.materialize(thread_id, agentfiles.filename_for(thread_id, args))
             if name == "make_podcast":
@@ -826,6 +844,11 @@ audio, mix) is given to you in every turn; the person sees the same thing on scr
     (edit_scene{wear: {"Abhi": ["Abhi's kurta"]}}) or the shot (edit_shot{wear: {...}}), or give
     `wear` on scenes/shots in build_storyboard. A shot's wear beats its scene's, which beats the
     character's usual links; {"Abhi": null} goes back to the scene's / usual.
+  * CHARACTERS LOOK DIFFERENT FROM SHOT TO SHOT, the wrong face, the room changes between shots
+    of the same camera set-up: draw_pictures{redraw: true, shot_ids} for those shots (all of them
+    if the person says "all"). The drawing keeps each character the same person, makes the
+    shots of one set-up from its master frame and reviews every picture itself -- do not redraw
+    the characters, do not ask the person to check each picture. Pictures only; no video.
   * TO CHANGE PART OF A PICTURE (a shot's or a character's) use edit_picture with only what
     should change ("she is not smiling", "evening light"): it keeps everything else. Draw a
     picture again only when the person wants a different picture altogether.
