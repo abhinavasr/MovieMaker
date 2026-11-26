@@ -829,6 +829,11 @@ audio, mix) is given to you in every turn; the person sees the same thing on scr
   * TO CHANGE PART OF A PICTURE (a shot's or a character's) use edit_picture with only what
     should change ("she is not smiling", "evening light"): it keeps everything else. Draw a
     picture again only when the person wants a different picture altogether.
+  * RENAMING OR RECASTING A CHARACTER (new name, new look, age, nationality, voice) is ONE
+    character changed in place: edit_ref{name: "<current name>", rename: "<new name>",
+    description, image_id}. Never delete a character and add a new one for this: their lines and
+    shots belong to them. If their voice should change too, give a new `voice` brief in the same
+    edit_ref: a new voice is designed and their lines are voiced again in it.
   * A PICTURE THE PERSON GIVES FOR A CHARACTER is that character's look: set it at once with
     edit_ref{ref_id or name, image_id: "@F<n>"} (never draw a new one instead). A character
     sheet (several views side by side) is cut into its views automatically. Then redraw the

@@ -657,7 +657,38 @@ def edit_ref(project, ref_id: str, user: auth.User | None = None, **f) -> None:
         if "voice_path" in sets or ("speaker" in sets and
                                     (sets["speaker"] or None) != (row["speaker"] or None)):
             revoice_lines(ref_id)
+        elif sets.get("voice_design") and sets["voice_design"] != (row["voice_design"] or "") \
+                and row["kind"] in VOICE_KINDS and not row["speaker"] and \
+                (row["voice_auto"] or not row["voice_path"]):
+            # A new voice brief for a designed voice: design it again; once it is ready its
+            # lines are voiced again in it (_run_voices -> revoice_lines).
+            db.run("UPDATE prod_refs SET voice_path=NULL, voice_text=NULL, voice_job=NULL, "
+                   "voice_auto=1 WHERE id=?", (ref_id,))
         _touch(pid)
+
+
+def _ref_in_use(pid: str, ref_id: str) -> str:
+    """What deleting this reference would break, said plainly ('' = nothing)."""
+    lines = db.one("SELECT COUNT(*) AS n FROM prod_clips WHERE project_id=? AND ref_id=?",
+                   (pid, ref_id))["n"]
+    shots = sum(1 for s in db.query("SELECT refs FROM shots WHERE project_id=?", (pid,))
+                if ref_id in _jl(s["refs"], []))
+    parts = ([f"speaks {lines} line(s)"] if lines else []) + ([f"is in {shots} shot(s)"] if shots else [])
+    return " and ".join(parts)
+
+
+def hand_over(project, old: str, new: str) -> None:
+    """Replace a reference: its lines (voiced again in the new voice) and its place in
+    every shot go to `new`."""
+    pid = project["id"]
+    for s in db.query("SELECT id, refs FROM shots WHERE project_id=?", (pid,)):
+        refs = _jl(s["refs"], [])
+        if old in refs:
+            refs = list(dict.fromkeys(new if r == old else r for r in refs))
+            db.run("UPDATE shots SET refs=? WHERE id=?", (json.dumps(refs), s["id"]))
+    db.run("UPDATE prod_clips SET ref_id=?, status=CASE WHEN status IN ('ready','pending') THEN "
+           "'script' ELSE status END, source_id=CASE WHEN status IN ('ready','pending') THEN NULL "
+           "ELSE source_id END, auto=1 WHERE project_id=? AND ref_id=?", (new, pid, old))
 
 
 def delete_ref(project, ref_id: str) -> None:
@@ -3397,7 +3428,7 @@ EDIT_FIELDS = {
     "edit_scene": ("title", "summary", "position", "refs", "locked", "wear"),
     "edit_shot": ("title", "prompt", "seconds", "framing", "refs", "make", "position",
                   "start_from", "opts", "scene_id", "image_id", "wear"),
-    "edit_ref": ("name", "description", "kind", "image_id", "speaker", "voice_design",
+    "edit_ref": ("name", "rename", "description", "kind", "image_id", "speaker", "voice_design",
                  "links", "with"),
     "edit_clip": ("start_s", "trim_s", "duration_s", "gain_db", "fade_in", "fade_out",
                   "use_in_video", "track", "name"),
@@ -3651,12 +3682,33 @@ def apply_changes(project, user: auth.User, changes: list, guard: bool = False) 
             if c.get("links") is not None or c.get("with") is not None:
                 pending_links.append((target, c.get("links") if c.get("links") is not None
                                       else c.get("with")))
-            edit_ref(project, target, user=user,
-                     **{k: c.get(k) for k in ("name", "description", "kind", "image_id",
-                                              "speaker", "voice_design") if k in c and not
-                        (k == "name" and not c.get("ref_id"))})
+            fields = {k: c.get(k) for k in ("name", "description", "kind", "image_id",
+                                            "speaker", "voice_design") if k in c and not
+                      (k == "name" and not c.get("ref_id"))}
+            if isinstance(c.get("voice"), str) and c["voice"].strip():
+                fields["voice_design"] = c["voice"]          # the voice brief, as in add_ref
+            if c.get("rename"):
+                # 2026-11-26: with only `name` (which also finds the character) a rename was
+                # impossible, so the assistant deleted the podcast's hosts and added new ones --
+                # every line lost its speaker and every shot its hosts.
+                fields["name"] = c["rename"]
+            edit_ref(project, target, user=user, **fields)
         elif op == "delete_ref":
-            delete_ref(project, rref(c.get("ref_id") or c.get("name")))
+            target = rref(c.get("ref_id") or c.get("name"))
+            if c.get("replace_with"):
+                new = rref(c["replace_with"])
+                if not new or not db.one("SELECT 1 FROM prod_refs WHERE id=? AND project_id=?", (new, pid)):
+                    raise HTTPException(400, f"replace_with: no reference {c['replace_with']!r}")
+                hand_over(project, target, new)
+            elif guard:
+                in_use = _ref_in_use(pid, target)
+                if in_use:
+                    raise HTTPException(409, f"not deleted: this character {in_use}. To change who "
+                                             "they are (name, look, age, voice) use edit_ref with "
+                                             "rename / description / image_id -- their lines and "
+                                             "shots stay with them. To really replace them, "
+                                             "delete_ref with replace_with: the new one's name.")
+            delete_ref(project, target)
         done.append(op)
       except HTTPException as exc:
         failed.append(f"change {n + 1} ({c.get('op')}): {exc.detail}")
@@ -4430,7 +4482,11 @@ AGENT_TOOLS = {
                         "set_mix{dialogue:{gain_db,mute},ambience:{..},music:{..},shot:{..},"
                         "duck_db}; add_ref{key,kind,name,description,image_id,speaker,links:[names],from_ref_id "
                         "(copy one of the person's characters from another production)}; "
-                        "edit_ref{ref_id,...}; delete_ref{ref_id}; add_line{shot_id,ref_id,text,"
+                        "edit_ref{ref_id or name, rename, description, image_id, ...} (RENAME or "
+                        "restyle a character this way: their lines and shots stay with them); "
+                        "delete_ref{ref_id, replace_with?} (a character who speaks or is in shots "
+                        "is only deleted with replace_with, which hands them to the new one); "
+                        "add_line{shot_id,ref_id,text,"
                         "instruct}. REMOVING something is delete_scene/delete_shot/delete_ref/"
                         "delete_clip -- an edit_* with no fields to change does nothing and fails. "
                         "refs and ref_id may be given by the reference's NAME. A new "
