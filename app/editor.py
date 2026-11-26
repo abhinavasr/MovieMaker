@@ -5316,8 +5316,14 @@ def _pending_images(pid: str) -> list[str]:
     project = db.one("SELECT params_json FROM projects WHERE id=?", (pid,))
     params = json.loads(project["params_json"] or "{}") if project else {}
     for j in params.get("_auto_shots") or []:
+        # 2026-11-26: the jobs keep their pictures under "images" (a list); looking only at
+        # "image" made Stop miss all 20 shot pictures of a batch, which kept the GPU busy.
         if j.get("image"):
             ids.add(j["image"])
+        ids.update(i for i in j.get("images") or [] if i)
+    for s in db.query("SELECT opts FROM shots WHERE project_id=?", (pid,)):
+        o = _jl(s["opts"], {})
+        ids.update(i for i in (o.get("options") or []) if isinstance(i, str))
     for p in db.query("SELECT options FROM proposals WHERE project_id=? AND status='open'", (pid,)):
         ids.update(_jl(p["options"], []))
     for r in db.query("SELECT image_id, angles FROM prod_refs WHERE project_id=?", (pid,)):
@@ -5358,6 +5364,7 @@ async def stop_all(project, user: auth.User) -> dict:
                       "('queued','planning','executing','watching')", (pid,)):
         agent.stop(t["id"])
         done["agent"] = True
+    pics = _pending_images(pid)          # before the job list below is cleared
     params = db.params_of(project)
     done["shots_waiting"] = len(params.get("_auto_shots") or []) + len(params.get("_render_after") or [])
     params["_auto_shots"], params["_render_after"] = [], []
@@ -5365,7 +5372,7 @@ async def stop_all(project, user: auth.User) -> dict:
     for r in db.query("SELECT id FROM prod_refs WHERE project_id=? AND angles LIKE '%_auto%'", (pid,)):
         db.run("UPDATE prod_refs SET angles='{}' WHERE id=?", (r["id"],))
     # pictures: cancel in WIS too, so they stop using the card
-    pics = _pending_images(pid)
+    pics = sorted(set(pics) | set(_pending_images(pid)))
     for i in pics:
         row = db.one("SELECT wis_job_id FROM images WHERE id=?", (i,))
         if row and row["wis_job_id"]:
