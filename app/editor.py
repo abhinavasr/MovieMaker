@@ -1465,14 +1465,23 @@ ANGLES = {"three_quarter": "three-quarter view, turned 45 degrees",
 # A place gets its own set of views (2026-11-24: "location should also have multiple shot
 # options"), each drawn from the main picture so it stays the same place.
 PLACE_VIEWS = {"wide": "a very wide establishing view of the whole place from much further back",
-               "reverse": "the reverse angle: standing at the far side looking back toward where "
-                          "the first view was taken",
+               # Describe the CAMERA, never a person: "standing at the far side looking back"
+               # was drawn as a man standing there looking back, in most reverse views
+               # (2026-11-26, the podcast studio).
+               "reverse": "the reverse camera angle: the camera is turned around to face the "
+                          "opposite direction, showing the side of the place that was behind "
+                          "the camera in picture 1",
                "detail": "a macro close-up of a characteristic detail of the place",
                "aerial": "a high aerial view looking straight down over the whole place"}
 # FLUX klein copied the main picture's framing for places (four near-identical "views");
 # Qwen-Image with the same source gave real new camera positions of the same place
 # (measured 2026-11-24 on a meadow: aerial, reverse, detail all distinct and consistent).
 PLACE_VIEW_MODEL = "qwen-image-2.1"
+# A place is drawn empty; the characters are added in each shot. Said positively (image models
+# often draw what a "no ..." names) plus a negative prompt where the model takes one.
+EMPTY_PLACE = ("The place is empty and unoccupied, like a location photo taken before anyone "
+               "arrives.")
+NO_PEOPLE = "people, person, man, woman, child, figure, silhouette, crowd, someone standing"
 
 
 def views_for(kind: str) -> dict:
@@ -1749,7 +1758,7 @@ async def make_angles(project, user: auth.User, ref_id: str, only: list | None =
     for key in keys:
         if r["kind"] == "location":
             text = (f"Same place as picture 1 ({r['name']}), but {views[key]}. Keep the same "
-                    "landmarks, colours, light and style. No characters.")
+                    f"landmarks, colours, light and style. {EMPTY_PLACE}")
         elif key == "face":
             text = (f"{ANGLES[key]}. The same character as in picture 1 ({r['name']}): exactly "
                     "the same face, colours and markings. Plain soft background.")
@@ -1760,7 +1769,8 @@ async def make_angles(project, user: auth.User, ref_id: str, only: list | None =
         angles[key] = await images.create(user, (text + more)[:1900], src,
                                           orientation=params.get("orientation", "portrait"),
                                           model=model or default_image_model(pid) or
-                                          (PLACE_VIEW_MODEL if r["kind"] == "location" else None))
+                                          (PLACE_VIEW_MODEL if r["kind"] == "location" else None),
+                                          negative=NO_PEOPLE if r["kind"] == "location" else None)
         await own_pictures(pid, f"view:{ref_id}:{key}", [angles[key]])
     db.run("UPDATE prod_refs SET angles=? WHERE id=?", (json.dumps(angles), ref_id))
     _touch(pid)
@@ -4345,7 +4355,7 @@ def ref_prompt(project, r) -> str:
             break
     look = {"character": "Character reference sheet: full body, front view, neutral pose, plain soft "
                          "background, clear face, consistent design.",
-            "location": "Establishing view of the place, no people, clear layout, natural light.",
+            "location": "Establishing view of the place, clear layout, natural light. " + EMPTY_PLACE,
             "prop": "The object alone, clear view, plain background.",
             "style": "A frame that shows this visual style.",
             "voice": "A portrait of the speaker, plain background."}.get(r["kind"], "")
@@ -4385,7 +4395,8 @@ async def make_ref_picture(project, user: auth.User, ref_id: str, prompt: str = 
                  f"the {'photo' if len(src) == 1 else str(len(src)) + ' photos'}: same face, "
                  "features, build and colours.")
     image_id = await images.create(user, text[:1900], src, orientation=params.get("orientation", "portrait"),
-                                   model=model or default_image_model(pid))
+                                   model=model or default_image_model(pid),
+                                   negative=NO_PEOPLE if r["kind"] == "location" else None)
     db.run("UPDATE prod_refs SET image_id=? WHERE id=?", (image_id, ref_id))
     _want_angles(pid, ref_id)
     _touch(pid)

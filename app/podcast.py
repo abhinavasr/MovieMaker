@@ -69,10 +69,10 @@ DEFAULT_HOSTS = [
      "voice": "A man in his mid-forties; a deep, confident baritone with a crisp American "
               "accent; dry wit, unhurried."},
 ]
-STUDIO = ("A warm, modern podcast studio: two people sit facing each other across a round wooden "
-          "table, each with a studio microphone on a boom arm and headphones; acoustic foam "
-          "panels, bookshelves and a softly glowing neon sign behind them; warm key light, "
-          "shallow depth of field.")
+STUDIO = ("A warm, modern podcast studio set: two chairs facing each other across a round wooden "
+          "table, a studio microphone on a boom arm and headphones at each seat; acoustic foam "
+          "panels, bookshelves and a softly glowing neon sign behind; warm key light, shallow "
+          "depth of field. The set is empty; the hosts are placed in each shot.")
 
 MAX_TOPIC = 1500
 WORDS_PER_MIN = 150

@@ -154,8 +154,9 @@ def _normalise(name: str, raw: bytes) -> tuple[bytes, tuple[int, int]]:
 
 async def create(user: auth.User, prompt: str, sources: list[tuple[str, bytes]], *,
                  orientation: str | None = None, width=None, height=None,
-                 seed=None, model: str | None = None) -> str:
-    """Submit one picture. `sources` empty = text-to-image; otherwise image-to-image."""
+                 seed=None, model: str | None = None, negative: str | None = None) -> str:
+    """Submit one picture. `sources` empty = text-to-image; otherwise image-to-image.
+    `negative`: what must not appear (models that ignore it say so in WIS's notes)."""
     prompt = (prompt or "").strip()
     if not prompt:
         raise HTTPException(400, "a prompt is required — describe the picture, or for an "
@@ -201,6 +202,8 @@ async def create(user: auth.User, prompt: str, sources: list[tuple[str, bytes]],
         payload["use_references"] = True
     if seed is not None:
         payload["seed"] = seed
+    if negative:
+        payload["negative_prompt"] = negative[:500]
     try:
         job = await wis.submit_image(payload)
     except wis.WisError as exc:
