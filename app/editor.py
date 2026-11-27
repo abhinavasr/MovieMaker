@@ -54,7 +54,10 @@ router = APIRouter()
 TRACKS = ("dialogue", "ambience", "music")
 REF_KINDS = ("character", "location", "prop", "style", "voice")
 FRAMINGS = ("", "EWS", "WS", "MS", "MCU", "CU", "ECU", "OTS", "POV", "2S", "INSERT")
-MAKES = ("animate", "perform", "lipsync", "motion", "talk2", "longtalk", "recast", "restyle")
+MAKES = ("animate", "perform", "lipsync", "motion", "talk2", "longtalk", "recast", "restyle",
+         "graphic")
+# graphic: an animated chart drawn by code (app/charts.py) -- the numbers the speakers cite, on
+# screen while their voice plays over it (2026-11-27). No GPU, no picture model.
 TALK_MAKES = ("talk2", "longtalk")
 REMAKE_MAKES = ("recast", "restyle")
 REMAKE_PIN = 12          # the source frame the painted picture is drawn from
@@ -388,7 +391,7 @@ def cap_seconds(make: str) -> int:
     return {"perform": cfg.SINGLE_MAX_SECONDS, "lipsync": cfg.LIPSYNC_MAX_SECONDS,
             "motion": cfg.MOTION_MAX_SECONDS, "talk2": cfg.TALK_MAX_SECONDS,
             "longtalk": cfg.TALK_MAX_SECONDS, "recast": cfg.REMAKE_MAX_SECONDS,
-            "restyle": cfg.REMAKE_MAX_SECONDS}.get(
+            "restyle": cfg.REMAKE_MAX_SECONDS, "graphic": cfg.TALK_MAX_SECONDS}.get(
         make, cfg.STORYBOARD_MAX_SECONDS)
 
 
@@ -2580,7 +2583,7 @@ def needs_picture(pid: str, shot) -> bool:
       perform          -- the reference model has no first frame; references are enough
     """
     make = shot["make"] or "animate"
-    if make in REMAKE_MAKES:
+    if make in REMAKE_MAKES or make == "graphic":
         return False
     if make == "motion":
         return _performer_picture(pid, shot) is None
@@ -3040,6 +3043,19 @@ def _clean_opts(pid: str, o: dict) -> dict:
     if cam == "2S" or (isinstance(cam, str) and db.one(
             "SELECT 1 FROM prod_refs WHERE id=? AND project_id=? AND kind='character'", (cam, pid))):
         out["camera"] = cam
+    if isinstance(o.get("chart"), dict):
+        from app import charts
+        c = o["chart"]
+        clean = {"kind": c.get("kind"), "title": str(c.get("title") or "")[:140],
+                 "source": str(c.get("source") or "")[:160],
+                 "speaker": str(c.get("speaker") or "")[:60],
+                 "items": [{"label": str(i.get("label") or "")[:90],
+                            "value": float(i["value"]) if isinstance(i.get("value"), (int, float)) else None,
+                            "display": str(i.get("display") or "")[:24]}
+                           for i in (c.get("items") or [])[:12] if isinstance(i, dict)]}
+        clean["items"] = [i for i in clean["items"] if i["value"] is not None]
+        if charts.valid(clean):
+            out["chart"] = clean
     if isinstance(o.get("left"), str) and db.one(
             "SELECT 1 FROM prod_refs WHERE id=? AND project_id=?", (o["left"], pid)):
         out["left"] = o["left"]
@@ -3093,9 +3109,15 @@ def _fit_talk(pid: str, clip_id: str) -> None:
         return
     for sid, (st, ln) in timings(pid).items():
         shot = db.one("SELECT * FROM shots WHERE id=?", (sid,))
-        if shot is None or shot["make"] not in TALK_MAKES:
+        if shot is None or shot["make"] not in TALK_MAKES + ("graphic",):
             continue
         clips = talk_clips(pid, shot)
+        if shot["make"] in ("longtalk", "graphic") and not _jl(shot["opts"], {}).get("speakers"):
+            # Every line under it, played back to back (a host's two lines in a row share one
+            # close-up; a chart holds while its line plays) -- not just the first.
+            clips = [c for c in db.query("SELECT * FROM prod_clips WHERE project_id=? AND "
+                                         "track='dialogue' AND use_in_video=1 AND status != 'failed' "
+                                         "ORDER BY start_s", (pid,)) if st <= c["start_s"] < st + ln]
         if clip_id not in [x["id"] for x in clips]:
             continue
         if not all(x["status"] == "ready" and x["path"] for x in clips):

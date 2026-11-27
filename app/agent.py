@@ -927,6 +927,10 @@ audio, mix) is given to you in every turn; the person sees the same thing on scr
     a quick back-and-forth -> "2S" (talk2). To change how the cameras look, draw_pictures
     {redraw: true} on any of those shots: the studio redraws the two-shot and cuts the close-ups
     again for all of them.
+  * CHART SHOTS (make "graphic"): an animated chart of numbers (opts.chart = {kind: compare |
+    single | share | trend, title, items: [{label, value, display}], source, speaker}), drawn by
+    the studio with no GPU while the speaker's line plays over it. Use only numbers from checked
+    sources, exactly; to change one, edit_shot{opts: {chart: ...}}. Never draw a picture for it.
   * TO LET THE PERSON HEAR A VOICE ("let me hear them", "how does she sound", "play the
     voices"): hear_voice{ref_id} (or with text for a line in that voice). It plays in this chat
     and is listed under Made here; it NEVER touches the production. add_dialogue is only for

@@ -21,6 +21,7 @@
     {make: "motion", icon: "🕺", title: "Copy a dance or movement from a video", what: "The person in the picture makes exactly the movements of a video you add, frame for frame. One person; silent.", needs: "the video to copy", model: "Wan Animate 2"},
     {make: "recast", icon: "🔁", title: "Recast the people in a video", what: "Your characters replace the people in a video — one or several — keeping the video's motion, camera, place and sound. The shot's picture is a frame of the video redrawn with them (🖼 Pictures).", needs: "the video, and who each character replaces", model: "Viggle Remake"},
     {make: "restyle", icon: "🎨", title: "Change a video's look", what: "Change outfits, objects, weather, light, setting or style; the motion, camera and sound stay. The shot's picture is a frame of the video with the change (🖼 Pictures).", needs: "the video, and what changes", model: "Viggle Remake (edit)"},
+    {make: "graphic", icon: "📊", title: "Show the numbers as a chart", what: "An animated chart of numbers from the research (bars grow, figures count up), drawn exactly, with its source; the speaker's voice plays over it.", needs: "the chart's numbers (the assistant or a podcast fills them in)", model: "drawn by the studio — no GPU"},
   ];
   const ICON = Object.fromEntries(USES.map((u) => [u.make, u.icon]));
   // Picture models (2026-11-24: "I should be able to choose models; sometimes the default
@@ -32,7 +33,8 @@
   const MAKE = {animate: ["Bring to life", USES[0].what], perform: ["With references", USES[1].what],
     lipsync: ["Speaks / sings", USES[2].what], longtalk: ["Talks / sings long", USES[3].what],
     talk2: ["Two people talk", USES[4].what], motion: ["Copies motion", USES[5].what],
-    recast: ["Recast", USES[6].what], restyle: ["New look", USES[7].what]};
+    recast: ["Recast", USES[6].what], restyle: ["New look", USES[7].what],
+    graphic: ["Chart", USES[8].what]};
   const FRAMING = {"": "—", EWS: "Extreme wide", WS: "Wide", MS: "Medium", MCU: "Medium close-up", CU: "Close-up", ECU: "Extreme close-up", OTS: "Over the shoulder", POV: "Point of view", "2S": "Two-shot", INSERT: "Insert"};
 
   let S = null, sig = "", view = "storyboard", tab = "shot", scope = "shot";

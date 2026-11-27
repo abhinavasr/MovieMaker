@@ -32,6 +32,7 @@ import json
 import logging
 import math
 import re
+from urllib.parse import urlparse
 import time
 from contextlib import suppress
 
@@ -104,6 +105,7 @@ STEPS = [  # (state key, label, progress when done) -- for the page's tier view
     ("b_final", "Tier 4 · Fact-checker re-checks the revised claims (host B)", 68),
     ("b_persona", "Tier 1 · Persona friction points (host B)", 70),
     ("orchestrator", "Tier 2 · Orchestrator: overlapping friction points", 75),
+    ("charts", "Key numbers for on-screen charts, checked against the pages", 77),
     ("script", "Tier 3 · Script, segment by segment", 92),
     ("built", "Editor production: hosts, scenes, InfiniteTalk shots, lines", 100),
 ]
@@ -329,7 +331,7 @@ ORCH_SCHEMA = _obj({
         "factualGround": S, "debateQuestion": S}))})
 LINES_SCHEMA = _obj({"lines": _arr(_obj({
     "speaker": {"type": "string", "enum": ["A", "B"]}, "text": S, "delivery": S,
-    "cites": _arr(S)}))})
+    "cites": _arr(S), "chart": S}))})
 
 
 # --------------------------------------------------------------------------- the web
@@ -961,6 +963,89 @@ def _facts_block(state: dict) -> str:
     return "\n".join(out)
 
 
+CHARTS_SCHEMA = _obj({"charts": _arr(_obj({
+    "kind": {"type": "string", "enum": ["compare", "single", "share", "trend"]},
+    "title": S, "source": S, "why": S,
+    "items": _arr(_obj({"label": S, "value": N, "display": S}))}))})
+
+
+def _num_forms(value: float, display: str) -> list[str]:
+    """How a number can appear in a page's text."""
+    forms = set()
+    d = re.sub(r"[^\d.,]", "", str(display or ""))
+    if d:
+        forms.add(d.strip(".,"))
+        forms.add(d.replace(",", "").strip(".,"))
+    v = float(value)
+    if v.is_integer():
+        forms |= {f"{int(v)}", f"{int(v):,}"}
+    else:
+        forms |= {f"{v:g}", f"{v:.1f}", f"{v:.2f}"}
+    return [f for f in forms if f and f not in ("0",)]
+
+
+def _chart_checked(card: dict, state: dict) -> dict | None:
+    """Keep only numbers that really are on the source's page (or in its checked quote) --
+    a chart puts a number in front of the audience, so it is never taken on the model's
+    word (2026-11-27)."""
+    src = state["sources"].get(card.get("source") or "")
+    if not src:
+        return None
+    hay = " ".join([src.get("quote") or "", (state.get("pages") or {}).get(src.get("page") or "", {}).get("text") or ""])
+    hay_n = hay.replace(",", "")
+    items = []
+    for it in card.get("items") or []:
+        try:
+            v = float(it.get("value"))
+        except (TypeError, ValueError):
+            continue
+        if any(re.search(r"(?<![\d.])" + re.escape(f.replace(",", "")) + r"(?![\d])", hay_n)
+               for f in _num_forms(v, it.get("display") or "")):
+            items.append({"label": " ".join(str(it.get("label") or "").split())[:90], "value": v,
+                          "display": str(it.get("display") or f"{v:g}")[:24]})
+    out = {"kind": card.get("kind"), "title": " ".join(str(card.get("title") or "").split())[:120],
+           "source": card["source"], "why": str(card.get("why") or "")[:200], "items": items}
+    from app import charts
+    return out if charts.valid(out) else None
+
+
+async def _charts(pid, turn, config, state) -> list[dict]:
+    """The numbers worth SHOWING: 3-8 chart cards from the checked research, each number found
+    on its source's page by code. The script writer puts them on screen when a host cites them."""
+    facts = []
+    for side in ("a", "b"):
+        for v in _final(state, side)["verdicts"]:
+            if v["status"] in ("Verified", "Partially Verified") and re.search(r"\d", v["statement"]):
+                srcs = sorted({e.get("page") for e in v.get("evidence") or [] if e.get("page")})
+                ids = [sid for sid, sv in state["sources"].items() if sv.get("page") in srcs]
+                facts.append(f"- {v['statement']} (sources: {', '.join(ids) or 'none'})")
+    if not facts:
+        return []
+    sources = "\n".join(f"{s['id']}: {s['title']}" for s in state["sources"].values())
+    out = await _llm(pid, turn,
+        "You pick the numbers a podcast should SHOW on screen as simple animated charts while a "
+        "host talks about them. From the checked facts below, choose 3 to 8 charts that make the "
+        "argument easier to grasp: compare = 2-6 values side by side (e.g. before/after, two "
+        "groups); single = one striking number; share = one percentage (0-100) shown as a ring; "
+        "trend = the same measure over years, in order. Each chart: a short plain-English title "
+        "(what a viewer should notice, max 8 words), the ONE source id its numbers come from, and "
+        "items with a short label, the exact value as a number, and how it is written (display, "
+        "e.g. \"54%\", \"16,000\", \"$2.1 trillion\"). Use ONLY numbers stated in the facts, "
+        "exactly; never compute or round new ones. Return JSON only.",
+        f"Topic: {config['topic']}\n\nCHECKED FACTS:\n" + "\n".join(facts[:40])
+        + f"\n\nSOURCES:\n{sources}", CHARTS_SCHEMA, "charts", think=4000)
+    cards = []
+    for c in out.get("charts") or []:
+        ok = _chart_checked(c, state)
+        if ok:
+            ok["id"] = f"G{len(cards) + 1}"
+            cards.append(ok)
+    dropped = len(out.get("charts") or []) - len(cards)
+    _log(pid, f"Charts: {len(cards)} ready" + (f" ({dropped} dropped: a number was not on its "
+                                                  "source's page)" if dropped else ""))
+    return cards[:8]
+
+
 async def _write_segment(pid, turn, config, state, seg, prev_lines):
     a, b = config["hosts"]
     lang = config["language"]
@@ -983,7 +1068,9 @@ async def _write_segment(pid, turn, config, state, seg, prev_lines):
                  f"A's position: {p['aPosition']}\nB's position: {p['bPosition']}\n"
                  f"Shared factual ground both must acknowledge: {p['factualGround']}\n"
                  f"The question driving it: {p['debateQuestion']}\n"
-                 + _fmt(config)["segment"])
+                 + _fmt(config)["segment"]
+                 + "\n(These notes are for you, in analyst's language. The hosts never talk like "
+                 "this: turn it into everyday words and concrete examples.)")
     sources = "\n".join(f"{s['id']}: {s['title']} ({s['url']})" + ("" if s["quote_ok"] else " [quote unchecked]")
                         for s in state["sources"].values())
     # 2026-11-26 test: "about 180 words" gave 2 long speeches, not a debate. Ask for the turns.
@@ -1000,13 +1087,34 @@ async def _write_segment(pid, turn, config, state, seg, prev_lines):
         "speakers alternate (A, B, A, B...).\n"
         "- `delivery`: a short performance cue (e.g. \"leaning in, measured\", \"amused, quick\").\n"
         "- `cites`: the source ids (S..) behind any fact in the line; [] if none.\n"
+        "- `chart`: when the line states the numbers of one of the CHARTS below, its id (G1..), "
+        "and the line says exactly those numbers (in words); the chart fills the screen while the "
+        "line is spoken. In a segment about an argument, use one or two charts that fit what the "
+        "hosts are arguing; each chart at most once in the episode; \"\" when the line has none.\n"
         "- Facts come ONLY from the fact-checks and sources given. A Disputed claim may only be "
         "raised as contested, and the other host challenges it; a withdrawn claim is never stated. "
         "Respect every guardrail and everything marked handle-with-care.\n"
-        "- Natural, sharp, intellectually honest; hosts use each other's first names now and then."
+        "- HOW PEOPLE ACTUALLY TALK (the person, 2026-11-27: \"the language is not for humans; it "
+        "needs to be more grounded\"): two people talking to a general audience, not reading a "
+        "paper. Everyday words a 15-year-old understands; short sentences; contractions; concrete "
+        "people, places, jobs and everyday examples instead of abstractions (say \"the woman who "
+        "answers the phone at the bank\", not \"customer-facing labour\"). Put numbers in human "
+        "terms (\"about one in twenty\", \"sixteen thousand people\") and say where they come from "
+        "in plain words (\"a survey last year found...\"). NEVER use academic or consultant words: "
+        "mechanism, framework, structural, paradigm, leverage, nuance, robust, discourse, "
+        "stakeholders, systemic, granular, holistic, synergy, vulnerability, trajectory. A host "
+        "reacts to what the other just said (\"Okay, but...\", \"That's fair.\", \"Wait, really?\") "
+        "before making their own point.\n"
+        "- Sharp and honest; hosts use each other's first names now and then."
         + (f"\n- Write the lines in {lang}." if lang != "English" else "")
         + " Return JSON only.")
-    context = (f"FACT-CHECKS AND GUARDRAILS:\n{_facts_block(state)}\n\nSOURCES:\n{sources}\n\n"
+    used = {l.get("chart") for l in prev_lines if l.get("chart")}
+    charts_left = [c for c in state.get("charts") or [] if c["id"] not in used]
+    charts_block = ("CHARTS (shown on screen when a line sets `chart`):\n" + "\n".join(
+        f"{c['id']} ({c['kind']}) {c['title']}: " + "; ".join(f"{i['label']} = {i['display']}"
+                                                         for i in c["items"]) + f" -- from {c['source']}"
+        for c in charts_left) + "\n\n") if charts_left else ""
+    context = (f"FACT-CHECKS AND GUARDRAILS:\n{_facts_block(state)}\n\n{charts_block}SOURCES:\n{sources}\n\n"
                + ("THE LINES JUST BEFORE THIS SEGMENT:\n"
                   + "\n".join(f"{l['speaker']}: {l['text']}" for l in prev_lines[-4:]) if prev_lines
                   else "This is the first segment."))
@@ -1044,8 +1152,9 @@ async def _write_segment(pid, turn, config, state, seg, prev_lines):
         "change, line by line: off the segment's question; a host speaking against their own role "
         "or side; a fact stated that is not in the fact-checks, or a Disputed claim stated as "
         "settled, or a withdrawn claim used; anything careless about what must be handled with "
-        "care; wrong tone; repeating the lines before; stiff, written-sounding speech; a host "
-        "talking past the other instead of answering. Be strict but list only real problems; "
+        "care; wrong tone; repeating the lines before; stiff, written-sounding speech -- academic "
+        "or consultant words, abstractions where a concrete everyday example belongs, sentences "
+        "nobody would say out loud; a host talking past the other instead of answering. Be strict but list only real problems; "
         "ok=true when none. Return JSON only.",
         f"{brief}\n\nDRAFT:\n" + "\n".join(f"{i + 1}. {l['speaker']}: {l['text']}" for i, l in enumerate(lines))
         + f"\n\n{context}",
@@ -1067,6 +1176,12 @@ REVIEW_SCHEMA = _obj({"ok": {"type": "boolean"},
                       "problems": _arr(_obj({"line": {"type": "integer"}, "problem": S}))})
 
 
+_JARGON = re.compile(r"\b(mechanisms?|frameworks?|structural(ly)?|paradigms?|leverag\w*|nuanc\w*|"
+                     r"robust|discourse|stakeholders?|systemic|granular|holistic\w*|synerg\w*|"
+                     r"vulnerabilit\w*|trajector\w*|operationali[sz]\w*|ontolog\w*|"
+                     r"epistem\w*|heuristic\w*|dichotom\w*|externalit\w*)\b", re.I)
+
+
 def _mechanical_problems(lines: list[dict], turns: int, state: dict) -> list[str]:
     """What code can check for sure."""
     out = []
@@ -1077,6 +1192,10 @@ def _mechanical_problems(lines: list[dict], turns: int, state: dict) -> list[str
             out.append(f"line {i + 1}: a source id or web address is in the spoken text")
         if len(l["text"].split()) < 6:
             out.append(f"line {i + 1}: too short to be a turn")
+        jargon = sorted({m.group(0).lower() for m in _JARGON.finditer(l["text"])})
+        if jargon:
+            out.append(f"line {i + 1}: sounds like a paper, not a person ({', '.join(jargon)}); "
+                       "say it in everyday words with a concrete example")
     if len(lines) < max(2, turns // 2):
         out.append(f"only {len(lines)} lines; write {turns}")
     return out
@@ -1099,9 +1218,12 @@ def _clean_lines(out: dict, state: dict) -> list[dict]:
                           "delivery": str(l.get("delivery") or "")[:80],
                           "cites": [c for c in l.get("cites") or [] if c in state["sources"]]})
             words = words[cut:]
+        chart = str(l.get("chart") or "").strip()
         lines.append({"speaker": l["speaker"], "text": " ".join(words),
                       "delivery": str(l.get("delivery") or "")[:80],
-                      "cites": [c for c in l.get("cites") or [] if c in state["sources"]]})
+                      "cites": [c for c in l.get("cites") or [] if c in state["sources"]],
+                      **({"chart": chart} if chart in {c["id"] for c in state.get("charts") or []}
+                         and chart not in {x.get("chart") for x in lines} else {})})
     return lines
 
 
@@ -1120,6 +1242,17 @@ WIDE_EVERY_S = 50.0     # come back to the wide at least this often
 SINGLE_MAX_S = 40.0     # one close-up shot holds at most this much of one host
 
 
+def _chart_for_screen(card: dict, state: dict, speaker: str) -> dict:
+    """A chart card as the graphic shot shows it: a short source line people can read."""
+    src = state["sources"].get(card["source"]) or {}
+    parts = [p.strip() for p in re.split(r"\s[|\u2013\u2014-]\s", src.get("title") or "") if p.strip()]
+    site = parts[-1] if len(parts) > 1 else re.sub(r"^www\.", "", urlparse(src.get("url") or "").netloc)
+    head = parts[0] if parts else ""
+    caption = (f"{head[:70]} ({site})" if head and site and site not in head else head or site)[:110]
+    return {"kind": card["kind"], "title": card["title"], "items": card["items"],
+            "source": caption, "speaker": speaker}
+
+
 def plan_shots(lines: list[dict]) -> list[dict]:
     """One segment's lines as shots on three fixed cameras: "2S" (both hosts) and one close-up
     per host ("A"/"B"). The segment opens on the wide; a quick back-and-forth stays on the wide;
@@ -1132,6 +1265,12 @@ def plan_shots(lines: list[dict]) -> list[dict]:
     while i < len(lines):
         line = lines[i]
         t = _est(line["text"])
+        if line.get("chart"):
+            # The numbers on screen: an animated chart while the host's voice plays over it.
+            shots.append({"camera": "graphic", "chart": line["chart"], "lines": [line]})
+            since_wide += t
+            i += 1
+            continue
         wide_due = since_wide >= WIDE_EVERY_S
         if t < SINGLE_MIN_S or wide_due:
             group, total = [line], t
@@ -1260,6 +1399,31 @@ async def _build(pid: str, row, config: dict, state: dict) -> str:
         for shot in plan_shots(seg["lines"]):
             l = shot["lines"]
             length = sum(_est(x["text"]) for x in l) + gap * (len(l) - 1)
+            if shot["camera"] == "graphic":
+                card = next((c for c in state.get("charts") or [] if c["id"] == shot["chart"]), None)
+                who = l[0]["speaker"]
+                chart = _chart_for_screen(card, state, names[who]) if card else None
+                if chart:
+                    sid = editor.add_shot(
+                        project, scene_id, f"Chart: {card['title'][:60]}",
+                        f"Animated chart: {card['title']}",
+                        min(cfg.TALK_MAX_SECONDS, math.ceil(length + 1.2)), "INSERT",
+                        [refs[who]], "graphic", None, None, user)
+                    project = db.one("SELECT * FROM projects WHERE id=?", (project_id,))
+                    editor.edit_shot(project, sid, opts={"chart": chart})
+                    pp = db.params_of(project)
+                    from app import charts as _charts_mod
+                    aid = editor._store_picture(project_id, "chart.png", _charts_mod.still(
+                        chart, int(pp.get("width", 864)), int(pp.get("height", 480))))
+                    db.run("UPDATE shots SET asset_id=? WHERE id=?", (aid, sid))
+                    project = db.one("SELECT * FROM projects WHERE id=?", (project_id,))
+                    at = 0.1
+                    for x in l:
+                        editor.add_script(project, sid, x["text"], refs[x["speaker"]], x["delivery"], at)
+                        at += _est(x["text"]) + gap
+                    project = db.one("SELECT * FROM projects WHERE id=?", (project_id,))
+                    continue
+                shot = {"camera": l[0]["speaker"], "lines": l}      # no chart after all: a close-up
             if shot["camera"] == "2S":
                 speakers = []
                 for x in l:
@@ -1406,6 +1570,8 @@ async def _run(pid: str) -> None:
             elif status == "debating":
                 await _step(pid, state, "orchestrator",
                             lambda t: _orchestrate(pid, t, config, state), True, gpu)
+                await _step(pid, state, "charts",
+                            lambda t: _charts(pid, t, config, state), True, gpu)
                 if "points" in config["review"] and not state.get("points_reviewed"):
                     await gpu.release()
                     _set(pid, status="review_points",

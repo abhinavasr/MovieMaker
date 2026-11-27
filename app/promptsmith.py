@@ -168,6 +168,8 @@ async def polish_shots(project_id: str, shot_ids: list[str], report=None) -> int
         shot = db.one("SELECT * FROM shots WHERE id=? AND project_id=?", (sid, project_id))
         if shot is None:
             continue
+        if shot["make"] == "graphic":
+            continue                                          # a chart: drawn by code, no prompt
         text = draft(project_id, shot)
         if not text.strip():
             continue

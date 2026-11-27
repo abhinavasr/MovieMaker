@@ -375,6 +375,19 @@ def fitted(path, params: dict) -> bytes:
 async def _render_shot(project_id: str, shot, assets: dict, params: dict,
                        report) -> Path:
     """One clip. Returns the file it was written to."""
+    if shot.get("make") == "graphic":
+        # An animated chart, drawn by code on the CPU (app/charts.py): no WIS, no GPU.
+        from app import charts
+        chart = json.loads(shot.get("opts") or "{}").get("chart") if isinstance(shot.get("opts"), str) \
+            else (shot.get("opts") or {}).get("chart")
+        if not chart or not charts.valid(chart):
+            raise RuntimeError("this chart shot has no valid chart data")
+        await report(10, "drawing the animated chart")
+        out = cfg.outputs_dir / project_id / f"shot_{shot['id']}.mp4"
+        await asyncio.to_thread(charts.render, chart, int(params.get("width", 480)),
+                                int(params.get("height", 864)), float(shot.get("seconds") or 6), out)
+        db.run("UPDATE shots SET status='done', clip_path=? WHERE id=?", (str(out), shot["id"]))
+        return out
     image_path = assets.get(shot["asset_id"])
     image_path = await match_shape(project_id, shot, image_path, params, report)
     if shot.get("make") in ("perform", "lipsync", "motion", "talk2", "longtalk", "recast", "restyle"):
