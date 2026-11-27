@@ -648,20 +648,25 @@ class GpuTurn:
     """Hold the card for the planner: pause the studio queue, take a WIS lease.
     `say` reports what it is waiting for (the assistant's thread, or a podcast run)."""
 
-    def __init__(self, thread_id: str, say=None):
+    def __init__(self, thread_id: str, say=None, urgent: bool = True):
         self.thread_id, self.lease, self.held = thread_id, None, False
         self.say = say or (lambda text: _activity(thread_id, text))
         self._locked = False
+        # Only a person waiting makes a podcast run give up the card between its steps. The
+        # assistant's own check-ins wait (2026-11-27: each check-in on a running podcast
+        # unloaded Flash-Next, loaded the 27B for a status note, then Flash-Next again).
+        self.urgent = urgent
 
     async def acquire(self) -> None:
         global _planner_waiting
         if _planner_lock.locked():
             self.say("waiting for the planner model (another job is using it)")
-        _planner_waiting += 1
+        bump = 1 if self.urgent else 0
+        _planner_waiting += bump
         try:
             await _planner_lock.acquire()
         finally:
-            _planner_waiting -= 1
+            _planner_waiting -= bump
         self._locked = True
         gpuqueue.pause()
         self.held = True
@@ -1584,7 +1589,7 @@ async def _turn(thread_id: str) -> None:
     if db.one("SELECT 1 FROM agent_files WHERE thread_id=? AND status='processing'", (thread_id,)):
         _activity(thread_id, "reading your files (transcribing audio, extracting text)", "queued")
         await agentfiles.wait_ready(thread_id)
-    turn = GpuTurn(thread_id)
+    turn = GpuTurn(thread_id, urgent=not trigger.startswith(("review:", "regular check-in")))
     final_state = "done"
     try:
         for rnd in range(MAX_ROUNDS):
