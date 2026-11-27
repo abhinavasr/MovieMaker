@@ -283,3 +283,5 @@ progress { width: 100%; max-width: 420px; height: 10px; vertical-align: middle; 
 .st-theme:has(input:checked) { border-color: var(--accent); }
 .st-theme span { display: flex; flex-direction: column; gap: 2px; }
 .top nav a.who { color: var(--muted); }
+.st-theme input { width: auto; flex: none; margin: 3px 0 0; accent-color: var(--accent); }
+.st-theme span { flex: 1; min-width: 0; }
