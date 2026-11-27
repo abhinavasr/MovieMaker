@@ -46,7 +46,7 @@
   function sideCard(side) {
     const h = host(side), syn = run[`${side}_synthesis`];
     if (!syn && !(run.sources || []).some((s) => s.side === side)) return "";
-    return `<section class="card pc-side"><h2>${esc(h.name)} <span class="muted">${esc(h.lens)}</span></h2>
+    return `<section class="card pc-side" data-side="${side}"><h2>${esc(h.name)} <span class="muted">${esc(h.lens)}</span></h2>
       ${syn ? `<p><b>Thesis:</b> ${esc(syn.thesis)}</p>` : ""}
       <details ${run.status === "review_research" ? "open" : ""}><summary>Sources (${(run.sources || []).filter((s) => s.side === side).length})</summary>${sources(side)}</details>
       ${run[`${side}_factcheck`] ? `<details open><summary>Fact-checks${run[`${side}_factcheck`].revised ? " (after the researcher's revision and a re-check)" : ""}</summary>${facts(side)}</details>` : ""}
@@ -108,10 +108,34 @@
         <ol>${(run.steps || []).map((s) => `<li class="${s.done ? "done" : ""}">${s.done ? "✓" : "○"} ${esc(s.label)}</li>`).join("")}</ol></details>`;
   }
 
+  // What the person opened or closed survives the 3-second refresh (2026-11-27: "the log
+  // keeps hiding on every page update"): keyed by the section's title without its counts.
+  const openState = {};
+  const keyOf = (d) => {
+    const sm = d.querySelector(":scope > summary");
+    const side = d.closest("[data-side]")?.dataset.side || "";
+    return side + "|" + (sm ? sm.textContent.replace(/[\d()/]+/g, "").trim() : "");
+  };
+  root.addEventListener("toggle", (e) => {
+    if (e.target.tagName === "DETAILS" && !painting) openState[keyOf(e.target)] = e.target.open;
+  }, true);
+  let painting = false;
+
   function paint() {
     if (editing && run.status === "review_points") return;   // never overwrite the person's edits
+    const logBox = root.querySelector(".pc-log ol"), logTop = logBox ? logBox.scrollTop : 0;
+    const y = window.scrollY;
+    painting = true;
     root.innerHTML = header() + sideCard("a") + sideCard("b") + (run.orchestrator ? pointsView(run.orchestrator) : "") + scriptView() +
       `<details class="card pc-log"><summary>Log</summary><ol>${(run.log || []).slice().reverse().map((l) => `<li><span class="muted">${new Date(l.t * 1000).toLocaleTimeString()}</span> ${esc(l.text)}</li>`).join("")}</ol></details>`;
+    root.querySelectorAll("details").forEach((d) => {
+      const k = keyOf(d);
+      if (k in openState) d.open = openState[k];
+    });
+    const nb = root.querySelector(".pc-log ol"); if (nb) nb.scrollTop = logTop;
+    window.scrollTo(0, y);
+    // toggle events from setting .open fire asynchronously: stop ignoring them after they ran
+    setTimeout(() => { painting = false; }, 0);
     wire();
   }
 
