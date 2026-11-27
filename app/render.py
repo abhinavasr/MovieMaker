@@ -137,8 +137,15 @@ def request_cancel(project_id: str) -> bool:
         params["_cancel"] = True
         db.set_params(project_id, params)
     job_id = _current["wis_job_id"]
-    if job_id:
-        asyncio.create_task(wis.cancel_job(job_id))
+    ids = {job_id} if job_id else set()
+    # A render picked up again after a restart may not know its in-flight job: the shots'
+    # recorded WIS jobs are cancelled too (2026-11-27: a deleted production's lip-sync shot
+    # kept the GPU after its render was cancelled).
+    ids |= {r["wis_job_id"] for r in db.query(
+        "SELECT wis_job_id FROM shots WHERE project_id=? AND wis_job_id IS NOT NULL AND "
+        "status NOT IN ('done','failed','cancelled')", (project_id,))}
+    for j in ids:
+        asyncio.create_task(wis.cancel_job(j))
     return True
 
 
