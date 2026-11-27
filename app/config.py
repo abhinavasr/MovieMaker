@@ -127,6 +127,9 @@ class Config:
     # Two people talk / talk or sing at length: InfiniteTalk (one picture + 1-2 voices).
     TALK_MODEL = _s("STUDIO_TALK_MODEL", "infinitetalk")
     TALK_MAX_SECONDS = 60
+    # Two-person InfiniteTalk shots send each character's own track on one timeline (WIS
+    # speaker_mode "together"); off = the older one-then-the-other mode.
+    TALK_TOGETHER = _s("STUDIO_TALK_TOGETHER", "1") not in ("0", "false", "no")
     # Recast the people in a video / change its look: Viggle Remake (swap / edit).
     RECAST_MODEL = _s("STUDIO_RECAST_MODEL", "viggle-remake-swap")
     RESTYLE_MODEL = _s("STUDIO_RESTYLE_MODEL", "viggle-remake-edit")

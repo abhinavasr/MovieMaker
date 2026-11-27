@@ -614,7 +614,7 @@ body:has(.ed) footer, body:has(.ed) .retention-note { display: none; }
 /* One dialogue lane per speaker (2026-11-27) */
 .ed-lh.grp .nm small { color: var(--muted); font-weight: 400; }
 .ed-lane.grp { height: 10px; background: transparent; cursor: default; }
-.ed-lh.spk { padding-left: 14px; }
+.ed-lh.spk { padding-left: 0; }
 .ed-lh.spk .nm { overflow: hidden; text-overflow: ellipsis; color: var(--ink); }
 .ed-lane.spk .ed-blk.dialogue { background: color-mix(in srgb, var(--spk) 28%, transparent); border-color: var(--spk); }
 .ed-blk.muted { opacity: .35; }

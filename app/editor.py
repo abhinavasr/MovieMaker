@@ -2821,7 +2821,8 @@ def render_shots(project, user: auth.User, shot_ids: list[str] | None = None):
             problems.append(f"{label} is longer than {cap} s")
         if s["make"] in TALK_MAKES:
             need = 2 if s["make"] == "talk2" else 1
-            ready = len(_speaker_audio(pid, s))
+            ready = len({k for k in character_tracks(pid, s) if k}) if cfg.TALK_TOGETHER \
+                else len(_speaker_audio(pid, s))
             if ready < need:
                 problems.append(f"{label} needs {'two voiced lines' if need == 2 else 'its voiced line'} "
                                 f"under it ({ready} ready) — voices first, then the video")
@@ -2937,6 +2938,17 @@ def _fit_talk(pid: str, clip_id: str) -> None:
             return
         project = db.one("SELECT * FROM projects WHERE id=?", (pid,))
         if service.is_rendering(project):
+            return
+        if shot["make"] == "talk2" and cfg.TALK_TOGETHER:
+            under = [c for c in db.query("SELECT * FROM prod_clips WHERE project_id=? AND "
+                                         "track='dialogue' AND use_in_video=1", (pid,))
+                     if st <= c["start_s"] < st + ln]
+            if any(x["status"] != "ready" for x in under):
+                return
+            end = max((x["start_s"] + (x["duration_s"] or _probe_seconds(x["path"]) or 0)) for x in under)
+            want = max(1, min(cfg.TALK_MAX_SECONDS, math.ceil(end - st + 0.4)))
+            if want != int(shot["seconds"] or 0):
+                edit_shot(project, sid, seconds=want)
             return
         lengths = [_probe_seconds(x["path"]) or (x["duration_s"] or 0) for x in clips]
         want = max(1, min(cfg.TALK_MAX_SECONDS, math.ceil(sum(lengths) + 0.4)))
@@ -3310,9 +3322,70 @@ def remove_ref_video(project, sid: str, index: int) -> None:
     _touch(pid)
 
 
+def character_tracks(pid: str, shot) -> dict[str, list]:
+    """The voiced lines under a shot, per speaker: {ref_id ("" = Narrator): [clips]}, in the
+    order the speakers first speak. Each is a track of its own for the video model (the
+    person, 2026-11-27: "the model ends up mixing the audio tracks ... audio ref tagged per
+    character")."""
+    out: dict[str, list] = {}
+    for c in _dialogue_under(pid, shot["id"]):
+        rid = c["ref_id"] if c["ref_id"] and db.one("SELECT 1 FROM prod_refs WHERE id=?", (c["ref_id"],)) else ""
+        out.setdefault(rid, []).append(c)
+    return out
+
+
+def on_camera(pid: str, shot, tracks: dict) -> str | None:
+    """Whose lips move in a one-person shot: the character in the frame who speaks the most
+    under it (others' lines stay in the film's sound, not in this face)."""
+    in_shot = set(_jl(shot["refs"], []))
+    speak = {rid: sum((c["duration_s"] or 0) for c in cl) for rid, cl in tracks.items() if rid}
+    pick = {rid: t for rid, t in speak.items() if rid in in_shot} or speak
+    return max(pick, key=pick.get) if pick else None
+
+
 def perform_payload(project_id: str, shot, image_path: str | None, params: dict) -> dict:
     """The WIS request for a performance or lip-sync shot (called by app/render.py)."""
     pid = project_id
+    if shot.get("make") == "longtalk":
+        row = db.one("SELECT * FROM shots WHERE id=?", (shot["id"],))
+        tracks = character_tracks(pid, row)
+        who = on_camera(pid, row, tracks)
+        if who and image_path:
+            start, length = timings(pid).get(shot["id"], (0.0, float(shot.get("seconds") or 5)))
+            ctx = _shot_context(pid, shot)
+            from app import promptsmith
+            return {"model": cfg.TALK_MODEL, "client_request_id": shot["id"],
+                    "prompt": (promptsmith.current(pid, row).get("prompt")
+                               or " ".join(x for x in (shot.get("prompt") or "The person in the picture "
+                                                       "talks, natural expression.", ctx) if x))[:3900],
+                    "width": int(params.get("width", 480)), "height": int(params.get("height", 864)),
+                    "image": {"b64": wis.b64(Path(image_path).read_bytes()), "mime": "image/png"},
+                    # their lines only, each at its moment, silence between
+                    "reference_audio": [{"b64": wis.b64(_window(tracks[who], start, length)),
+                                         "mime": "audio/wav"}]}
+    if shot.get("make") == "talk2" and cfg.TALK_TOGETHER:
+        row = db.one("SELECT * FROM shots WHERE id=?", (shot["id"],))
+        tracks = {k: v for k, v in character_tracks(pid, row).items() if k}
+        if len(tracks) >= 2 and image_path:
+            # Each character's own lines, at their moments, silence elsewhere, as long as the
+            # shot -- speaker 1 is whoever speaks first; opts.layout says which side they sit.
+            first_two = list(tracks)[:2]
+            start, length = timings(pid).get(shot["id"], (0.0, float(shot.get("seconds") or 5)))
+            opts = _jl(shot.get("opts"), {})
+            ctx = _shot_context(pid, shot)
+            from app import promptsmith
+            return {"model": cfg.TALK_MODEL, "client_request_id": shot["id"],
+                    "prompt": (promptsmith.current(pid, row).get("prompt")
+                               or " ".join(x for x in (shot.get("prompt") or "Two people in the "
+                                                       "picture talk to each other, natural "
+                                                       "expressions.", ctx) if x))[:3900],
+                    "width": int(params.get("width", 480)), "height": int(params.get("height", 864)),
+                    "image": {"b64": wis.b64(Path(image_path).read_bytes()), "mime": "image/png"},
+                    "reference_audio": [{"b64": wis.b64(_window(tracks[r], start, length)),
+                                         "mime": "audio/wav"} for r in first_two],
+                    "seconds": round(length, 2),
+                    "speaker_mode": "together",
+                    "speaker_layout": opts.get("layout", "left_right")}
     if shot.get("make") in TALK_MAKES:
         voices = _speaker_audio(pid, db.one("SELECT * FROM shots WHERE id=?", (shot["id"],)))
         need = 2 if shot["make"] == "talk2" else 1
@@ -3390,7 +3463,11 @@ def perform_payload(project_id: str, shot, image_path: str | None, params: dict)
                 "reference_videos": [{"b64": _ref_video_b64(moves, w, h, secs),
                                       "mime": "video/mp4"}]}
     if shot.get("make") == "lipsync":
-        lines = _dialogue_under(pid, shot["id"])
+        tracks = character_tracks(pid, db.one("SELECT * FROM shots WHERE id=?", (shot["id"],)))
+        who = on_camera(pid, db.one("SELECT * FROM shots WHERE id=?", (shot["id"],)), tracks)
+        # Only the speaker in the frame moves their lips; the rest of the shot's lines are
+        # heard in the film but not fed to this face.
+        lines = tracks[who] if who else _dialogue_under(pid, shot["id"])
         if not image_path or not lines:
             raise RuntimeError(f"{shot.get('title') or 'a lip-sync shot'} needs a picture and a "
                                "use-in-video dialogue line under it")

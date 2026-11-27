@@ -828,29 +828,25 @@
   // overlap. "" = lines with no character (narrator / someone else).
   const SPK_COLORS = ["#a98be0", "#e08bb4", "#8bc4e0", "#e0c48b", "#8be0a4", "#e09a8b"];
   function speakerList() {
-    const lines = S.clips.filter((c) => c.track === "dialogue");
-    const ids = S.refs.filter((r) => ["character", "voice"].includes(r.kind) && lines.some((c) => c.ref_id === r.id)).map((r) => r.id);
-    if (lines.some((c) => !c.ref_id || !S.refs.some((r) => r.id === c.ref_id))) ids.push("");
-    if (!ids.length) ids.push("");
-    return ids;
+    // A lane for every character (lines or not yet), and the Narrator lane always, last: it
+    // holds every voice that is not a character's (the person, 2026-11-27: "a line per
+    // character ... keep one narrator regardless").
+    return S.refs.filter((r) => ["character", "voice"].includes(r.kind)).map((r) => r.id).concat([""]);
   }
   function spkMix(rid) { return (S.mix.speakers || {})[rid || ""] || {gain_db: 0, mute: false}; }
   function speakerLanes(a, b, x) {
     const ids = speakerList();
-    const m = S.mix.dialogue;
-    let html = `<div class="ed-lh grp"><span class="nm"><i style="background:${TRACK_COLOR.dialogue}"></i>Dialogue <small>(all)</small></span>
-        <input type="range" min="-30" max="6" step="1" value="${m.gain_db}" data-gain="dialogue" title="All dialogue ${m.gain_db} dB" aria-label="All dialogue level">
-        <button data-mute="dialogue" class="${m.mute ? "on" : ""}" title="${m.mute ? "Unmute" : "Mute"} all dialogue">${m.mute ? "🔇" : "🔈"}</button></div><div class="ed-lane grp"></div>`;
+    let html = "";
     ids.forEach((rid, i) => {
       const r = S.refs.find((q) => q.id === rid);
-      const name = r ? r.name : "Narrator / other";
+      const name = r ? r.name : "Narrator";
       const sm = spkMix(rid);
       const col = SPK_COLORS[i % SPK_COLORS.length];
       const own = S.clips.filter((c) => c.track === "dialogue" && (r ? c.ref_id === rid : (!c.ref_id || !S.refs.some((q) => q.id === c.ref_id))) && c.start_s < b && c.start_s + (c.duration_s || 3) > a);
-      html += `<div class="ed-lh spk"><span class="nm" title="${esc(name)}"><i style="background:${col}"></i>${esc(name)}</span>
+      html += `<div class="ed-lh spk"><span class="nm" title="${esc(name)}${r ? "" : " — voices that are not a character's"}"><i style="background:${r ? col : "#9aa3b2"}"></i>${r ? "🎙" : "📢"} ${esc(name)}</span>
           <input type="range" min="-30" max="12" step="1" value="${sm.gain_db}" data-sgain="${rid}" title="${esc(name)} ${sm.gain_db} dB" aria-label="${esc(name)} level">
           <button data-smute="${rid}" class="${sm.mute ? "on" : ""}" title="${sm.mute ? "Unmute" : "Mute"} ${esc(name)}">${sm.mute ? "🔇" : "🔈"}</button></div>
-        <div class="ed-lane spk" data-lane="dialogue" data-ref="${rid}" style="--spk:${col}">${own.map((c) => {
+        <div class="ed-lane spk" data-lane="dialogue" data-ref="${rid}" style="--spk:${r ? col : "#9aa3b2"}" title="Click an empty spot to add a line for ${esc(name)}">${own.map((c) => {
           const d = c.duration_s || (c.status === "pending" ? 4 : 1);
           return `<div class="ed-blk dialogue ${c.status} ${c.id === sel.clip ? "sel" : ""} ${sm.mute ? "muted" : ""}" data-clip="${c.id}" style="left:${x(c.start_s)}px;width:${Math.max(8, d * TL.pps)}px" title="${c.status === "script" ? "Script line — not voiced yet" + (c.auto ? " (being voiced)" : "") + ": " : ""}${esc(c.name)}${c.error ? " — " + esc(c.error) : ""}">
             <span>${c.status === "pending" ? "⏳ " : c.status === "script" ? (c.auto ? "⏳📝 " : "📝 ") : ""}${esc((c.text || c.name || "").replace(/^[^:]{1,40}:\s*/, ""))}</span>${c.use_in_video ? `<span class="vid">🎬</span>` : ""}<span class="rs"></span></div>`;

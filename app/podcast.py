@@ -1097,20 +1097,27 @@ def _est(text: str) -> float:
 
 
 def plan_shots(lines: list[dict]) -> list[dict]:
-    """Group a segment's lines into InfiniteTalk shots: a quick exchange (two different
-    speakers, each line under ~25 s, together under ~50 s) is one `talk2` shot of both hosts;
-    anything else is a `longtalk` close-up of the speaker. Exchanges and close-ups alternate
-    naturally with the rhythm of the debate."""
+    """Group a segment's lines into InfiniteTalk shots. A back-and-forth (lines of up to ~25 s,
+    together up to ~50 s) is one `talk2` shot of both hosts -- each host's own track drives
+    their own face, so it can hold A, B, A... (2026-11-27); a long turn is a `longtalk`
+    close-up of the speaker."""
+    from app.config import cfg as _cfg
     shots, i = [], 0
     while i < len(lines):
-        l = lines[i]
-        n = lines[i + 1] if i + 1 < len(lines) else None
-        if n and n["speaker"] != l["speaker"] and _est(l["text"]) <= 25 and \
-                _est(n["text"]) <= 25 and _est(l["text"]) + _est(n["text"]) <= 50:
-            shots.append({"make": "talk2", "lines": [l, n]})
-            i += 2
+        group = [lines[i]]
+        if _est(lines[i]["text"]) <= 25:
+            j = i + 1
+            while j < len(lines) and _est(lines[j]["text"]) <= 25 and \
+                    sum(_est(x["text"]) for x in group) + _est(lines[j]["text"]) <= 50 and \
+                    (_cfg.TALK_TOGETHER or len(group) < 2) and \
+                    (len(group) > 1 or lines[j]["speaker"] != group[0]["speaker"]):
+                group.append(lines[j])
+                j += 1
+        if len({x["speaker"] for x in group}) == 2:
+            shots.append({"make": "talk2", "lines": group})
+            i += len(group)
         else:
-            shots.append({"make": "longtalk", "lines": [l]})
+            shots.append({"make": "longtalk", "lines": [lines[i]]})
             i += 1
     return shots
 
@@ -1213,9 +1220,11 @@ async def _build(pid: str, row, config: dict, state: dict) -> str:
         for k, shot in enumerate(plan_shots(seg["lines"])):
             l = shot["lines"]
             if shot["make"] == "talk2":
-                length = _est(l[0]["text"]) + _est(l[1]["text"])
+                gap = 0.25
+                length = sum(_est(x["text"]) for x in l) + gap * (len(l) - 1)
+                second = next(x["speaker"] for x in l if x["speaker"] != l[0]["speaker"])
                 sid = editor.add_shot(
-                    project, scene_id, f"{names[l[0]['speaker']]} and {names[l[1]['speaker']]}",
+                    project, scene_id, f"{names[l[0]['speaker']]} and {names[second]}",
                     f"Two-shot at the podcast table: {a['name']} on the left and {b['name']} on "
                     "the right, facing each other mid-debate, studio microphones on boom arms, "
                     "natural gestures and reactions; the listener's attention moves with the speaker.",
@@ -1224,10 +1233,10 @@ async def _build(pid: str, row, config: dict, state: dict) -> str:
                 project = db.one("SELECT * FROM projects WHERE id=?", (project_id,))
                 editor.edit_shot(project, sid, opts={
                     "layout": "left_right" if l[0]["speaker"] == "A" else "right_left"})
-                editor.add_script(project, sid, l[0]["text"], refs[l[0]["speaker"]],
-                                  l[0]["delivery"], 0.1)
-                editor.add_script(project, sid, l[1]["text"], refs[l[1]["speaker"]],
-                                  l[1]["delivery"], 0.1 + _est(l[0]["text"]))
+                at = 0.1
+                for x in l:       # each line at its own moment; each host's lines are their track
+                    editor.add_script(project, sid, x["text"], refs[x["speaker"]], x["delivery"], at)
+                    at += _est(x["text"]) + gap
             else:
                 who = l[0]["speaker"]
                 sid = editor.add_shot(
