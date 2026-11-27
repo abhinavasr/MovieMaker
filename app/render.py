@@ -54,6 +54,7 @@ async def enqueue(project_id: str, only: set[str] | None = None, partial: bool =
         # clip yet, and the film is joined only once every shot has one.
         params["_partial"] = bool(partial)
         params["_wis_job"] = None
+        params.pop("_render_total", None)          # a new render counts from zero
         params.pop("_cancel", None)
         db.set_params(project_id, params)
     _cancelled.discard(project_id)
@@ -165,6 +166,17 @@ def request_cancel(project_id: str) -> bool:
 
 
 _polish_tasks: dict[str, asyncio.Task] = {}
+
+
+class _Turn(Exception):
+    """A production steps back so a waiting one gets the GPU for a shot (2026-11-27, the
+    person: "have the render worker take turns between productions, one shot each, instead
+    of finishing one production first" -- a 3-hour podcast render held up everyone's
+    20-second clip). Carries the shots this render still has to make."""
+
+    def __init__(self, remaining: list[str], done: int, total: int):
+        super().__init__("taking turns")
+        self.remaining, self.done, self.total = remaining, done, total
 
 
 def _check_cancelled(project_id: str) -> None:
@@ -507,6 +519,14 @@ async def _render_storyboard(project_id: str, project, report) -> tuple[Path, bo
         await report_shot(0, "submitting")
         clips.append(await _render_shot(project_id, shot, assets, params, report_shot))
         prev_clip = clips[-1]
+        _check_cancelled(project_id)       # a Stop during the shot wins over taking turns
+        if not _queue.empty():
+            # Another production is waiting: step back after this shot. The shots made so
+            # far keep their clips; the rest are made when it is this production's turn again.
+            later = [s["id"] for s in ordered[i + 1:] if only is None or s["id"] in only]
+            if later:
+                made = sum(1 for s in ordered[:i + 1] if only is None or s["id"] in only)
+                raise _Turn(later, made, made + len(later))
 
     _check_cancelled(project_id)
     if partial and missing:
@@ -603,6 +623,18 @@ async def _render(project_id: str) -> None:
                              message="done", output_path=str(out),
                              has_audio=1 if has_audio else 0)
         log.info("project %s rendered -> %s", project_id, out)
+    except _Turn as turn:
+        params = db.params_of(db.one("SELECT * FROM projects WHERE id=?", (project_id,)))
+        params["_render_only"] = turn.remaining          # also what recover() resumes
+        total = params.setdefault("_render_total", turn.total)   # the whole render, not this turn
+        db.set_params(project_id, params)
+        _only[project_id] = set(turn.remaining)
+        db.touch_project(project_id, status="queued",
+                         message=f"taking turns with other renders: {total - len(turn.remaining)} "
+                                 f"of {total} shots made, the rest follow")
+        _queue.put_nowait(project_id)
+        log.info("project %s steps back after %d of %d shots (another render waits)",
+                 project_id, total - len(turn.remaining), total)
     except asyncio.CancelledError:
         if _stopping and project_id not in _cancelled:
             # The app is restarting, not the person cancelling. Leave it 'running':
