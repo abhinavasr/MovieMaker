@@ -65,6 +65,11 @@ class Config:
     # on the CPU (num_gpu 0) so it never competes with renders for the card.
     OLLAMA_URL = _s("STUDIO_OLLAMA_URL", "http://host.docker.internal:11434").rstrip("/")
     PLANNER_MODEL = _s("STUDIO_PLANNER_MODEL", "qwen3.8:27b")
+    # Podcasts think on Qwen3.8-Flash-Next (llama.cpp via llama-swap, container `flashnext`):
+    # better answers than the 27B in the 2026-11-27 test, ~1.5-2x slower -- fine for a
+    # non-interactive pipeline; chats stay on the 27B. Empty = podcasts use the planner too.
+    PODCAST_LLM_URL = _s("STUDIO_PODCAST_LLM_URL", "http://flashnext:8080").rstrip("/")
+    PODCAST_LLM_MODEL = _s("STUDIO_PODCAST_LLM_MODEL", "flash-next")
     PLANNER_CTX = _i("STUDIO_PLANNER_CTX", 32768)
     EXECUTOR_MODEL = _s("STUDIO_EXECUTOR_MODEL", "qwen3.5:9b")
     EXECUTOR_CTX = _i("STUDIO_EXECUTOR_CTX", 16384)

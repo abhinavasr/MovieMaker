@@ -46,6 +46,29 @@ services:
   # bake-off in ~/mm-tts-bakeoff. Same /speak + /clone contract as `tts`;
   # app/speech.py sends Burmese clips here. Weights and the four preset voice
   # clips are in ./tts-models/voxcpm. Studio network only; no port.
+  # Qwen3.8-Flash-Next for the podcast pipeline (2026-11-27): llama.cpp started on demand by
+  # llama-swap; it holds no GPU memory until a podcast asks, and unloads when the podcast lets
+  # go of the card (POST /unload) or after 5 idle minutes. Studio network only; no port.
+  flashnext:
+    build: ./flashnext
+    image: studio-flashnext:latest
+    container_name: story-studio-flashnext
+    restart: unless-stopped
+    volumes:
+      - /home/abhinava/llm-models/qwen3.8-flash-next:/models:ro
+    networks:
+      - default
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+
   tts-my:
     build: ./tts-my
     image: studio-tts-my:latest

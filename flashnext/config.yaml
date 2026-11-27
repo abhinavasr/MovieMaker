@@ -1,0 +1,11 @@
+# Measured 2026-11-27 on the RTX 4090 (24 GB) + 62 GB RAM box: --n-cpu-moe 36 with 2048-token
+# batches fits in ~21 GB of VRAM; prompt reading ~900 tok/s, writing ~41 tok/s. The experts in
+# RAM are memory-mapped from the SSD (page cache), so other services keep their memory.
+healthCheckTimeout: 600
+models:
+  flash-next:
+    cmd: >
+      /app/llama-server --port ${PORT} --host 127.0.0.1
+      -m /models/UD-Q2_K_XL/Qwen3.8-Flash-Next-UD-Q2_K_XL-00001-of-00004.gguf
+      -ngl 99 --n-cpu-moe 36 -c 65536 -np 1 -fa on --jinja -t 16 -b 2048 -ub 2048
+    ttl: 300

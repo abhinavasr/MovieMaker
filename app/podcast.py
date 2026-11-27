@@ -257,6 +257,60 @@ def create(user: auth.User, body: dict, thread_id: str | None = None) -> str:
 
 # --------------------------------------------------------------------------- the model
 
+_flash_off_until = [0.0]
+
+
+async def _flash_llm(podcast_id: str, turn, messages: list, schema: dict, label: str,
+                     think: int, est: int) -> dict | None:
+    """One podcast model call on Qwen3.8-Flash-Next (llama-swap loads it on the first call of a
+    GPU turn, ~50 s; the 27B is unloaded first so the two never share the card)."""
+    import httpx
+    from app import agent
+    if not getattr(turn, "_flash_ready", False):
+        try:
+            await agent._ollama("/api/generate", {"model": cfg.PLANNER_MODEL, "keep_alive": 0},
+                                timeout=60)
+        except Exception:                                      # noqa: BLE001
+            pass
+        turn._flash_ready = True
+    for attempt in range(2):
+        _check(podcast_id)
+        await turn.renew()
+        t0 = time.monotonic()
+        body = {"model": cfg.PODCAST_LLM_MODEL, "messages": messages, "max_tokens": think,
+                "temperature": 0.5 if attempt == 0 else 0.75,
+                "response_format": {"type": "json_schema", "json_schema": {"name": "answer", "schema": schema}},
+                "chat_template_kwargs": {"enable_thinking": True}}
+        async with httpx.AsyncClient(timeout=httpx.Timeout(1800, connect=10)) as c:
+            r = await c.post(f"{cfg.PODCAST_LLM_URL}/v1/chat/completions", json=body)
+        r.raise_for_status()
+        res = r.json()
+        choice = (res.get("choices") or [{}])[0]
+        out = agent._parse_json((choice.get("message") or {}).get("content") or "")
+        tm = res.get("timings") or {}
+        log.info("podcast %s %s on Flash-Next: prompt ~%d tok, %.1fs, %s tokens (%.0f tok/s read, "
+                 "%.0f tok/s write), ok=%s", podcast_id, label, est, time.monotonic() - t0,
+                 tm.get("predicted_n"), tm.get("prompt_per_second") or 0,
+                 tm.get("predicted_per_second") or 0, isinstance(out, dict))
+        if isinstance(out, dict):
+            return out
+        if choice.get("finish_reason") == "length" and think < 32000:
+            think = min(32000, think * 2)
+    return None
+
+
+async def flash_unload() -> None:
+    """Give the card back: llama-swap stops the Flash-Next server."""
+    if not cfg.PODCAST_LLM_URL:
+        return
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=30) as c:
+            await c.get(f"{cfg.PODCAST_LLM_URL}/unload")
+    except Exception as exc:                                   # noqa: BLE001
+        log.warning("could not unload Flash-Next: %s", exc)
+
+
 async def _llm(podcast_id: str, turn, system: str, user: str, schema: dict, label: str,
                think: int = 8000) -> dict:
     from app import agent
@@ -264,6 +318,18 @@ async def _llm(podcast_id: str, turn, system: str, user: str, schema: dict, labe
     brief = show_brief(_config(row)) if row is not None and label != "showrunner" else ""
     messages = [{"role": "system", "content": brief + system}, {"role": "user", "content": user}]
     messages, ctx, est = agent._fit_window(messages, think)
+    if cfg.PODCAST_LLM_URL and time.monotonic() > _flash_off_until[0]:
+        try:
+            out = await _flash_llm(podcast_id, turn, messages, schema, label, think, est)
+            if out is not None:
+                return out
+        except Cancelled:
+            raise
+        except Exception as exc:                               # noqa: BLE001
+            # Never stop a podcast for this: the 27B takes over for the next 10 minutes.
+            _flash_off_until[0] = time.monotonic() + 600
+            log.warning("podcast %s %s: Flash-Next failed (%s); using %s", podcast_id, label,
+                        str(exc)[:200], cfg.PLANNER_MODEL)
     for attempt in range(3):
         _check(podcast_id)
         await turn.renew()
@@ -1494,6 +1560,8 @@ class _Turn:
     async def release(self):
         if self.turn is not None:
             t, self.turn = self.turn, None
+            if getattr(t, "_flash_ready", False):
+                await flash_unload()          # free the card before WIS or the 27B takes it
             await t.release()
 
 
