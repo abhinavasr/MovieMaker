@@ -618,3 +618,15 @@ body:has(.ed) footer, body:has(.ed) .retention-note { display: none; }
 .ed-lh.spk .nm { overflow: hidden; text-overflow: ellipsis; color: var(--ink); }
 .ed-lane.spk .ed-blk.dialogue { background: color-mix(in srgb, var(--spk) 28%, transparent); border-color: var(--spk); }
 .ed-blk.muted { opacity: .35; }
+
+/* Library mode (2026-11-27): the editor's reference tools, nothing else */
+.ed-libhead { display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap; padding: 10px 16px; border-bottom: 1px solid var(--line); font-size: .85rem; }
+.ed-libhead span { color: var(--muted); }
+.ed-library .ed-center, .ed-library .ed-right, .ed-library .ed-views, .ed-library #render-state,
+.ed-library #render-missing, .ed-library #export, .ed-library #ptitle, .ed-library #open-left,
+.ed-library .ed-left > section:not(:has(#refs)) { display: none !important; }
+.ed-library .ed-body { grid-template-columns: 1fr !important; }
+.ed-library .ed-left { width: 100% !important; max-width: none !important; display: block !important; position: static !important; transform: none !important; border-right: 0; }
+.ed-library .ed-refs { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 10px; }
+.ed.ed-library { grid-template-rows: auto auto minmax(0, 1fr); }
+.ed-library .ed-left { overflow: auto; height: 100%; }

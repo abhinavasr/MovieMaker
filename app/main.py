@@ -228,11 +228,22 @@ async def editor_list(request: Request):
               "updated": _iso(p["updated_at"]), "thumb": editor.first_picture(p["id"]),
               "shots": db.one("SELECT COUNT(*) AS n FROM shots WHERE project_id=?", (p["id"],))["n"]}
              for p in editor.productions_of(user)]
+    lib = editor.library_project(user, create=False)
     others = [p for p in db.query("SELECT id, title, updated_at FROM projects WHERE user_id=? AND "
                                   "mode='storyboard' ORDER BY updated_at DESC LIMIT 30", (user.id,))
-              if p["id"] not in {x["id"] for x in prods}]
+              if p["id"] not in {x["id"] for x in prods} and p["id"] != lib]
     return templates.TemplateResponse("editor_list.html", {
         "request": request, "user": user, "productions": prods, "others": others})
+
+
+@app.get("/library", response_class=HTMLResponse)
+async def library_page(request: Request):
+    """The person's Library: their characters, places, props, styles and voices for every
+    project, edited with the editor's own tools (library mode)."""
+    user = auth.current_user(request)
+    if user is None:
+        return RedirectResponse("/login?next=/library", status_code=303)
+    return RedirectResponse(f"/edit/{editor.library_project(user)}", status_code=303)
 
 
 @app.get("/edit/{project_id}", response_class=HTMLResponse)
@@ -240,6 +251,7 @@ async def editor_page(project_id: str, request: Request):
     user = _user(request)
     project = editor.production(user, project_id)
     return templates.TemplateResponse("editor.html", {
+        "library": editor.is_library(project),
         "request": request, "user": user, "project": project, "planner": cfg.PLANNER_MODEL,
         "executor": cfg.EXECUTOR_MODEL,
         "accept": ",".join(agentfiles.ACCEPT) + ",image/*,audio/*,video/*"})

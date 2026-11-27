@@ -1,9 +1,10 @@
 {% extends "base.html" %}
-{% block title %}{{ project.title }} · Editor · Story Studio{% endblock %}
+{% block title %}{% if library %}Library{% else %}{{ project.title }} · Editor{% endif %} · Story Studio{% endblock %}
 {% block body %}
 <link rel="stylesheet" href="/static/agent.css?v={{ asset_v }}">
 <link rel="stylesheet" href="/static/editor.css?v={{ asset_v }}">
-<div class="ed" id="ed" data-pid="{{ project.id }}">
+<div class="ed{% if library %} ed-library{% endif %}" id="ed" data-pid="{{ project.id }}"{% if library %} data-library="1"{% endif %}>
+  {% if library %}<div class="ed-libhead"><b>📚 Your Library</b><span>Characters, places, props, styles and voices for every project. Make them here (＋), or bring them in from your productions (⤓); in any production, ⤓ adds them from here, and 📚 in a character saves it here. Deleting a production never removes them.</span></div>{% endif %}
   <div class="ed-top">
     <button class="ed-btn ghost icon ed-only-narrow" id="open-left" type="button" aria-label="Scenes and references">☰</button>
     <input class="ed-title" id="ptitle" value="{{ project.title }}" aria-label="Production title" maxlength="120">

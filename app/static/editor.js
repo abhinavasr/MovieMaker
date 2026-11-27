@@ -417,10 +417,11 @@
       <div class="ed-row2" id="rf-voicerow" ${voiced(r?.kind || "character") ? "" : "hidden"}><label class="ed-field">…or a preset voice<select id="rf-speaker"><option value="">— their own designed voice —</option>${S.speakers.map((s) => `<option value="${esc(s)}" ${r?.speaker === s ? "selected" : ""}>${esc(voiceLabel(s))}</option>`).join("")}</select></label>
       <label class="ed-field">…or a voice sample to clone<div class="ed-drop" id="rf-voice">${r?.voice ? "🎙 sample saved — click to replace" : "5–30 s of clear speech"}</div><input type="file" id="rf-voicefile" accept="audio/*" hidden></label></div>
       ${r?.voice ? `<audio src="${esc(r.voice)}" controls style="width:100%"></audio>` : ""}
-      <div class="acts">${r ? `<button class="ed-btn danger" data-act="delete" style="margin-right:auto">Delete</button>` : ""}<button class="ed-btn ghost" data-act="close">Cancel</button><button class="ed-btn gold" data-act="save">Save</button></div>`,
+      <div class="acts">${r ? `<button class="ed-btn danger" data-act="delete" style="margin-right:auto">Delete</button>` : ""}${r && !ED.dataset.library ? `<button class="ed-btn" data-act="tolib" title="Keep a copy in your Library, to use in any project">📚 Save to library</button>` : ""}<button class="ed-btn ghost" data-act="close">Cancel</button><button class="ed-btn gold" data-act="save">Save</button></div>`,
     async (act) => {
       clearTimeout(polling);
       if (act === "delete") { if (!confirm(`Delete ${r.name}? Shots stop using it.`)) return false; await api(`/api/editor/${PID}/refs/${r.id}/delete`, {}); load(true); return true; }
+      if (act === "tolib") { await api(`/api/editor/${PID}/refs/${r.id}/to-library`, {}); toast(`${r.name} is in your Library`); return false; }
       if (act !== "save") return true;
       try { await saveRef(); toast("Saved"); load(true); return true; } catch (e) { toast(e.message); return false; }
     });

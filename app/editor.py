@@ -802,22 +802,71 @@ def resolve_ref(pid: str, v) -> str | None:
     return r["id"] if r else None
 
 
+def library_project(user, create: bool = True) -> str | None:
+    """The person's Library: a production of their own that holds characters, places, props,
+    styles and voices for every project. It is never listed with their productions and is
+    never deleted with them (2026-11-27, the person: "a character and reference library,
+    which can be built and used across projects"). The first one found is adopted (the
+    "Character library" made by hand that day)."""
+    uid = user if isinstance(user, str) else user.id
+    rows = db.query("SELECT * FROM projects WHERE user_id=? AND mode='storyboard' ORDER BY created_at",
+                    (uid,))
+    for r in rows:
+        if db.params_of(r).get("library"):
+            return r["id"]
+    for r in rows:
+        if (r["title"] or "").strip().lower() in ("character library", "library"):
+            # title first: save_settings writes the params it was given, so setting the flag
+            # before it lost the flag (2026-11-27 test)
+            db.run("UPDATE projects SET title='Library' WHERE id=?", (r["id"],))
+            p = db.params_of(db.one("SELECT * FROM projects WHERE id=?", (r["id"],)))
+            p["library"], p["editor"] = True, True
+            db.set_params(r["id"], p)
+            return r["id"]
+    if not create or isinstance(user, str):
+        return None
+    pid = create(user, "Library", "Your characters, places, props, styles and voices for every "
+                                  "project.", "16:9")
+    p = db.params_of(db.one("SELECT * FROM projects WHERE id=?", (pid,)))
+    p["library"] = True
+    db.set_params(pid, p)
+    return pid
+
+
+def is_library(project) -> bool:
+    return bool(db.params_of(project).get("library"))
+
+
+def save_to_library(project, user: auth.User, ref_id: str) -> str:
+    """Copy a reference from this production into the person's Library (look, views,
+    voice). The same name already there is updated, not doubled."""
+    lib = library_project(user)
+    if lib == project["id"]:
+        raise HTTPException(400, "this is already in your Library")
+    return import_ref(db.one("SELECT * FROM projects WHERE id=?", (lib,)), user, ref_id)
+
+
 def library(user, exclude_pid: str | None = None, query: str = "",
             limit: int = 60) -> list[dict]:
-    """The person's characters, places and voices from their other productions, newest
-    first, one per name and picture (2026-11-25, the person: "allow users see all their
-    previous characters ... and add them here for consistency across stories")."""
+    """The person's characters, places and voices: their Library first, then those in their
+    other productions, newest first, one per name and picture (2026-11-25, the person:
+    "allow users see all their previous characters ... and add them here for consistency
+    across stories")."""
     q = name_key(query)
+    uid = user if isinstance(user, str) else user.id
+    lib = library_project(uid, create=False)
     rows = db.query(
         "SELECT r.*, p.title AS production, p.updated_at AS p_updated FROM prod_refs r "
         "JOIN projects p ON p.id=r.project_id WHERE p.user_id=? AND p.id!=? "
-        "ORDER BY p.updated_at DESC, r.idx",
-        (user if isinstance(user, str) else user.id, exclude_pid or ""))
-    out, seen = [], set()
+        "ORDER BY CASE WHEN p.id=? THEN 0 ELSE 1 END, p.updated_at DESC, r.idx",
+        (uid, exclude_pid or "", lib or ""))
+    out, seen, in_lib = [], set(), set()
     for r in rows:
         k = (name_key(r["name"]), r["image_id"] or "", r["kind"])
-        if k in seen:
-            continue
+        if k in seen or (r["project_id"] != lib and (name_key(r["name"]), r["kind"]) in in_lib):
+            continue                     # the Library's version of a name wins
+        if r["project_id"] == lib:
+            in_lib.add((name_key(r["name"]), r["kind"]))
         if q and q not in name_key(r["name"]) and q not in name_key(r["description"] or ""):
             continue
         seen.add(k)
@@ -825,7 +874,8 @@ def library(user, exclude_pid: str | None = None, query: str = "",
                     "description": r["description"] or "", "image_id": r["image_id"],
                     "has_picture": bool(r["image_id"] and _img_done(r["image_id"])),
                     "voice": bool(r["voice_path"]) or bool(r["speaker"]),
-                    "production": r["production"]})
+                    "production": "Your Library" if r["project_id"] == lib else r["production"],
+                    "in_library": r["project_id"] == lib})
         if len(out) >= limit:
             break
     return out
@@ -4836,6 +4886,20 @@ async def _t_music(user, args, base):
     return {"clip_id": cid, "status": "composing (about a minute when the GPU is free)"}
 
 
+def _t_to_library(user, args):
+    project = _agent_project(user, args)
+    pid = project["id"]
+    kept, missing = [], []
+    for n in args.get("names") or []:
+        rid = resolve_ref(pid, str(n))
+        if rid:
+            save_to_library(project, user, rid)
+            kept.append(_ref(pid, rid)["name"])
+        else:
+            missing.append(str(n))
+    return {"kept_in_library": kept, **({"not_found": missing} if missing else {})}
+
+
 def _t_lines(user, args, base):
     """The script's lines onto existing shots, voiced automatically."""
     project = _agent_project(user, args)
@@ -5129,6 +5193,14 @@ AGENT_TOOLS = {
             "instrumental": {"type": "boolean"}, "lyrics": {"type": "string"},
             "use_in_video": {"type": "boolean", "description": "default false"}}},
         "description": "Score or ambience/sound effects on the timeline (ACE-Step)."},
+    "save_to_library": {
+        "handler": lambda user, args, base: _t_to_library(user, args),
+        "schema": {"type": "object", "required": ["project_id", "names"], "properties": {
+            **_PID, "names": {"type": "array", "items": {"type": "string"},
+                              "description": "characters / places / props / styles / voices to keep"}}},
+        "description": "Keep these in the person's Library (look, views, voice) to use in any "
+                       "project; the same name there is updated, not doubled. Only when the person "
+                       "asks to keep / save / reuse them."},
     "add_lines": {
         "handler": _t_lines, "light": True,
         "schema": {"type": "object", "required": ["project_id", "lines"], "properties": {
@@ -5194,9 +5266,10 @@ AGENT_TOOLS = {
         "handler": _t_my_characters, "light": True,
         "schema": {"type": "object", "required": ["project_id"], "properties": {
             **_PID, "query": {"type": "string", "description": "a name or words of a description"}}},
-        "description": "The person's characters, places and voices from their OTHER productions "
-                       "(name, description, picture, which production). Reuse one with add_ref "
-                       "{from_ref_id} to keep a character the same across stories."},
+        "description": "The person's characters, places and voices: their LIBRARY first "
+                       "(production \"Your Library\"), then those in their other productions "
+                       "(name, description, picture). Reuse one with add_ref {from_ref_id} to keep "
+                       "a character the same across stories; prefer the Library's version."},
     "export_film": {
         "handler": _t_export,
         "schema": {"type": "object", "required": ["project_id"], "properties": {**_PID}},
@@ -5815,6 +5888,16 @@ async def api_export_file(pid: str, request: Request, download: int = 0):
                         content_disposition_type="attachment" if download else "inline")
 
 
+@router.post("/api/editor/{pid}/refs/{rid}/to-library")
+async def api_ref_to_library(pid: str, rid: str, request: Request):
+    """Save this character / place / prop / style / voice into the person's Library."""
+    user = _user(request)
+    project = production(user, pid)
+    _ref(pid, rid)
+    new = save_to_library(project, user, rid)
+    return {"ok": True, "library_ref_id": new, "library_id": library_project(user)}
+
+
 @router.post("/api/editor/{pid}/delete")
 async def api_delete_production(pid: str, request: Request):
     """Delete the whole production: shots, clips, pictures in it, audio, scenes,
@@ -5822,6 +5905,8 @@ async def api_delete_production(pid: str, request: Request):
     from app import agent
     user = _user(request)
     project = service.owned_project(user, pid)
+    if is_library(project):
+        raise HTTPException(400, "your Library is kept for every project; delete its items one by one")
     # Stop its work first, as ■ Stop does: on 2026-11-24 a deleted production's place
     # views kept drawing in WIS (and held up the person's next production) because only
     # the rows were removed.
@@ -6016,7 +6101,7 @@ async def api_agent_thread(pid: str, request: Request):
 def productions_of(user: auth.User) -> list:
     rows = db.query("SELECT * FROM projects WHERE user_id=? AND mode='storyboard' "
                     "ORDER BY updated_at DESC LIMIT 100", (user.id,))
-    return [r for r in rows if db.params_of(r).get("editor")]
+    return [r for r in rows if db.params_of(r).get("editor") and not db.params_of(r).get("library")]
 
 
 def first_picture(pid: str) -> str | None:

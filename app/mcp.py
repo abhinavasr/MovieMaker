@@ -579,6 +579,20 @@ def _char_view(pid: str, r, base: str) -> dict:
     return out
 
 
+def _my_library(user, args, base):
+    from app import editor
+    items = editor.library(user, None, str(args.get("query") or ""), 60)
+    out = []
+    for x in items:
+        row = db.one("SELECT * FROM prod_refs WHERE id=?", (x["ref_id"],))
+        v = _char_view(row["project_id"], row, base) if row else {}
+        out.append({"from_ref_id": x["ref_id"], "kind": x["kind"], "name": x["name"],
+                    "in_library": x.get("in_library", False), "from": x["production"],
+                    "description": x["description"][:300],
+                    **({"picture_url": v["picture_url"]} if v.get("picture_url") else {})})
+    return {"library": out, "page_url": f"{base}/library"}
+
+
 def _list_characters(user, args, base):
     from app import editor
     project = _project(user, args)
@@ -1727,6 +1741,11 @@ TOOLS = [
                             "language": {"type": "string"},
                             "delivery": {"type": "string", "description": "e.g. calm and slow"}},
           ["voice_id", "text"]),
+    _tool("my_library", "My library",
+          "The person's Library of characters, places, props, styles and voices, kept for every "
+          "project (then those in their other productions): name, kind, description, picture. "
+          "Use one in a project with set_characters (same name) or add it by from_ref_id.",
+          _my_library, {"query": {"type": "string"}}, read_only=True),
     _tool("list_characters", "List characters",
           "Storyboard only. The project's characters, places, props (outfits, objects) and styles: "
           "description, picture (picture_url), what goes with them, their voice, and whether the "
