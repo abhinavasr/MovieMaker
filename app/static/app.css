@@ -1,13 +1,11 @@
+/* ONE theme for every screen (2026-11-27, the person: "every screen should follow the same
+   color theme"): the editor's -- always dark, like a grading suite, gold the one accent. */
 :root {
-  --bg: #0f1115; --panel: #171a21; --panel-2: #1e222b; --line: #2a2f3a;
-  --ink: #e8eaf0; --muted: #98a0b3; --accent: #6ea8fe; --accent-ink: #0b1220;
-  --ok: #4ade80; --warn: #fbbf24; --bad: #f87171; --radius: 12px;
-}
-@media (prefers-color-scheme: light) {
-  :root {
-    --bg: #f6f7f9; --panel: #ffffff; --panel-2: #f1f3f7; --line: #dfe3ea;
-    --ink: #161a22; --muted: #5d6675; --accent: #2563eb; --accent-ink: #ffffff;
-  }
+  --bg: #0c0d0f; --panel: #141519; --panel-2: #1b1d22; --panel-3: #23262c; --line: #2a2d34;
+  --ink: #ece7df; --muted: #9b968d; --faint: #6f6b64;
+  --accent: #e3a54a; --accent-ink: #1a1206; --gold: #e3a54a; --gold-2: #f0bf6a;
+  --ok: #6fcf8f; --warn: #e8b64c; --bad: #ef6f6c; --radius: 12px;
+  color-scheme: dark;
 }
 * { box-sizing: border-box; }
 body {
@@ -25,7 +23,7 @@ code { background: var(--panel-2); padding: 1px 6px; border-radius: 6px; font-si
 
 .top {
   display: flex; align-items: center; justify-content: space-between; gap: 16px;
-  padding: 12px 20px; background: var(--panel); border-bottom: 1px solid var(--line);
+  padding: 12px 20px; background: #101114; border-bottom: 1px solid var(--line);
 }
 .brand { font-weight: 650; text-decoration: none; color: var(--ink); }
 .top nav { display: flex; align-items: center; gap: 16px; font-size: .9rem; }
@@ -223,13 +221,9 @@ details.more[open] summary { margin-bottom: 12px; }
 .recorder .hint { margin: 0; }
 
 /* retention: everything is deleted after STUDIO_RETENTION_DAYS; say so everywhere */
-.retention-note { background: #fff7e0; color: #5c4400; border-bottom: 1px solid #f0dca0;
+.retention-note { background: #2a2312; color: #f0d9a8; border-bottom: 1px solid #4a3c1a;
   padding: 6px 16px; font-size: .85rem; text-align: center; }
-.expiring { color: #b3261e; font-weight: 600; }
-@media (prefers-color-scheme: dark) {
-  .retention-note { background: #3a2f10; color: #f5dc9a; border-color: #5c4a18; }
-  .expiring { color: #ff8a80; }
-}
+.expiring { color: var(--bad); font-weight: 600; }
 .consent { align-items: flex-start; gap: 8px; line-height: 1.4; }
 .consent input { margin-top: 3px; }
 progress { width: 100%; max-width: 420px; height: 10px; vertical-align: middle; }
@@ -254,7 +248,7 @@ progress { width: 100%; max-width: 420px; height: 10px; vertical-align: middle; 
 .bt-login { display: block; text-align: center; margin: 6px 0 8px; }
 .muted.or { display: flex; align-items: center; gap: 10px; margin: 16px 0 6px; }
 .muted.or::before, .muted.or::after { content: ""; flex: 1; border-top: 1px solid var(--line, #333); }
-.top nav a[aria-current="page"] { color: var(--ink, #fff); font-weight: 700; text-decoration: underline; text-underline-offset: 6px; }
+.top nav a[aria-current="page"] { color: var(--gold-2); font-weight: 700; text-decoration: underline; text-underline-offset: 6px; }
 /* Audio: the use-case tabs and hub (2026-11-27) */
 .au-tabs { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 18px; }
 .au-tabs a { text-decoration: none; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 5px 12px; font-size: .86rem; }
