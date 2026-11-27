@@ -224,7 +224,8 @@ def _jl(text, default):
 # Every edit goes through these, whether the person made it on the page, an
 # applied proposal made it, or the assistant made it directly.
 
-def create(user: auth.User, title: str, story: str = "", aspect: str = "9:16") -> str:
+def create(user: auth.User, title: str, story: str = "", aspect: str = "9:16",
+           fmt: str | None = None, answers: dict | None = None) -> str:
     pid = service.create_project(user, (title or "Untitled production")[:120], "storyboard",
                                  story or "")
     project = db.one("SELECT * FROM projects WHERE id=?", (pid,))
@@ -235,6 +236,11 @@ def create(user: auth.User, title: str, story: str = "", aspect: str = "9:16") -
     # (34 and 19 minutes in the first real session) and plans built on unapplied batches
     # went wrong; the person asked to minimise their involvement.
     params["agent_applies"] = True
+    from app import formats
+    if formats.get(fmt):
+        params["format"] = fmt                   # the template chosen in the New production form
+        params["format_answers"] = {k: v for k, v in (answers or {}).items()
+                                    if isinstance(v, (str, int, float))}
     db.set_params(pid, params)
     set_aspect(db.one("SELECT * FROM projects WHERE id=?", (pid,)), aspect)
     _new_scene(pid, "Scene 1", "", 0)
@@ -2024,6 +2030,69 @@ async def picture_options(project, user: auth.User, shot_id: str, prompt: str = 
     return ids
 
 
+async def fixed_camera(project, user: auth.User, shot) -> str | None:
+    """Fixed cameras (a template's set-ups, e.g. a podcast's two-shot and one close-up per
+    host): every shot on the same camera shows the SAME approved frame, and a close-up is cut
+    out of the approved two-shot rather than drawn (2026-11-27, the person: "we are not good
+    with character consistency" -- a reused frame or a crop cannot drift).
+    Returns "assigned" (the shot has its picture), "wait" (its source frame is not drawn yet)
+    or None (draw it the usual way: this is the camera's first frame)."""
+    pid = project["id"]
+    cam = _jl(shot["opts"], {}).get("camera")
+    if not cam:
+        return None
+    def frame_of(camera):
+        for s in ordered_shots(pid):
+            if s["id"] != shot["id"] and s["asset_id"] and _jl(s["opts"], {}).get("camera") == camera:
+                a = db.one("SELECT id, path FROM assets WHERE id=?", (s["asset_id"],))
+                if a and a["path"] and Path(a["path"]).exists():
+                    return a
+        return None
+    same = frame_of(cam)
+    if same:
+        db.run("UPDATE shots SET asset_id=?, status=CASE WHEN status='done' THEN 'stale' ELSE "
+               "status END WHERE id=?", (same["id"], shot["id"]))
+        _drop_unused_asset(pid, shot["asset_id"])
+        _touch(pid)
+        return "assigned"
+    if cam == "2S":
+        return None                                    # the two-shot itself is drawn
+    if not any(_jl(s["opts"], {}).get("camera") == "2S" for s in ordered_shots(pid)):
+        return None                                    # no two-shot to cut from: draw it
+    master = frame_of("2S")
+    if master is None:
+        return "wait"
+    ref = db.one("SELECT * FROM prod_refs WHERE id=? AND project_id=?", (cam, pid))
+    if ref is None:
+        return None
+    from app import shotpics
+    # Which side they sit on: the two-shots' layout (speaker order) says so.
+    side = "left"
+    for s in ordered_shots(pid):
+        o = _jl(s["opts"], {})
+        if o.get("camera") == "2S" and o.get("left"):
+            side = "left" if o["left"] == cam else "right"
+            break
+    people = [(r["name"], (r["description"] or "")[:160]) for r in
+              db.query("SELECT name, description FROM prod_refs WHERE project_id=? AND "
+                       "kind='character' ORDER BY idx", (pid,))][:4]
+    heads = {}
+    try:
+        if people:
+            heads = await shotpics.locate_heads(master["path"], people)
+    except Exception as exc:                           # noqa: BLE001
+        log.warning("locating heads for %s: %s", shot["id"], exc)
+    raw = shotpics.punch_in(master["path"], heads.get(ref["name"]), side)
+    asset_id = _store_picture(pid, f"punch-in-{ref['name'][:40]}.png", raw)
+    db.run("UPDATE shots SET asset_id=?, status=CASE WHEN status='done' THEN 'stale' ELSE "
+           "status END WHERE id=?", (asset_id, shot["id"]))
+    _drop_unused_asset(pid, shot["asset_id"])
+    _touch(pid)
+    log.info("picture for %s: %s's close-up cut from the two-shot (%s)", shot["id"], ref["name"],
+             "head found" if ref["name"] in heads else f"{side} side")
+    return "assigned"
+
+
 def setup_key(pid: str, shot, plan: dict | None, text: str) -> str:
     """A camera set-up: the framing, who is in the frame and where. Shots that share one are
     the same camera on the same people (a podcast's two-shot, a host's close-up)."""
@@ -2672,6 +2741,14 @@ async def _run_auto_shots() -> None:
                     j.pop("waiting_for", None)
                 if j["stage"] == "picture" and shot["asset_id"]:
                     j["stage"] = "render"                  # the person set one meanwhile
+                elif j["stage"] == "picture" and not j.get("images") and \
+                        (cam := await fixed_camera(proj, user, shot)) is not None:
+                    # A fixed camera: the same frame as its camera's other shots, or a close-up
+                    # cut from the two-shot -- nothing new is drawn.
+                    if cam == "wait":
+                        keep.append(j)
+                        continue
+                    j["stage"] = "render"
                 elif j["stage"] == "picture" and not j.get("images"):
                     key = setup_key(pid, shot, _sp.cached(pid, shot), shot["prompt"] or "")
                     if first_of.get(key) not in (None, shot["id"]) and \
@@ -2929,6 +3006,15 @@ def _clean_opts(pid: str, o: dict) -> dict:
         out["speakers"] = sp
     if o.get("layout") in ("left_right", "right_left"):
         out["layout"] = o["layout"]
+    # Fixed cameras (templates): "2S" = the shared two-shot, or a character's id = that
+    # character's close-up cut from it; `left` = who sits on the left of the two-shot.
+    cam = o.get("camera")
+    if cam == "2S" or (isinstance(cam, str) and db.one(
+            "SELECT 1 FROM prod_refs WHERE id=? AND project_id=? AND kind='character'", (cam, pid))):
+        out["camera"] = cam
+    if isinstance(o.get("left"), str) and db.one(
+            "SELECT 1 FROM prod_refs WHERE id=? AND project_id=?", (o["left"], pid)):
+        out["left"] = o["left"]
     cast = []
     for c in (o.get("cast") or [])[:3]:
         if isinstance(c, dict) and c.get("ref") and db.one(
@@ -3426,6 +3512,13 @@ def perform_payload(project_id: str, shot, image_path: str | None, params: dict)
     if shot.get("make") == "talk2" and cfg.TALK_TOGETHER:
         row = db.one("SELECT * FROM shots WHERE id=?", (shot["id"],))
         tracks = {k: v for k, v in character_tracks(pid, row).items() if k}
+        if len(tracks) == 1 and image_path:
+            # One host talks in the two-shot (a podcast's wide on a single turn): the other
+            # still sits in the frame, so they get a silent track -- they listen, lips still.
+            others = [r for r in _shot_ref_ids(row) if r not in tracks and
+                      (db.one("SELECT kind FROM prod_refs WHERE id=?", (r,)) or {}).get("kind") == "character"]
+            if others:
+                tracks[others[0]] = []
         if len(tracks) >= 2 and image_path:
             # Each character's own lines, at their moments, silence elsewhere, as long as the
             # shot -- speaker 1 is whoever speaks first; opts.layout says which side they sit.
@@ -3445,7 +3538,11 @@ def perform_payload(project_id: str, shot, image_path: str | None, params: dict)
                                          "mime": "audio/wav"} for r in first_two],
                     "seconds": round(length, 2),
                     "speaker_mode": "together",
-                    "speaker_layout": opts.get("layout", "left_right")}
+                    # Speaker 1 = the first track; opts.left = who sits on the left (fixed
+                    # cameras), else the shot's own layout.
+                    "speaker_layout": (("left_right" if first_two[0] == opts["left"] else "right_left")
+                                       if opts.get("left") in first_two else
+                                       opts.get("layout", "left_right"))}
     if shot.get("make") in TALK_MAKES:
         voices = _speaker_audio(pid, db.one("SELECT * FROM shots WHERE id=?", (shot["id"],)))
         need = 2 if shot["make"] == "talk2" else 1
@@ -3648,6 +3745,15 @@ def _window(lines: list, start: float, length: float) -> bytes:
                      f"asetpts=PTS-STARTPTS,aresample=44100,aformat=channel_layouts=mono,"
                      f"adelay={int((a - start) * 1000)}:all=1[p{len(parts)}]")
     n = len(parts)
+    if n == 0:
+        # A silent track as long as the shot (a listener in a two-shot).
+        proc = subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i",
+                               f"anullsrc=r=44100:cl=mono", "-t", f"{length:.3f}",
+                               "-f", "wav", "pipe:1"], capture_output=True, timeout=60)
+        if proc.returncode != 0 or not proc.stdout:
+            raise RuntimeError("could not make a silent track: " +
+                               proc.stderr.decode(errors="replace")[-300:])
+        return proc.stdout
     graph = ";".join(parts) + ";" + "".join(f"[p{i}]" for i in range(n)) + \
         (f"amix=inputs={n}:normalize=0," if n > 1 else "anull,") + \
         f"apad=whole_dur={length:.3f},atrim=duration={length:.3f}[out]"
@@ -4461,8 +4567,15 @@ def describe_for_agent(project_id: str, focus_shot: str | None = None, compact: 
              f"{', rendered 16:9 and cropped to scope: keep action in the middle band' if aspect_of(params) == '2.39:1' else ''}"
              f", render: {project['status']} "
              f"{project['progress']}% {project['message'] or ''})",
-             _now_line(project_id, project),
-             _story_for_agent(project["story"])]
+             _now_line(project_id, project)]
+    # The production's template (chosen in the New production form): the basics of this kind
+    # of production, before the story (2026-11-27, the person: "give the basics to the local
+    # agent to begin with").
+    from app import formats
+    fb = formats.brief(params.get("format"), params.get("format_answers"))
+    if fb:
+        lines.append(fb)
+    lines.append(_story_for_agent(project["story"]))
     refs = db.query("SELECT * FROM prod_refs WHERE project_id=? ORDER BY idx", (project_id,))
     if refs:
         lines.append("References:")
@@ -4823,6 +4936,12 @@ async def _t_draw(user, args, base):
         # 2026-11-26: asked to fix inconsistent characters, the assistant had no way to redraw.
         pid = project["id"]
         want = args.get("shot_ids") or [s["id"] for s in ordered_shots(pid) if s["asset_id"]]
+        # Fixed cameras share one frame (close-ups are cut from the two-shot): redrawing any of
+        # them redraws the whole set, or the rest would hand the old frame straight back.
+        if any(_jl(s["opts"], {}).get("camera") for s in ordered_shots(pid) if s["id"] in want):
+            want = list(dict.fromkeys(list(want) + [s["id"] for s in ordered_shots(pid)
+                                                    if _jl(s["opts"], {}).get("camera")]))
+            args = {**args, "shot_ids": want}
         for sid in want:
             sh = db.one("SELECT id FROM shots WHERE id=? AND project_id=?", (sid, pid))
             if sh is None:
@@ -5303,8 +5422,13 @@ async def _body(request: Request) -> dict:
 async def api_create(request: Request):
     user = _user(request)
     b = await _body(request)
+    from app import formats
+    fmt = str(b.get("format") or "")
+    if fmt and not (formats.get(fmt) or {}).get("live"):
+        raise HTTPException(400, "that kind of production is not available yet")
     pid = create(user, str(b.get("title") or "Untitled production"), str(b.get("story") or ""),
-                 str(b.get("aspect") or b.get("orientation") or "9:16"))
+                 str(b.get("aspect") or b.get("orientation") or "9:16"),
+                 fmt or None, b.get("answers") if isinstance(b.get("answers"), dict) else None)
     return {"id": pid}
 
 

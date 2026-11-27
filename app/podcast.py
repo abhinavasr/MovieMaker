@@ -219,6 +219,7 @@ def _clean_config(body: dict) -> dict:
         "review": review,
         "auto_sides": bool(auto_sides),
         "names_given": bool(names_given),
+        "kind": str(body.get("kind") or "") if str(body.get("kind") or "") in FORMATS else "",
     }
 
 
@@ -482,6 +483,7 @@ async def _showrunner(pid, turn, config, state):
         "(gender, age, accent, manner) -- one woman and one man, with backgrounds that suit the "
         "topic, never stereotypes.\nReturn JSON only.",
         f"Topic, in the person's words: {config['topic']}\n"
+        + (f"The person chose the format: {config['kind']}.\n" if config.get("kind") else "")
         + (f"Focus: {config['focus']}\n" if config["focus"] else "")
         + (f"Length: about {config['minutes']:g} minutes. Language: {config['language']}.\n")
         + (f"The person already chose the hosts; keep them exactly (format debate):\n"
@@ -493,6 +495,8 @@ async def _showrunner(pid, turn, config, state):
     fmt = out.get("format") if out.get("format") in FORMATS else "debate"
     if given:
         fmt = "debate"
+    if config.get("kind") in FORMATS:
+        fmt = config["kind"]           # the person picked it in the New production form
     clean = lambda v, n: " ".join(str(v or "").split())[:n]
     show = {"format": fmt, "why": clean(out.get("why_format"), 300),
             "question": clean(out.get("question"), 300) or config["topic"][:300],
@@ -1096,29 +1100,48 @@ def _est(text: str) -> float:
     return len(text.split()) / WORDS_PER_S + 0.4
 
 
+# How a real multicam podcast is cut (research 2026-11-27: Spotify for Creators, Finchley,
+# OBSBOT, Descript; the person: "if the dialogue is for 1 person then it should be only 1
+# person with camera focus ... think of how a real interview will often be recorded").
+SINGLE_MIN_S = 6.0      # a turn this long goes to the speaker's close-up
+TWO_SHOT_MAX_S = 20.0   # a run of quick lines on the wide, at most this long
+WIDE_EVERY_S = 50.0     # come back to the wide at least this often
+SINGLE_MAX_S = 40.0     # one close-up shot holds at most this much of one host
+
+
 def plan_shots(lines: list[dict]) -> list[dict]:
-    """Group a segment's lines into InfiniteTalk shots. A back-and-forth (lines of up to ~25 s,
-    together up to ~50 s) is one `talk2` shot of both hosts -- each host's own track drives
-    their own face, so it can hold A, B, A... (2026-11-27); a long turn is a `longtalk`
-    close-up of the speaker."""
-    from app.config import cfg as _cfg
-    shots, i = [], 0
+    """One segment's lines as shots on three fixed cameras: "2S" (both hosts) and one close-up
+    per host ("A"/"B"). The segment opens on the wide; a quick back-and-forth stays on the wide;
+    a turn of SINGLE_MIN_S or more cuts to the speaker alone; the wide comes back at least every
+    WIDE_EVERY_S. Shots are only as long as their lines.
+    -> [{"camera": "2S"|"A"|"B", "lines": [...]}]"""
+    shots: list[dict] = []
+    since_wide = WIDE_EVERY_S                  # forces the opening wide
+    i = 0
     while i < len(lines):
-        group = [lines[i]]
-        if _est(lines[i]["text"]) <= 25:
+        line = lines[i]
+        t = _est(line["text"])
+        wide_due = since_wide >= WIDE_EVERY_S
+        if t < SINGLE_MIN_S or wide_due:
+            group, total = [line], t
             j = i + 1
-            while j < len(lines) and _est(lines[j]["text"]) <= 25 and \
-                    sum(_est(x["text"]) for x in group) + _est(lines[j]["text"]) <= 50 and \
-                    (_cfg.TALK_TOGETHER or len(group) < 2) and \
-                    (len(group) > 1 or lines[j]["speaker"] != group[0]["speaker"]):
+            while j < len(lines) and _est(lines[j]["text"]) < SINGLE_MIN_S and \
+                    total + _est(lines[j]["text"]) <= TWO_SHOT_MAX_S:
                 group.append(lines[j])
+                total += _est(lines[j]["text"])
                 j += 1
-        if len({x["speaker"] for x in group}) == 2:
-            shots.append({"make": "talk2", "lines": group})
-            i += len(group)
+            shots.append({"camera": "2S", "lines": group})
+            since_wide = 0.0
+            i = j
+            continue
+        last = shots[-1] if shots else None
+        if last and last["camera"] == line["speaker"] and \
+                sum(_est(x["text"]) for x in last["lines"]) + t <= SINGLE_MAX_S:
+            last["lines"].append(line)          # the same host goes on: same shot
         else:
-            shots.append({"make": "longtalk", "lines": [lines[i]]})
-            i += 1
+            shots.append({"camera": line["speaker"], "lines": [line]})
+        since_wide += t
+        i += 1
     return shots
 
 
@@ -1170,7 +1193,8 @@ async def _build(pid: str, row, config: dict, state: dict) -> str:
     if project_id and db.one("SELECT 1 FROM shots WHERE project_id=?", (project_id,)):
         return project_id                                      # built before a restart
     if not project_id:
-        project_id = editor.create(user, title, "", config["aspect"])
+        project_id = editor.create(user, title, "", config["aspect"], "podcast",
+                                   {"kind": (config.get("show") or {}).get("format") or config.get("kind") or "", "minutes": config["minutes"]})
         _set(pid, project_id=project_id, title=title)
     project = db.one("SELECT * FROM projects WHERE id=?", (project_id,))
     editor.set_story(project, title=title, story=_story(config, state, title))
@@ -1211,43 +1235,51 @@ async def _build(pid: str, row, config: dict, state: dict) -> str:
             scene_id = editor.add_scene(project, seg["title"], summary, None, everyone)
         project = db.one("SELECT * FROM projects WHERE id=?", (project_id,))
         if n == 0:
-            editor.add_shot(project, scene_id, "The studio",
-                            f"Slow push-in on the podcast studio: {a['name']} on the left and "
-                            f"{b['name']} on the right settle in at the table, adjust their "
-                            "microphones and smile; warm light, a quiet moment before they begin.",
-                            4, "WS", everyone, "animate", None, None, user)
+            # The opening: the wide (the same frame as every two-shot), a quiet moment.
+            sid = editor.add_shot(project, scene_id, "The studio",
+                                  f"{a['name']} on the left and {b['name']} on the right at the "
+                                  "podcast table settle in and smile; calm, a slow push-in.",
+                                  4, "2S", everyone, "animate", None, None, user)
             project = db.one("SELECT * FROM projects WHERE id=?", (project_id,))
-        for k, shot in enumerate(plan_shots(seg["lines"])):
+            editor.edit_shot(project, sid, opts={"camera": "2S", "left": refs["A"]})
+            project = db.one("SELECT * FROM projects WHERE id=?", (project_id,))
+        gap = 0.25
+        for shot in plan_shots(seg["lines"]):
             l = shot["lines"]
-            if shot["make"] == "talk2":
-                gap = 0.25
-                length = sum(_est(x["text"]) for x in l) + gap * (len(l) - 1)
-                second = next(x["speaker"] for x in l if x["speaker"] != l[0]["speaker"])
+            length = sum(_est(x["text"]) for x in l) + gap * (len(l) - 1)
+            if shot["camera"] == "2S":
+                speakers = []
+                for x in l:
+                    if x["speaker"] not in speakers:
+                        speakers.append(x["speaker"])
+                label = " and ".join(names[k] for k in speakers) if len(speakers) > 1 else \
+                    f"{names[speakers[0]]} (wide)"
                 sid = editor.add_shot(
-                    project, scene_id, f"{names[l[0]['speaker']]} and {names[second]}",
+                    project, scene_id, label,
                     f"Two-shot at the podcast table: {a['name']} on the left and {b['name']} on "
-                    "the right, facing each other mid-debate, studio microphones on boom arms, "
-                    "seated and calm, hands resting, small nods, looking at each other; static camera.",
+                    "the right, facing each other, studio microphones on boom arms, seated and "
+                    "calm, hands resting, small nods, looking at each other; static camera.",
                     min(cfg.TALK_MAX_SECONDS, math.ceil(length + 1.2)), "2S",
                     everyone, "talk2", None, None, user)
-                project = db.one("SELECT * FROM projects WHERE id=?", (project_id,))
-                editor.edit_shot(project, sid, opts={
-                    "layout": "left_right" if l[0]["speaker"] == "A" else "right_left"})
-                at = 0.1
-                for x in l:       # each line at its own moment; each host's lines are their track
-                    editor.add_script(project, sid, x["text"], refs[x["speaker"]], x["delivery"], at)
-                    at += _est(x["text"]) + gap
+                opts = {"camera": "2S", "left": refs["A"],
+                        "layout": "left_right" if speakers[0] == "A" else "right_left"}
             else:
-                who = l[0]["speaker"]
+                who = shot["camera"]
                 sid = editor.add_shot(
                     project, scene_id, names[who],
-                    f"Medium close-up of {names[who]} ({looks[who]}) speaking into a studio "
-                    "microphone at the podcast table, expressive and engaged, natural hand "
-                    "gestures, the studio softly blurred behind.",
-                    min(cfg.TALK_MAX_SECONDS, math.ceil(_est(l[0]["text"]) + 1.2)), "MCU",
+                    f"Medium close-up of {names[who]} ({looks[who]}) at the podcast table, "
+                    "speaking into a studio microphone, calm and engaged, hands resting, the "
+                    "studio softly blurred behind; static camera.",
+                    min(cfg.TALK_MAX_SECONDS, math.ceil(length + 1.2)), "MCU",
                     [refs[who], studio], "longtalk", None, None, user)
-                project = db.one("SELECT * FROM projects WHERE id=?", (project_id,))
-                editor.add_script(project, sid, l[0]["text"], refs[who], l[0]["delivery"], 0.1)
+                opts = {"camera": refs[who]}
+            project = db.one("SELECT * FROM projects WHERE id=?", (project_id,))
+            editor.edit_shot(project, sid, opts=opts)
+            project = db.one("SELECT * FROM projects WHERE id=?", (project_id,))
+            at = 0.1
+            for x in l:       # each line at its own moment; each host's lines are their track
+                editor.add_script(project, sid, x["text"], refs[x["speaker"]], x["delivery"], at)
+                at += _est(x["text"]) + gap
             project = db.one("SELECT * FROM projects WHERE id=?", (project_id,))
     # The hosts' and the studio's pictures, for the person to choose (characters first).
     for rid in (refs["A"], refs["B"], studio):

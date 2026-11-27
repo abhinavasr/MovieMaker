@@ -12,14 +12,38 @@
 
   <form class="el-new" id="new">
     <h2>New production</h2>
-    <input name="title" required maxlength="120" placeholder="Title — e.g. Ramayana" aria-label="Title">
-    <textarea name="story" rows="4" placeholder="The story, in a few lines or a few pages. You can also leave it empty and develop it with the assistant." aria-label="Story"></textarea>
-    <div class="el-row">
-      <label class="el-seg"><input type="radio" name="aspect" value="9:16" checked><span>▯ 9:16 vertical</span></label>
-      <label class="el-seg"><input type="radio" name="aspect" value="16:9"><span>▭ 16:9 widescreen</span></label>
-      <label class="el-seg"><input type="radio" name="aspect" value="1:1"><span>□ 1:1 square</span></label>
-      <label class="el-seg"><input type="radio" name="aspect" value="2.39:1" title="Rendered 16:9, cropped to scope on export"><span>▬ 2.39:1 cinema</span></label>
-      <button class="ed-btn gold" type="submit">Create and open →</button>
+    <span class="el-q">What are you making?</span>
+    <div class="el-fmts" role="radiogroup" aria-label="What are you making?">
+      {% for f in formats %}
+      <button type="button" class="el-fmt{{ ' on' if f.key == 'free' else '' }}" role="radio"
+        aria-checked="{{ 'true' if f.key == 'free' else 'false' }}" data-fmt="{{ f.key }}"
+        {% if not f.live %}disabled title="Coming soon"{% endif %}>
+        <span class="i">{{ f.icon }}</span><b>{{ f.name }}</b><small>{{ f.tagline if f.live else 'coming soon' }}</small>
+      </button>
+      {% endfor %}
+    </div>
+
+    <label class="el-q" for="idea" id="ask">What's the story?</label>
+    <textarea id="idea" name="story" rows="3" maxlength="20000"></textarea>
+    <div id="picks" class="el-picks"></div>
+
+    <details class="el-more" id="more"><summary>More options</summary>
+      <div class="el-more-body">
+        <input name="title" maxlength="120" placeholder="Title (optional — e.g. Ramayana)" aria-label="Title">
+        <div class="el-row" id="aspects">
+          <label class="el-seg"><input type="radio" name="aspect" value="9:16" checked><span>▯ 9:16 vertical</span></label>
+          <label class="el-seg"><input type="radio" name="aspect" value="16:9"><span>▭ 16:9 widescreen</span></label>
+          <label class="el-seg"><input type="radio" name="aspect" value="1:1"><span>□ 1:1 square</span></label>
+          <label class="el-seg"><input type="radio" name="aspect" value="2.39:1" title="Rendered 16:9, cropped to scope on export"><span>▬ 2.39:1 cinema</span></label>
+        </div>
+        <label class="el-lang" id="lang-row">Language
+          <select name="language">{% for l in ["English", "Hindi", "Spanish", "French", "German", "Portuguese", "Japanese", "Chinese"] %}<option>{{ l }}</option>{% endfor %}</select></label>
+      </div>
+    </details>
+
+    <div class="el-row el-go">
+      <span class="muted" id="hint"></span>
+      <button class="ed-btn gold" type="submit" id="go">Create and open →</button>
     </div>
   </form>
 
@@ -53,14 +77,80 @@ document.querySelectorAll("[data-del]").forEach((b) => b.addEventListener("click
   const r = await fetch(`/api/editor/${card.dataset.id}/delete`, {method: "POST"});
   if (r.ok) card.remove(); else alert((await r.json().catch(() => ({}))).error || "could not delete");
 }));
-document.getElementById("new").addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const f = new FormData(e.target);
-  const r = await fetch("/api/editor", {method: "POST", headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({title: f.get("title"), story: f.get("story"), aspect: f.get("aspect")})});
-  const d = await r.json();
-  if (!r.ok) { alert(d.error || "could not create"); return; }
-  location.href = "/edit/" + d.id;
-});
+(() => {
+  const FORMATS = {{ formats|tojson }}, LIB = {{ lib_hosts|tojson }};
+  const f = document.getElementById("new"), idea = document.getElementById("idea");
+  const picksBox = document.getElementById("picks"), hint = document.getElementById("hint");
+  const HINTS = {podcast: "Researched on the web, fact-checked and written, then it opens in the editor.",
+                 free: "Opens in the editor; the assistant helps you write and build it."};
+  let fmt = "free", answers = {};
+  const esc = (t) => String(t).replace(/[&<>"]/g, (c) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
+  function pickRow(p) {
+    let opts = p.options.slice();
+    if (p.library) LIB.forEach((n) => opts.push([n, n]));
+    const multi = !!p.library;
+    return `<div class="el-pick" data-key="${p.key}" data-multi="${multi ? 1 : ""}"><span>${esc(p.label)}</span><div class="chips">` +
+      opts.map(([v, l]) => `<button type="button" class="chip${String(v) === String(p.default) ? " on" : ""}" data-v="${esc(v)}">${esc(l)}</button>`).join("") +
+      (multi && LIB.length ? `<small class="muted">or pick two of your characters</small>` : "") + `</div></div>`;
+  }
+  function choose(key) {
+    const F = FORMATS.find((x) => x.key === key);
+    if (!F || !F.live) return;
+    fmt = key; answers = {};
+    document.querySelectorAll(".el-fmt").forEach((b) => { const on = b.dataset.fmt === key; b.classList.toggle("on", on); b.setAttribute("aria-checked", on); });
+    document.getElementById("ask").textContent = F.ask;
+    idea.placeholder = F.placeholder;
+    F.picks.forEach((p) => { answers[p.key] = p.default; });
+    picksBox.innerHTML = F.picks.map(pickRow).join("");
+    const a = f.querySelector(`input[name=aspect][value="${F.aspect}"]`); if (a) a.checked = true;
+    document.getElementById("lang-row").hidden = !(F.more || []).includes("language");
+    hint.textContent = HINTS[key] || "";
+  }
+  document.querySelectorAll(".el-fmt").forEach((b) => b.addEventListener("click", () => choose(b.dataset.fmt)));
+  picksBox.addEventListener("click", (e) => {
+    const c = e.target.closest(".chip"); if (!c) return;
+    const row = c.closest(".el-pick"), key = row.dataset.key;
+    if (row.dataset.multi && c.dataset.v !== "auto") {
+      // Hosts from the library: up to two names; "Pick for me" clears them.
+      row.querySelector('[data-v="auto"]').classList.remove("on");
+      c.classList.toggle("on");
+      const on = [...row.querySelectorAll(".chip.on")].filter((x) => x.dataset.v !== "auto");
+      if (on.length > 2) on[0].classList.remove("on");
+      const names = [...row.querySelectorAll(".chip.on")].map((x) => x.dataset.v).filter((v) => v !== "auto");
+      if (!names.length) row.querySelector('[data-v="auto"]').classList.add("on");
+      answers[key] = names.length ? names : "auto";
+      return;
+    }
+    row.querySelectorAll(".chip").forEach((x) => x.classList.toggle("on", x === c));
+    answers[key] = isNaN(Number(c.dataset.v)) ? c.dataset.v : Number(c.dataset.v);
+  });
+  choose("free");
+  f.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const d = new FormData(f), go = document.getElementById("go");
+    const text = (d.get("story") || "").trim(), title = (d.get("title") || "").trim();
+    let url = "/api/editor", body, next;
+    if (fmt === "podcast") {
+      if (!text) { idea.focus(); hint.textContent = "Say what they should talk about."; return; }
+      const hosts = Array.isArray(answers.hosts) ? answers.hosts : [];
+      if (hosts.length === 1) { hint.textContent = "Pick two hosts, or ✨ Pick for me."; return; }
+      url = "/api/podcasts";
+      body = {topic: text, title, kind: answers.kind, minutes: answers.minutes, aspect: d.get("aspect"),
+              language: d.get("language"), ...(hosts.length === 2 ? {hosts: hosts.map((n) => ({name: n}))} : {})};
+      next = (r) => `/podcast/${r.podcast_id}`;
+    } else {
+      body = {title: title || (text.split(/[.!?\n]/)[0] || "Untitled production").slice(0, 80), story: text,
+              aspect: d.get("aspect"), format: fmt, answers};
+      next = (r) => `/edit/${r.id}`;
+    }
+    go.disabled = true; hint.textContent = "Creating…";
+    try {
+      const r = await fetch(url, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.detail || j.error || `HTTP ${r.status}`);
+      location.href = next(j);
+    } catch (err) { hint.textContent = err.message; go.disabled = false; }
+  });
+})();
 </script>
 {% endblock %}

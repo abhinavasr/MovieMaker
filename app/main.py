@@ -232,8 +232,16 @@ async def editor_list(request: Request):
     others = [p for p in db.query("SELECT id, title, updated_at FROM projects WHERE user_id=? AND "
                                   "mode='storyboard' ORDER BY updated_at DESC LIMIT 30", (user.id,))
               if p["id"] not in {x["id"] for x in prods} and p["id"] != lib]
+    from app import formats
+    # The person's approved characters, for "Hosts: from your library" (one per name).
+    hosts, seen = [], set()
+    for r in editor.library(user):
+        if r["kind"] == "character" and r["name"].lower() not in seen:
+            seen.add(r["name"].lower())
+            hosts.append(r["name"])
     return templates.TemplateResponse("editor_list.html", {
-        "request": request, "user": user, "productions": prods, "others": others})
+        "request": request, "user": user, "productions": prods, "others": others,
+        "formats": formats.for_form(), "lib_hosts": hosts[:12]})
 
 
 @app.get("/library", response_class=HTMLResponse)

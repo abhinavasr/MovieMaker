@@ -861,6 +861,15 @@ audio, mix) is given to you in every turn; the person sees the same thing on scr
     for this: the looks the person chose are the reference everything is drawn from (the
     studio refuses it unless the person asks to change that character's look by name). Pictures
     only; no video until the person asks.
+  * FIXED CAMERAS (a production made from a template, e.g. a podcast): a shot whose opts have
+    `camera` ("2S" = the shared two-shot; a character's id = that character's close-up) takes its
+    picture from that camera automatically -- the SAME frame as every shot on that camera, the
+    close-ups cut out of the approved two-shot. Never draw a separate picture for such a shot;
+    a new shot in such a production gets the camera of what it shows (edit_shot{opts: {camera}})
+    and a talking shot's lines decide who it shows: one speaker -> their close-up (longtalk),
+    a quick back-and-forth -> "2S" (talk2). To change how the cameras look, draw_pictures
+    {redraw: true} on any of those shots: the studio redraws the two-shot and cuts the close-ups
+    again for all of them.
   * TO CHANGE PART OF A PICTURE (a shot's or a character's) use edit_picture with only what
     should change ("she is not smiling", "evening light"): it keeps everything else. Draw a
     picture again only when the person wants a different picture altogether.

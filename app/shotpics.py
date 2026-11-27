@@ -529,3 +529,77 @@ async def judge(pid: str, shot, image_ids: list[str], turn=None) -> dict | None:
         return None
     best = max(scores, key=scores.get)
     return {"best": best, "scores": scores, "fails": fails, "fix": fixes}
+
+
+# --------------------------------------------------------------------------- punch-in
+
+LOCATE_SCHEMA = {"type": "object", "properties": {"people": {"type": "array", "items": {
+    "type": "object", "properties": {"name": {"type": "string"},
+                                     "head": {"type": "array", "items": {"type": "number"}}},
+    "required": ["name", "head"]}}}, "required": ["people"]}
+
+
+async def locate_heads(path: str, people: list[tuple[str, str]], turn=None) -> dict[str, list[float]]:
+    """Where each named person's head is in a picture: {name: [x1, y1, x2, y2]} as fractions
+    of the width/height. The planner LOOKS at the picture (Qwen-VL grounding: 0-1000 coordinates).
+    `people` = [(name, how to tell them apart)]. Missing or implausible boxes are left out."""
+    from app import agent
+    from PIL import Image
+    import io
+    with Image.open(path) as im:
+        im = im.convert("RGB")
+        im.thumbnail((1024, 1024))
+        buf = io.BytesIO()
+        im.save(buf, "JPEG", quality=88)
+    pic = base64.b64encode(buf.getvalue()).decode()
+    own = turn is None
+    turn = turn or agent.GpuTurn(None)
+    try:
+        if own:
+            await turn.acquire()
+        out = await _ask([{"role": "user", "images": [pic], "content":
+                           "Find each of these people in the picture and give the bounding box of "
+                           "their HEAD (hair to chin) as [x1, y1, x2, y2] on a 0-1000 scale of the "
+                           "picture's width and height:\n" +
+                           "\n".join(f"- {n}: {d}" for n, d in people)}],
+                         LOCATE_SCHEMA, num_predict=400)
+    finally:
+        if own:
+            await turn.release()
+    found = {}
+    for p in out.get("people") or []:
+        box = [float(v) / 1000 for v in (p.get("head") or [])][:4]
+        if len(box) == 4 and 0 <= box[0] < box[2] <= 1 and 0 <= box[1] < box[3] <= 1 \
+                and 0.02 < box[2] - box[0] < 0.6 and 0.03 < box[3] - box[1] < 0.8:
+            name = next((n for n, _ in people if n.lower() == str(p.get("name", "")).lower()), None)
+            if name:
+                found[name] = box
+    return found
+
+
+def punch_in(path: str, head: list[float] | None, side: str, zoom: float = 2.0) -> bytes:
+    """A medium close-up cut out of a wider frame, at the frame's own size and shape: the
+    same person, outfit and room by construction (2026-11-27, the person: "we are not good
+    with character consistency" -- a crop cannot drift). `head` = the person's head box
+    (fractions); without one, the `side` ("left"/"right") of the frame is used. The face sits
+    a little off-centre, with room on the side they look towards (the other host)."""
+    from PIL import Image
+    import io
+    with Image.open(path) as im:
+        im = im.convert("RGB")
+        W, H = im.size
+        w, h = W / zoom, H / zoom
+        if head:
+            cx, cy = (head[0] + head[2]) / 2 * W, (head[1] + head[3]) / 2 * H
+            hh = (head[3] - head[1]) * H
+        else:
+            cx, cy, hh = (0.3 if side == "left" else 0.7) * W, 0.38 * H, 0.18 * H
+        # MCU: head in the upper third; lead room towards the frame's centre.
+        x = cx - w * (0.42 if side == "left" else 0.58)
+        y = cy - max(h * 0.32, hh * 0.9)
+        x = min(max(0.0, x), W - w)
+        y = min(max(0.0, y), H - h)
+        out = im.crop((round(x), round(y), round(x + w), round(y + h))).resize((W, H), Image.LANCZOS)
+        buf = io.BytesIO()
+        out.save(buf, "PNG")
+        return buf.getvalue()

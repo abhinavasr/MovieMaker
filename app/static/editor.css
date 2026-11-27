@@ -630,3 +630,28 @@ body:has(.ed) footer, body:has(.ed) .retention-note { display: none; }
 .ed-library .ed-refs { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 10px; }
 .ed.ed-library { grid-template-rows: auto auto minmax(0, 1fr); }
 .ed-library .ed-left { overflow: auto; height: 100%; }
+
+/* New production: format cards, the idea, quick picks (2026-11-27 templates) */
+.el-q { font-weight: 600; font-size: .95rem; }
+.el-fmts { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 8px; }
+.el-fmt { font: inherit; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 12px; padding: 10px 8px; display: flex; flex-direction: column; align-items: center; gap: 2px; cursor: pointer; text-align: center; }
+.el-fmt .i { font-size: 1.5rem; line-height: 1.2; }
+.el-fmt b { font-size: .86rem; }
+.el-fmt small { font-size: .72rem; color: var(--muted); }
+.el-fmt:hover:not(:disabled) { border-color: var(--gold); }
+.el-fmt.on { border-color: var(--gold); background: color-mix(in srgb, var(--gold) 14%, var(--bg)); }
+.el-fmt.on b { color: var(--gold); }
+.el-fmt:disabled { opacity: .45; cursor: default; }
+.el-fmt:focus-visible { outline: 2px solid var(--gold); }
+.el-picks { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px 18px; }
+.el-picks:empty { display: none; }
+.el-pick > span { display: block; font-size: .82rem; font-weight: 600; margin-bottom: 6px; }
+.el-pick .chips { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.el-pick .chip { font: inherit; font-size: .84rem; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 999px; padding: 5px 12px; cursor: pointer; }
+.el-pick .chip.on { border-color: var(--gold); color: var(--gold); }
+.el-pick small { font-size: .72rem; }
+.el-more summary { cursor: pointer; color: var(--muted); font-size: .86rem; }
+.el-more-body { display: flex; flex-direction: column; gap: 10px; margin-top: 10px; }
+.el-lang { display: flex; gap: 8px; align-items: center; font-size: .86rem; color: var(--muted); }
+.el-lang select { font: inherit; background: var(--bg); color: var(--ink); border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; }
+.el-go .ed-btn { margin-left: auto; }
