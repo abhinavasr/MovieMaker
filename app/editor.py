@@ -3534,8 +3534,9 @@ def perform_payload(project_id: str, shot, image_path: str | None, params: dict)
         if len(tracks) == 1 and image_path:
             # One host talks in the two-shot (a podcast's wide on a single turn): the other
             # still sits in the frame, so they get a silent track -- they listen, lips still.
-            others = [r for r in _shot_ref_ids(row) if r not in tracks and
-                      (db.one("SELECT kind FROM prod_refs WHERE id=?", (r,)) or {}).get("kind") == "character"]
+            kinds = {x["id"]: x["kind"] for x in db.query(
+                "SELECT id, kind FROM prod_refs WHERE project_id=?", (pid,))}
+            others = [r for r in _shot_ref_ids(row) if r not in tracks and kinds.get(r) == "character"]
             if others:
                 tracks[others[0]] = []
         if len(tracks) >= 2 and image_path:
