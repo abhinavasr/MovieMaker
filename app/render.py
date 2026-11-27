@@ -55,6 +55,7 @@ async def enqueue(project_id: str, only: set[str] | None = None, partial: bool =
         params["_partial"] = bool(partial)
         params["_wis_job"] = None
         params.pop("_render_total", None)          # a new render counts from zero
+        params.pop("_render_failed", None)
         params.pop("_cancel", None)
         db.set_params(project_id, params)
     _cancelled.discard(project_id)
@@ -166,6 +167,14 @@ def request_cancel(project_id: str) -> bool:
 
 
 _polish_tasks: dict[str, asyncio.Task] = {}
+
+
+class _SomeFailed(Exception):
+    """The render finished, but these shots failed: [(title, why)]."""
+
+    def __init__(self, failed: list[tuple[str, str]], made: int):
+        super().__init__("some shots failed")
+        self.failed, self.made = failed, made
 
 
 class _Turn(Exception):
@@ -474,6 +483,7 @@ async def _render_storyboard(project_id: str, project, report) -> tuple[Path, bo
     clips: list[Path] = []
     total = len(ordered)
     missing = 0
+    failed: list[tuple[str, str]] = []
     prev_clip: Path | None = None       # the clip of the shot just before this one
     for i, shot in enumerate(ordered):
         _check_cancelled(project_id)
@@ -517,10 +527,30 @@ async def _render_storyboard(project_id: str, project, report) -> tuple[Path, bo
                 shot["asset_id"] = aid
                 assets[aid] = db.one("SELECT path FROM assets WHERE id=?", (aid,))["path"]
         await report_shot(0, "submitting")
-        clips.append(await _render_shot(project_id, shot, assets, params, report_shot))
+        try:
+            clips.append(await _render_shot(project_id, shot, assets, params, report_shot))
+        except (asyncio.CancelledError, _Turn):
+            raise
+        except Exception as exc:                               # noqa: BLE001
+            # One shot failing does not end the render (2026-11-27: a bad voice file on shot 3
+            # stopped a 23-shot podcast after 2 shots). It is marked failed with its reason,
+            # the rest are made, and the end of the render lists what failed; Videos again
+            # redoes only those.
+            why = f"[{exc.code}] {exc}" if isinstance(exc, wis.WisError) else str(exc)
+            db.run("UPDATE shots SET status='failed', error=? WHERE id=?", (why[:600], shot["id"]))
+            failed.append((shot.get("title") or f"shot {i + 1}", why))
+            # kept across turn-taking, so the end of the render still lists it
+            pp = db.params_of(db.one("SELECT * FROM projects WHERE id=?", (project_id,)))
+            pp.setdefault("_render_failed", []).append([failed[-1][0], why[:300]])
+            db.set_params(project_id, pp)
+            log.warning("project %s: %s failed (%s); carrying on", project_id,
+                        shot.get("title") or shot["id"], why[:200])
+            prev_clip = None
+            missing += 1
+            continue
         prev_clip = clips[-1]
         _check_cancelled(project_id)       # a Stop during the shot wins over taking turns
-        if not _queue.empty():
+        if any(p != project_id for p in list(_queue._queue)):   # another production waits
             # Another production is waiting: step back after this shot. The shots made so
             # far keep their clips; the rest are made when it is this production's turn again.
             later = [s["id"] for s in ordered[i + 1:] if only is None or s["id"] in only]
@@ -529,6 +559,11 @@ async def _render_storyboard(project_id: str, project, report) -> tuple[Path, bo
                 raise _Turn(later, made, made + len(later))
 
     _check_cancelled(project_id)
+    earlier = db.params_of(db.one("SELECT * FROM projects WHERE id=?", (project_id,))).get("_render_failed") or []
+    if earlier:
+        failed = [tuple(x) for x in earlier]
+        raise _SomeFailed(failed, sum(1 for s in db.query(
+            "SELECT status FROM shots WHERE project_id=?", (project_id,)) if s["status"] == "done"))
     if partial and missing:
         return None, False
     await report(92, f"joining {len(clips)} clips")
@@ -623,6 +658,14 @@ async def _render(project_id: str) -> None:
                              message="done", output_path=str(out),
                              has_audio=1 if has_audio else 0)
         log.info("project %s rendered -> %s", project_id, out)
+    except _SomeFailed as sf:
+        names = "; ".join(f"{t}: {w[:160]}" for t, w in sf.failed[:6])
+        more = f" (+{len(sf.failed) - 6} more)" if len(sf.failed) > 6 else ""
+        db.touch_project(project_id, status="failed", progress=100,
+                         message=f"{sf.made} shot(s) made, {len(sf.failed)} failed -- press Videos "
+                                 "to redo only the failed ones",
+                         error=f"{len(sf.failed)} shot(s) failed: {names}{more}")
+        log.warning("project %s: %d shot(s) failed, %d made", project_id, len(sf.failed), sf.made)
     except _Turn as turn:
         params = db.params_of(db.one("SELECT * FROM projects WHERE id=?", (project_id,)))
         params["_render_only"] = turn.remaining          # also what recover() resumes
