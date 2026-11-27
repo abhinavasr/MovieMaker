@@ -3393,6 +3393,16 @@ def on_camera(pid: str, shot, tracks: dict) -> str | None:
     return max(pick, key=pick.get) if pick else None
 
 
+# Appended to every InfiniteTalk prompt: the text drives the whole clip, so any gesture in
+# it is acted out while the person is silent too (2026-11-27). The audio moves the lips.
+TALK_CALM = (" Calm, restrained body language throughout: hands resting, only small natural "
+             "head movements; whoever is not speaking stays quiet and still.")
+
+
+def _calm(prompt: str) -> str:
+    return (prompt[:3900 - len(TALK_CALM)].rstrip() + TALK_CALM)
+
+
 def perform_payload(project_id: str, shot, image_path: str | None, params: dict) -> dict:
     """The WIS request for a performance or lip-sync shot (called by app/render.py)."""
     pid = project_id
@@ -3405,9 +3415,9 @@ def perform_payload(project_id: str, shot, image_path: str | None, params: dict)
             ctx = _shot_context(pid, shot)
             from app import promptsmith
             return {"model": cfg.TALK_MODEL, "client_request_id": shot["id"],
-                    "prompt": (promptsmith.current(pid, row).get("prompt")
+                    "prompt": _calm(promptsmith.current(pid, row).get("prompt")
                                or " ".join(x for x in (shot.get("prompt") or "The person in the picture "
-                                                       "talks, natural expression.", ctx) if x))[:3900],
+                                                       "talks, natural expression.", ctx) if x)),
                     "width": int(params.get("width", 480)), "height": int(params.get("height", 864)),
                     "image": {"b64": wis.b64(Path(image_path).read_bytes()), "mime": "image/png"},
                     # their lines only, each at its moment, silence between
@@ -3425,10 +3435,10 @@ def perform_payload(project_id: str, shot, image_path: str | None, params: dict)
             ctx = _shot_context(pid, shot)
             from app import promptsmith
             return {"model": cfg.TALK_MODEL, "client_request_id": shot["id"],
-                    "prompt": (promptsmith.current(pid, row).get("prompt")
+                    "prompt": _calm(promptsmith.current(pid, row).get("prompt")
                                or " ".join(x for x in (shot.get("prompt") or "Two people in the "
                                                        "picture talk to each other, natural "
-                                                       "expressions.", ctx) if x))[:3900],
+                                                       "expressions.", ctx) if x)),
                     "width": int(params.get("width", 480)), "height": int(params.get("height", 864)),
                     "image": {"b64": wis.b64(Path(image_path).read_bytes()), "mime": "image/png"},
                     "reference_audio": [{"b64": wis.b64(_window(tracks[r], start, length)),
@@ -3448,9 +3458,9 @@ def perform_payload(project_id: str, shot, image_path: str | None, params: dict)
                    if need == 2 else "The person in the picture talks or sings, natural expression.")
         from app import promptsmith
         return {"model": cfg.TALK_MODEL, "client_request_id": shot["id"],
-                "prompt": (promptsmith.current(pid, db.one("SELECT * FROM shots WHERE id=?",
+                "prompt": _calm(promptsmith.current(pid, db.one("SELECT * FROM shots WHERE id=?",
                                                            (shot["id"],))).get("prompt")
-                           or " ".join(x for x in (shot.get("prompt") or default, ctx) if x))[:3900],
+                           or " ".join(x for x in (shot.get("prompt") or default, ctx) if x)),
                 "width": int(params.get("width", 480)), "height": int(params.get("height", 864)),
                 "image": {"b64": wis.b64(Path(image_path).read_bytes()), "mime": "image/png"},
                 "reference_audio": [{"b64": wis.b64(p.read_bytes()), "mime": _audio_mime(p)}

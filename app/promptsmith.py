@@ -44,13 +44,24 @@ GUIDE = {
     "lipsync": "Model: Wan2.2-S2V. The person in the picture speaks or sings a recorded line. "
                "Describe their expression, gestures, head and body movement while speaking, and a "
                "mostly steady camera. Do not write the words. 30-70 words.",
-    "longtalk": "Model: InfiniteTalk. The person in the picture talks or sings a long recording. "
-                "Describe their expression, gestures and movement and a steady camera; natural, "
-                "varied, not repetitive. Do not write the words. 30-70 words.",
-    "talk2": "Model: InfiniteTalk, two speakers. Two people in the picture talk: the first "
-             "speaker, then the second. Describe both: who speaks first, how the listener "
-             "reacts, their expressions and gestures, a steady camera. Do not write the words. "
-             "40-90 words.",
+    # InfiniteTalk applies the text to EVERY moment of the clip; the voice track alone decides
+    # when the lips move. A scripted gesture or "speaks first" is therefore acted out the whole
+    # clip, silent stretches included (2026-11-27: "the girl is making gestures even if there
+    # is no dialogue" -- the prompt said she "gestures with her hands", her partner "listens").
+    "longtalk": "Model: InfiniteTalk. The person in the picture talks or sings a long recording; "
+                "the recording alone moves their lips, and your text applies to the WHOLE clip. "
+                "Describe calm, restrained, natural body language: relaxed posture, hands mostly "
+                "resting, small head movements, steady eye line, a static camera. Never write "
+                "'animated', 'expressive', 'gestures with their hands' or a sequence of actions. "
+                "Do not write the words. 30-60 words.",
+    "talk2": "Model: InfiniteTalk, two speakers. Each person's OWN voice track moves their lips, "
+             "so WHO talks WHEN comes from the audio, never from your text -- and your text applies "
+             "to the WHOLE clip, to both people equally. Describe both people the SAME way: seated, "
+             "calm, restrained podcast body language, hands resting, small nods, eye contact with "
+             "each other, a static camera. Do NOT say who speaks first or next, do NOT script turns, "
+             "reactions or a sequence of actions, and never give one person gestures, 'animated' "
+             "expressions or 'listens' (they would do it the whole clip, even while silent). Do "
+             "not write the words. 35-70 words.",
     "motion": "Model: Wan Animate 2 (motion transfer). The person in the picture performs the "
               "movements of a reference video. Give `prompt` as two lines exactly: "
               "'Character appearance description: ...' (the person in the picture: face, hair, "
@@ -73,7 +84,7 @@ GUIDE = {
                "the TARGET video (never 'remove', 'change' or 'make').",
 }
 
-VERSION = 2          # bump to rewrite every cached prompt under new rules
+VERSION = 3          # bump to rewrite every cached prompt under new rules
 SCHEMA = {"type": "object", "properties": {"prompt": {"type": "string"},
                                            "motion_prompt": {"type": "string"}},
           "required": ["prompt"]}

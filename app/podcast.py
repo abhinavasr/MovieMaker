@@ -1227,7 +1227,7 @@ async def _build(pid: str, row, config: dict, state: dict) -> str:
                     project, scene_id, f"{names[l[0]['speaker']]} and {names[second]}",
                     f"Two-shot at the podcast table: {a['name']} on the left and {b['name']} on "
                     "the right, facing each other mid-debate, studio microphones on boom arms, "
-                    "natural gestures and reactions; the listener's attention moves with the speaker.",
+                    "seated and calm, hands resting, small nods, looking at each other; static camera.",
                     min(cfg.TALK_MAX_SECONDS, math.ceil(length + 1.2)), "2S",
                     everyone, "talk2", None, None, user)
                 project = db.one("SELECT * FROM projects WHERE id=?", (project_id,))
