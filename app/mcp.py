@@ -1822,7 +1822,10 @@ TOOLS = [
           "Elena Vance and Marcus Sterling) only for political policy questions. Give each host a "
           "name, look and voice that suit their side (e.g. an Indian host arguing for India). "
           "Leave hosts out and the podcast's own research planner draws two fitting sides and "
-          "hosts from the topic. Defaults: about 8 minutes, 16:9.",
+          "hosts from the topic. When the person names their OWN characters as hosts (e.g. "
+          "\"with Mahira and Abhay\"), pass hosts:[{name}] with the full names only: their look, "
+          "views and voice come from the person's character library as they are, and the shot "
+          "pictures start at once. Defaults: about 8 minutes, 16:9.",
           _make_podcast,
           {"topic": {"type": "string", "description": "The question or topic they debate."},
            "title": {"type": "string"},

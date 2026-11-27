@@ -815,12 +815,50 @@
     const keep = [$("tl-scroll").scrollLeft, $("tl-scroll").scrollTop];
     lanesEl.innerHTML = `<div></div><div class="ed-lane ruler" id="ruler">${ticks}</div>
       <div class="ed-lh"><span class="nm">🎞 Shots</span></div><div class="ed-lane shots">${shotsIn.map((s) => `<div class="ed-blk shot ${s.id === sel.shot ? "on" : ""} ${s.scene_id !== sel.scene && view !== "timeline" ? "other" : ""}" data-tshot="${s.id}" title="Drag to move this shot" style="cursor:grab;left:${x(s.start)}px;width:${s.seconds * TL.pps - 2}px">${esc(s.framing || "")} ${esc(s.title || "shot " + s.n)}</div>`).join("")}</div>
-      ${["dialogue", "ambience", "music"].map((t) => lh(t) + `<div class="ed-lane" data-lane="${t}">${blocks(t)}</div>`).join("")}
+      ${speakerLanes(a, b, x)}
+      ${["ambience", "music"].map((t) => lh(t) + `<div class="ed-lane" data-lane="${t}">${blocks(t)}</div>`).join("")}
       ${S.shots.some((s) => ["perform", "lipsync"].includes(s.make)) ? lh("shot") + `<div class="ed-lane" style="cursor:default">${shotSound}</div>` : ""}
       <div class="ed-head" id="head" style="left:${TL.off + x(Player.t)}px"></div>`;
     $("tl-scroll").scrollLeft = keep[0]; $("tl-scroll").scrollTop = keep[1];
     paintWaves();
   }
+  // One dialogue lane per speaker (2026-11-27: "we need capability of multiple track of audio for
+  // different speakers"): each speaker's lines on their own lane, with their own level and mute,
+  // under the Dialogue bus (whose level applies to all of them). Lines of different speakers can
+  // overlap. "" = lines with no character (narrator / someone else).
+  const SPK_COLORS = ["#a98be0", "#e08bb4", "#8bc4e0", "#e0c48b", "#8be0a4", "#e09a8b"];
+  function speakerList() {
+    const lines = S.clips.filter((c) => c.track === "dialogue");
+    const ids = S.refs.filter((r) => ["character", "voice"].includes(r.kind) && lines.some((c) => c.ref_id === r.id)).map((r) => r.id);
+    if (lines.some((c) => !c.ref_id || !S.refs.some((r) => r.id === c.ref_id))) ids.push("");
+    if (!ids.length) ids.push("");
+    return ids;
+  }
+  function spkMix(rid) { return (S.mix.speakers || {})[rid || ""] || {gain_db: 0, mute: false}; }
+  function speakerLanes(a, b, x) {
+    const ids = speakerList();
+    const m = S.mix.dialogue;
+    let html = `<div class="ed-lh grp"><span class="nm"><i style="background:${TRACK_COLOR.dialogue}"></i>Dialogue <small>(all)</small></span>
+        <input type="range" min="-30" max="6" step="1" value="${m.gain_db}" data-gain="dialogue" title="All dialogue ${m.gain_db} dB" aria-label="All dialogue level">
+        <button data-mute="dialogue" class="${m.mute ? "on" : ""}" title="${m.mute ? "Unmute" : "Mute"} all dialogue">${m.mute ? "🔇" : "🔈"}</button></div><div class="ed-lane grp"></div>`;
+    ids.forEach((rid, i) => {
+      const r = S.refs.find((q) => q.id === rid);
+      const name = r ? r.name : "Narrator / other";
+      const sm = spkMix(rid);
+      const col = SPK_COLORS[i % SPK_COLORS.length];
+      const own = S.clips.filter((c) => c.track === "dialogue" && (r ? c.ref_id === rid : (!c.ref_id || !S.refs.some((q) => q.id === c.ref_id))) && c.start_s < b && c.start_s + (c.duration_s || 3) > a);
+      html += `<div class="ed-lh spk"><span class="nm" title="${esc(name)}"><i style="background:${col}"></i>${esc(name)}</span>
+          <input type="range" min="-30" max="12" step="1" value="${sm.gain_db}" data-sgain="${rid}" title="${esc(name)} ${sm.gain_db} dB" aria-label="${esc(name)} level">
+          <button data-smute="${rid}" class="${sm.mute ? "on" : ""}" title="${sm.mute ? "Unmute" : "Mute"} ${esc(name)}">${sm.mute ? "🔇" : "🔈"}</button></div>
+        <div class="ed-lane spk" data-lane="dialogue" data-ref="${rid}" style="--spk:${col}">${own.map((c) => {
+          const d = c.duration_s || (c.status === "pending" ? 4 : 1);
+          return `<div class="ed-blk dialogue ${c.status} ${c.id === sel.clip ? "sel" : ""} ${sm.mute ? "muted" : ""}" data-clip="${c.id}" style="left:${x(c.start_s)}px;width:${Math.max(8, d * TL.pps)}px" title="${c.status === "script" ? "Script line — not voiced yet" + (c.auto ? " (being voiced)" : "") + ": " : ""}${esc(c.name)}${c.error ? " — " + esc(c.error) : ""}">
+            <span>${c.status === "pending" ? "⏳ " : c.status === "script" ? (c.auto ? "⏳📝 " : "📝 ") : ""}${esc((c.text || c.name || "").replace(/^[^:]{1,40}:\s*/, ""))}</span>${c.use_in_video ? `<span class="vid">🎬</span>` : ""}<span class="rs"></span></div>`;
+        }).join("")}</div>`;
+    });
+    return html;
+  }
+
   // Waveforms for ready clips, decoded once and cached.
   const waves = new Map();
   async function paintWaves() {
@@ -860,6 +898,12 @@
   $("tl-toggle").onclick = () => setTl(!$("tl").classList.contains("collapsed"));
   try { if (localStorage.getItem(tlKey)) setTl(true); } catch { /* private mode */ }
   $("lanes").addEventListener("input", (e) => { const g = e.target.dataset.gain; if (g) { e.target.title = `${TRACK_NAME[g]} level ${e.target.value} dB`; } });
+  $("lanes").addEventListener("change", async (e) => {
+    if (e.target.dataset.sgain !== undefined) {
+      const rid = e.target.dataset.sgain, nm = S.refs.find((r) => r.id === rid)?.name || "Narrator / other";
+      await api(`/api/editor/${PID}/settings`, {mix: {speakers: {[rid]: {gain_db: +e.target.value}}}}); toast(`${nm} ${e.target.value} dB`); load(true); return;
+    }
+  });
   $("lanes").addEventListener("change", async (e) => { const g = e.target.dataset.gain; if (!g) return;
     await api(`/api/editor/${PID}/settings`, {mix: {[g]: {gain_db: +e.target.value}}}); toast(`${TRACK_NAME[g]} ${e.target.value} dB`); load(true); });
   $("duck").onchange = async () => { await api(`/api/editor/${PID}/settings`, {mix: {duck_db: +$("duck").value}}); toast($("duck").value === "0" ? "Ducking off" : `Music ducks ${$("duck").value} dB under dialogue`); load(true); };
@@ -868,6 +912,8 @@
   let drag = null;
   $("lanes").addEventListener("pointerdown", (e) => {
     const t = TL.a + (e.clientX - e.target.closest(".ed-lane, .ed-lh, div").getBoundingClientRect().left) / TL.pps;
+    if (e.target.closest("[data-smute]")) { const rid = e.target.closest("[data-smute]").dataset.smute;
+      api(`/api/editor/${PID}/settings`, {mix: {speakers: {[rid]: {mute: !spkMix(rid).mute}}}}).then(() => load(true)); return; }
     if (e.target.closest("[data-mute]")) { const tr = e.target.closest("[data-mute]").dataset.mute;
       api(`/api/editor/${PID}/settings`, {mix: {[tr]: {mute: !S.mix[tr].mute}}}).then(() => load(true)); return; }
     const shotEl = e.target.closest("[data-tshot]");
@@ -899,7 +945,7 @@
       paintInspector(); return;
     }
     const lane = e.target.closest("[data-lane]");
-    if (lane) { const r = lane.getBoundingClientRect(); addAudioPop(lane.dataset.lane, Math.max(0, TL.a + (e.clientX - r.left) / TL.pps), e.clientX, e.clientY); }
+    if (lane && !lane.classList.contains("grp")) { const r = lane.getBoundingClientRect(); addAudioPop(lane.dataset.lane, Math.max(0, TL.a + (e.clientX - r.left) / TL.pps), e.clientX, e.clientY, lane.dataset.ref); }
   });
   $("lanes").addEventListener("pointermove", (e) => {
     if (!drag) return; const dt = (e.clientX - drag.x0) / TL.pps; if (Math.abs(e.clientX - drag.x0) > 2) drag.moved = true;
@@ -913,7 +959,7 @@
     await change([{op: "edit_clip", clip_id: d.id, ...ch}], d.mode === "move" ? `Moved to ${fmt(d.nstart)}` : `Length ${d.ndur.toFixed(1)} s`);
   });
 
-  function addAudioPop(track, t, cx, cy) {
+  function addAudioPop(track, t, cx, cy, who) {
     const pop = $("pop"); const sh = S.shots.find((s) => t >= s.start && t < s.start + s.seconds);
     const speakers = S.refs.filter((r) => ["character", "voice"].includes(r.kind));
     const head = `<div class="h"><span>${track === "dialogue" ? "🎙 A line of dialogue" : track === "music" ? "🎵 Music" : "🌧 Ambience / sound effects"} at ${fmt(t)}</span><button class="ed-btn ghost icon" data-x aria-label="Close">✕</button></div>`;
@@ -934,6 +980,7 @@
     pop.style.left = Math.min(innerWidth - r.width - 10, Math.max(10, cx - 40)) + "px";
     pop.style.top = Math.max(10, cy - r.height - 12) + "px";
     pop.querySelectorAll("[data-x]").forEach((b) => b.onclick = () => pop.hidden = true);
+    if ($("ap-ref") && who !== undefined) { $("ap-ref").value = who || ""; $("ap-spk-wrap").hidden = !!who; }
     if ($("ap-ref")) $("ap-ref").onchange = () => { $("ap-spk-wrap").hidden = !!$("ap-ref").value && !!refById($("ap-ref").value); };
     $("ap-text").focus();
     $("ap-go").onclick = async () => {
@@ -1458,13 +1505,14 @@
         const el = this.audio(c);
         if (inside) {
           const want = c.trim_s + (this.t - c.start_s);
-          let g = c.gain_db + S.mix[c.track].gain_db;
+          const sp = c.track === "dialogue" ? spkMix(c.ref_id && S.refs.some((r) => r.id === c.ref_id) ? c.ref_id : "") : {gain_db: 0, mute: false};
+          let g = c.gain_db + S.mix[c.track].gain_db + sp.gain_db;
           if (dlgOn && c.track !== "dialogue" && S.mix.duck_db < -0.5) g += S.mix.duck_db;
           let v = Math.min(1, amp(g));
           const into = this.t - c.start_s, left = c.start_s + c.duration_s - this.t;
           if (c.fade_in > 0 && into < c.fade_in) v *= into / c.fade_in;
           if (c.fade_out > 0 && left < c.fade_out) v *= left / c.fade_out;
-          el.volume = S.mix[c.track].mute ? 0 : Math.max(0, v);
+          el.volume = S.mix[c.track].mute || sp.mute ? 0 : Math.max(0, v);
           if (el.paused) { el.currentTime = want; el.play().catch(() => {}); }
           else if (Math.abs(el.currentTime - want) > 0.3) el.currentTime = want;
         } else if (!el.paused) el.pause();

@@ -116,12 +116,28 @@ def _adopt(project) -> None:
 
 def _mix(project) -> dict:
     mix = json.loads(json.dumps(DEFAULT_MIX))
+    mix["speakers"] = {}
     for k, v in (db.params_of(project).get("mix") or {}).items():
-        if isinstance(v, dict) and isinstance(mix.get(k), dict):
+        if k == "speakers" and isinstance(v, dict):
+            # One dialogue lane per speaker (2026-11-27: "we need capability of multiple track
+            # of audio for different speakers"): each with its own level and mute, on top of
+            # the Dialogue bus. Keyed by reference id; "" = lines without a speaker.
+            mix["speakers"] = {str(rid): {"gain_db": float(x.get("gain_db") or 0.0),
+                                          "mute": bool(x.get("mute"))}
+                               for rid, x in v.items() if isinstance(x, dict)}
+        elif isinstance(v, dict) and isinstance(mix.get(k), dict):
             mix[k].update({kk: vv for kk, vv in v.items() if kk in ("gain_db", "mute")})
         elif k == "duck_db":
             mix[k] = float(v)
     return mix
+
+
+def _speaker_mix(mix: dict, c) -> tuple[float, bool]:
+    """(extra dB, muted) of a dialogue clip's speaker lane."""
+    if c["track"] != "dialogue":
+        return 0.0, False
+    sp = (mix.get("speakers") or {}).get(c["ref_id"] or "") or {}
+    return float(sp.get("gain_db") or 0.0), bool(sp.get("mute"))
 
 
 def _touch(project_id: str) -> None:
@@ -859,6 +875,12 @@ def import_ref(project, user: auth.User, src_ref_id: str) -> str:
                "voice_path, speaker, created_at, angles) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                (rid, pid, idx, src["kind"], src["name"], src["description"] or "", src["image_id"],
                 voice_path, src["speaker"], db.now(), src["angles"] or "{}"))
+    # The whole character: their designed voice (and the words its sample says, used when
+    # cloning it) and the look the person chose -- else every copy designed a new voice and
+    # asked for the look again (2026-11-27).
+    db.run("UPDATE prod_refs SET voice_design=?, voice_text=?, voice_auto=?, approved=? WHERE id=?",
+           (src["voice_design"], src["voice_text"] if voice_path else None,
+            0 if voice_path else (src["voice_auto"] or 0), src["approved"], rid))
     _touch(pid)
     return rid
 
@@ -1438,6 +1460,17 @@ def set_mix(project, **f) -> None:
                 mix[track]["mute"] = bool(t["mute"])
     if f.get("duck_db") is not None:
         mix["duck_db"] = max(-30.0, min(0.0, float(f["duck_db"])))
+    if isinstance(f.get("speakers"), dict):
+        pid = project["id"]
+        for who, t in f["speakers"].items():
+            if not isinstance(t, dict):
+                continue
+            rid = "" if who in ("", "none", "narrator", "other") else (resolve_ref(pid, str(who)) or str(who))
+            cur = mix["speakers"].setdefault(rid, {"gain_db": 0.0, "mute": False})
+            if t.get("gain_db") is not None:
+                cur["gain_db"] = max(-60.0, min(12.0, float(t["gain_db"])))
+            if t.get("mute") is not None:
+                cur["mute"] = bool(t["mute"])
     params["mix"] = mix
     db.set_params(project["id"], params)
     _touch(project["id"])
@@ -3572,7 +3605,8 @@ def _mix_film(project) -> Path:
     clips = db.query("SELECT * FROM prod_clips WHERE project_id=? AND status='ready' "
                      "ORDER BY start_s", (pid,))
     for c in clips:
-        if mix[c["track"]]["mute"] or not c["path"] or not Path(c["path"]).exists():
+        sp_db, sp_mute = _speaker_mix(mix, c)
+        if mix[c["track"]]["mute"] or sp_mute or not c["path"] or not Path(c["path"]).exists():
             continue
         if c["start_s"] >= total:
             continue
@@ -3584,7 +3618,7 @@ def _mix_film(project) -> Path:
         n += 1
         chain = [f"atrim=start={c['trim_s']}:duration={dur}", "asetpts=PTS-STARTPTS",
                  "aresample=48000", "aformat=channel_layouts=stereo",
-                 f"volume={_db_to_amp(c['gain_db']):.4f}"]
+                 f"volume={_db_to_amp(c['gain_db'] + sp_db):.4f}"]
         if c["fade_in"] > 0:
             chain.append(f"afade=t=in:st=0:d={min(c['fade_in'], dur)}")
         if c["fade_out"] > 0:
@@ -3926,7 +3960,7 @@ def apply_changes(project, user: auth.User, changes: list, guard: bool = False) 
         elif op == "delete_clip":
             delete_clip(project, c.get("clip_id"))
         elif op == "set_mix":
-            set_mix(project, **{k: c.get(k) for k in ("dialogue", "ambience", "music", "shot",
+            set_mix(project, **{k: c.get(k) for k in ("dialogue", "ambience", "music", "shot", "speakers",
                                                       "duck_db") if k in c})
         elif op == "add_ref":
             key = c.get("key") or f"ref{len(keys)}"
@@ -4736,6 +4770,16 @@ def _t_lines(user, args, base):
             continue
         who = str(ln.get("speaker") or ln.get("character") or "").strip()
         ref_id = resolve_ref(pid, who)
+        text = str(ln.get("text") or ln.get("line"))
+        # A line already in the production (same speaker, same words) is not added again:
+        # 2026-11-26 the assistant added all 18 podcast lines a second time, voiced twice.
+        key = re.sub(r"\W+", " ", text.lower()).strip()
+        if any(re.sub(r"\W+", " ", (c["text"] or "").lower()).strip() == key and
+               (c["ref_id"] or None) == (ref_id or None)
+               for c in db.query("SELECT text, ref_id FROM prod_clips WHERE project_id=? AND "
+                                 "track='dialogue'", (pid,))):
+            problems.append(f"line {i + 1}: already in the production")
+            continue
         try:
             shot = _shot(pid, str(ln["shot_id"]))
             add_script(db.one("SELECT * FROM projects WHERE id=?", (pid,)), shot["id"],
@@ -4744,7 +4788,10 @@ def _t_lines(user, args, base):
                        auto=args.get("voice", True) is not False)
             added += 1
             # A character in the shot speaking on camera: its video is made from the voice.
-            if ref_id and ref_id in _jl(shot["refs"], []) and shot["make"] != "lipsync":
+            # Talking shots (InfiniteTalk) already are; they stay as they are (2026-11-26: a
+            # podcast's talk2/longtalk shots were all turned into 30 s lip-sync shots).
+            if ref_id and ref_id in _jl(shot["refs"], []) and \
+                    shot["make"] not in ("lipsync",) + TALK_MAKES:
                 lipsync.add(shot["id"])
         except HTTPException as exc:
             problems.append(f"line {i + 1}: {exc.detail}")
@@ -4876,6 +4923,7 @@ AGENT_TOOLS = {
                         "delete_shot{shot_id}; edit_clip{clip_id,start_s,trim_s,duration_s,"
                         "gain_db,fade_in,fade_out,use_in_video,track}; delete_clip{clip_id}; "
                         "set_mix{dialogue:{gain_db,mute},ambience:{..},music:{..},shot:{..},"
+                        "speakers:{<character name>:{gain_db,mute}} (each speaker's own dialogue lane),"
                         "duck_db}; add_ref{key,kind,name,description,image_id,speaker,links:[names],from_ref_id "
                         "(copy one of the person's characters from another production)}; "
                         "edit_ref{ref_id or name, rename, description, image_id, ...} (RENAME or "

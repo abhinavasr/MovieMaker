@@ -184,6 +184,7 @@ def _clean_config(body: dict) -> dict:
     # Sides nobody spelled out are drawn from the topic by the research planner (2026-11-26: an
     # assistant picked "left vs right" for India-vs-US democracy, then "reformer vs traditionalist"
     # for immigration and Indigenous societies). The page's form always sends its sides.
+    names_given = any(isinstance(h, dict) and h.get("name") for h in hosts_in)
     auto_sides = not any(isinstance(h, dict) and (h.get("lens") or h.get("view")) for h in hosts_in) \
         and not body.get("sides_given") and not body.get("lenses")
     hosts = []
@@ -217,6 +218,7 @@ def _clean_config(body: dict) -> dict:
         "focus": " ".join(str(body.get("focus") or "").split())[:1500],
         "review": review,
         "auto_sides": bool(auto_sides),
+        "names_given": bool(names_given),
     }
 
 
@@ -483,7 +485,10 @@ async def _showrunner(pid, turn, config, state):
         + (f"Focus: {config['focus']}\n" if config["focus"] else "")
         + (f"Length: about {config['minutes']:g} minutes. Language: {config['language']}.\n")
         + (f"The person already chose the hosts; keep them exactly (format debate):\n"
-           f"A: {a['name']} — {a['lens']}\nB: {b['name']} — {b['lens']}\n" if given else ""),
+           f"A: {a['name']} — {a['lens']}\nB: {b['name']} — {b['lens']}\n" if given else "")
+        + (f"The hosts are {a['name']} and {b['name']} (the person's own characters): give them "
+           "roles that fit the topic; their names, looks and voices are already set.\n"
+           if config.get("names_given") and not given else ""),
         SHOW_SCHEMA, "showrunner", think=4000)
     fmt = out.get("format") if out.get("format") in FORMATS else "debate"
     if given:
@@ -499,6 +504,8 @@ async def _showrunner(pid, turn, config, state):
         for i, k in enumerate(("a", "b")):
             if clean(out.get(f"{k}_role"), 300):
                 hosts[i]["lens"] = clean(out.get(f"{k}_role"), 300)
+            if config.get("names_given"):
+                continue                 # the person's hosts: their names, looks and voices stay
             for f, n in (("name", 60), ("look", 600), ("voice", 600)):
                 if clean(out.get(f"{k}_{f}"), n):
                     hosts[i][f] = clean(out.get(f"{k}_{f}"), n)
@@ -1162,14 +1169,26 @@ async def _build(pid: str, row, config: dict, state: dict) -> str:
     editor.set_story(project, title=title, story=_story(config, state, title))
     project = db.one("SELECT * FROM projects WHERE id=?", (project_id,))
     refs = {}
+    lib = {editor.name_key(x["name"]): x for x in editor.library(user)} if hasattr(editor, "library") else {}
     for key, h, other in (("A", a, b), ("B", b, a)):
         have = editor.ref_by_name(project_id, h["name"])
-        refs[key] = have["id"] if have else editor.add_ref(
-            project, "character", h["name"],
-            f"{h['look']}. A podcast host who argues from {h['lens']}; debates {other['name']}.",
-            user=user, voice_design=h["voice"], approved=False)
+        src = lib.get(editor.name_key(h["name"]))
+        if have:
+            refs[key] = have["id"]
+        elif src and src.get("kind") == "character":
+            # One of the person's own characters: used as they are (look, views, voice).
+            refs[key] = editor.import_ref(project, user, src["ref_id"])
+            _log(pid, f"{h['name']}: your character from the library (look and voice as they are)")
+        else:
+            refs[key] = editor.add_ref(
+                project, "character", h["name"],
+                f"{h['look']}. A podcast host who argues from {h['lens']}; debates {other['name']}.",
+                user=user, voice_design=h["voice"], approved=False)
     have = editor.ref_by_name(project_id, "The studio")
-    studio = have["id"] if have else editor.add_ref(project, "location", "The studio", STUDIO, user=user)
+    src = lib.get(editor.name_key("The studio"))
+    studio = have["id"] if have else (editor.import_ref(project, user, src["ref_id"])
+                                      if src and src.get("kind") == "location" else
+                                      editor.add_ref(project, "location", "The studio", STUDIO, user=user))
     everyone = [refs["A"], refs["B"], studio]
     names = {"A": a["name"], "B": b["name"]}
     looks = {"A": a["look"], "B": b["look"]}
@@ -1227,6 +1246,13 @@ async def _build(pid: str, row, config: dict, state: dict) -> str:
         if r and not r["image_id"]:
             with suppress(Exception):
                 await editor.make_ref_picture(project, user, rid)
+    # Hosts whose looks are already chosen (the person's own characters): the shot pictures
+    # start now; videos wait for the person to ask.
+    if not editor.unchosen(project_id, [refs["A"], refs["B"]]):
+        with suppress(Exception):
+            editor.prepare_render(db.one("SELECT * FROM projects WHERE id=?", (project_id,)),
+                                  user, None, "pictures")
+            _log(pid, "The hosts' looks are already chosen: drawing the shot pictures now")
     return project_id
 
 

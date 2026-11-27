@@ -610,3 +610,11 @@ body:has(.ed) footer, body:has(.ed) .retention-note { display: none; }
 .ed-progress button { justify-self: start; }
 @media (max-width: 780px) { .ed-progress { order: 4; } .ed-progress .full { position: fixed; top: calc(var(--hdr, 50px) + 52px); right: 8px; left: 8px; width: auto; } }
 .ed-stage .empty .spin { display: inline-block; width: 26px; height: 26px; border-radius: 50%; border: 3px solid var(--line); border-top-color: var(--gold); animation: ws-spin .9s linear infinite; }
+
+/* One dialogue lane per speaker (2026-11-27) */
+.ed-lh.grp .nm small { color: var(--muted); font-weight: 400; }
+.ed-lane.grp { height: 10px; background: transparent; cursor: default; }
+.ed-lh.spk { padding-left: 14px; }
+.ed-lh.spk .nm { overflow: hidden; text-overflow: ellipsis; color: var(--ink); }
+.ed-lane.spk .ed-blk.dialogue { background: color-mix(in srgb, var(--spk) 28%, transparent); border-color: var(--spk); }
+.ed-blk.muted { opacity: .35; }
