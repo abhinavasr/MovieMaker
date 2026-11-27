@@ -3536,7 +3536,8 @@ def perform_payload(project_id: str, shot, image_path: str | None, params: dict)
                     "image": {"b64": wis.b64(render.fitted(image_path, params)), "mime": "image/png"},
                     # their lines only, each at its moment, silence between
                     "reference_audio": [{"b64": wis.b64(_window(tracks[who], start, length)),
-                                         "mime": "audio/wav"}]}
+                                         "mime": "audio/wav"}],
+                    "seconds": round(length, 2)}
     if shot.get("make") == "talk2" and cfg.TALK_TOGETHER:
         row = db.one("SELECT * FROM shots WHERE id=?", (shot["id"],))
         tracks = {k: v for k, v in character_tracks(pid, row).items() if k}
@@ -3782,7 +3783,7 @@ def _window(lines: list, start: float, length: float) -> bytes:
         if proc.returncode != 0 or not proc.stdout:
             raise RuntimeError("could not make a silent track: " +
                                proc.stderr.decode(errors="replace")[-300:])
-        return proc.stdout
+        return _wav_sizes(proc.stdout)
     graph = ";".join(parts) + ";" + "".join(f"[p{i}]" for i in range(n)) + \
         (f"amix=inputs={n}:normalize=0," if n > 1 else "anull,") + \
         f"apad=whole_dur={length:.3f},atrim=duration={length:.3f}[out]"
@@ -3792,7 +3793,25 @@ def _window(lines: list, start: float, length: float) -> bytes:
     if proc.returncode != 0 or not proc.stdout:
         raise RuntimeError("could not cut the dialogue for the lip-sync shot: " +
                            proc.stderr.decode(errors="replace")[-300:])
-    return proc.stdout
+    return _wav_sizes(proc.stdout)
+
+
+def _wav_sizes(raw: bytes) -> bytes:
+    """ffmpeg writing WAV to a pipe cannot seek back, so the RIFF and data sizes stay at
+    0xFFFFFFFF -- WIS read a 7 s close-up's voice as 48,695 s and refused the shot
+    (2026-11-27). Fill them in from the real length."""
+    if raw[:4] != b"RIFF" or raw[8:12] != b"WAVE":
+        return raw
+    b = bytearray(raw)
+    b[4:8] = (len(b) - 8).to_bytes(4, "little")
+    i = 12
+    while i + 8 <= len(b):
+        cid, size = bytes(b[i:i + 4]), int.from_bytes(b[i + 4:i + 8], "little")
+        if cid == b"data":
+            b[i + 4:i + 8] = (len(b) - i - 8).to_bytes(4, "little")
+            break
+        i += 8 + size + (size & 1)
+    return bytes(b)
 
 
 def _cut(clip, shot_start: float, shot_len: float) -> bytes:
