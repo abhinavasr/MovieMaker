@@ -81,7 +81,7 @@ document.querySelectorAll("[data-del]").forEach((b) => b.addEventListener("click
   const FORMATS = {{ formats|tojson }}, LIB = {{ lib_hosts|tojson }};
   const f = document.getElementById("new"), idea = document.getElementById("idea");
   const picksBox = document.getElementById("picks"), hint = document.getElementById("hint");
-  const HINTS = {podcast: "Researched on the web, fact-checked and written, then it opens in the editor.",
+  const HINTS = {podcast: "Opens in the editor at once: you watch the web research, fact-checks and script there, then the shots appear.",
                  free: "Opens in the editor; the assistant helps you write and build it.",
                  film: "Opens in the editor; the assistant plans it as a short film: scenes, cast, a few camera set-ups per place.",
                  episode: "Opens in the editor; the assistant plans it as an episode: cold open, acts, a tag, standing sets.",
@@ -129,7 +129,8 @@ document.querySelectorAll("[data-del]").forEach((b) => b.addEventListener("click
     row.querySelectorAll(".chip").forEach((x) => x.classList.toggle("on", x === c));
     answers[key] = isNaN(Number(c.dataset.v)) ? c.dataset.v : Number(c.dataset.v);
   });
-  choose("free");
+  const want = new URLSearchParams(location.search).get("format");
+  choose(FORMATS.some((x) => x.key === want && x.live) ? want : "free");
   f.addEventListener("submit", async (e) => {
     e.preventDefault();
     const d = new FormData(f), go = document.getElementById("go");
@@ -142,7 +143,7 @@ document.querySelectorAll("[data-del]").forEach((b) => b.addEventListener("click
       url = "/api/podcasts";
       body = {topic: text, title, kind: answers.kind, minutes: answers.minutes, aspect: d.get("aspect"),
               language: d.get("language"), ...(hosts.length === 2 ? {hosts: hosts.map((n) => ({name: n}))} : {})};
-      next = (r) => `/podcast/${r.podcast_id}`;
+      next = (r) => r.editor_path || `/edit/${r.project_id}`;
     } else {
       body = {title: title || (text.split(/[.!?\n]/)[0] || "Untitled production").slice(0, 80), story: text,
               aspect: d.get("aspect"), format: fmt, answers};

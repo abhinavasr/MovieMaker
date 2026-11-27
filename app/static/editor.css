@@ -655,3 +655,5 @@ body:has(.ed) footer, body:has(.ed) .retention-note { display: none; }
 .el-lang { display: flex; gap: 8px; align-items: center; font-size: .86rem; color: var(--muted); }
 .el-lang select { font: inherit; background: var(--bg); color: var(--ink); border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; }
 .el-go .ed-btn { margin-left: auto; }
+.ed-podcast { text-decoration: none; color: var(--ink); }
+.ed-podcast:hover { border-color: var(--gold); }

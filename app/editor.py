@@ -2056,7 +2056,9 @@ async def fixed_camera(project, user: auth.User, shot) -> str | None:
         _touch(pid)
         return "assigned"
     if cam == "2S":
-        return None                                    # the two-shot itself is drawn
+        # Only the first two-shot in film order is drawn; the others wait for it.
+        first = next((x for x in ordered_shots(pid) if _jl(x["opts"], {}).get("camera") == "2S"), None)
+        return None if first is None or first["id"] == shot["id"] else "wait"
     if not any(_jl(s["opts"], {}).get("camera") == "2S" for s in ordered_shots(pid)):
         return None                                    # no two-shot to cut from: draw it
     master = frame_of("2S")
@@ -2663,9 +2665,25 @@ async def _run_auto_shots() -> None:
             # Plan every waiting shot's picture in ONE turn of the planner model, rather
             # than loading it once per shot (shotpics.plan_many skips planned ones).
             need = [j["shot"] for j in jobs if (row := db.one(
-                "SELECT asset_id, make, start_from FROM shots WHERE id=?", (j["shot"],)))
+                "SELECT asset_id, make, start_from, opts FROM shots WHERE id=?", (j["shot"],)))
                 and not row["asset_id"] and row["make"] not in REMAKE_MAKES
                 and row["start_from"] != "prev_last"]
+            # Fixed cameras: only each camera's first two-shot is drawn (the rest reuse it or are
+            # cut from it), so only that one needs a picture plan -- planning all 23 shots of a
+            # podcast took the 27B ~minutes for pictures that are never drawn (2026-11-27).
+            seen_cam: set = set()
+            planned = []
+            for sid in need:
+                orow = db.one("SELECT opts FROM shots WHERE id=?", (sid,))
+                cam = _jl(orow["opts"] if orow else None, {}).get("camera")
+                if cam and (cam != "2S" or "2S" in seen_cam or any(
+                        _jl(x["opts"], {}).get("camera") == "2S" and x["asset_id"]
+                        for x in ordered_shots(pid))):
+                    continue
+                if cam:
+                    seen_cam.add(cam)
+                planned.append(sid)
+            need = planned
             if need:
                 from app import shotpics
                 try:
@@ -4497,6 +4515,7 @@ def state(project, base: str) -> dict:
         "proposals": props, "export": export_view, "ai": ai_activity(project),
         "agent_applies": bool(params.get("agent_applies")),
         "progress": drawing_progress(pid),
+        "podcast": _podcast_view(pid),
         "image_model": params.get("image_model") or "",
         "wait_for_cast": params.get("wait_for_cast", True) is not False,
         "planner": cfg.PLANNER_MODEL,
@@ -6106,11 +6125,22 @@ def ai_activity(project) -> dict:
             "exporting": (params.get("_export") or {}).get("status") == "running"}
 
 
+def _podcast_view(pid: str) -> dict | None:
+    try:
+        from app import podcast
+        return podcast.for_project(pid)
+    except Exception:                                          # noqa: BLE001
+        return None
+
+
 async def stop_all(project, user: auth.User) -> dict:
     """Stop every AI operation for this production. Finished work is kept."""
     from app import agent
     pid = project["id"]
     done = {}
+    from app import podcast as _pod
+    if _pod.cancel_for_project(pid):
+        done["podcast"] = True
     # the agent first, so it does not start anything new meanwhile
     for t in db.query("SELECT id, status FROM agent_threads WHERE project_id=? AND status IN "
                       "('queued','planning','executing','watching')", (pid,)):

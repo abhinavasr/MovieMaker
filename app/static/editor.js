@@ -81,7 +81,28 @@
   // A visible "something is happening" while pictures are made (2026-11-25: "you need to show
   // something going on! user will get frustrated and cancel everything").
   let progressOpen = null;          // null = the default for this screen size
+  // A podcast production shows its research and writing here while they run (2026-11-27:
+  // one page for every production, no separate podcast page to go to).
+  function paintPodcast() {
+    let el = $("podcast-pill");
+    const pc = S.podcast;
+    const show = pc && (pc.active || pc.status === "failed");
+    if (!show) { if (el) el.remove(); return; }
+    if (!el) {
+      el = document.createElement("a"); el.id = "podcast-pill"; el.className = "ed-progress ed-podcast";
+      el.setAttribute("role", "status");
+      const top = document.querySelector(".ed-top"), right = document.querySelector(".ed-topr");
+      if (top && right) top.insertBefore(el, right); else document.body.appendChild(el);
+    }
+    el.href = pc.details;
+    el.title = "Research, fact-checks and the script: click for the details";
+    el.classList.toggle("ask", !!pc.gate || pc.status === "failed");
+    const what = pc.status === "failed" ? `⚠ Podcast stopped: ${pc.error || pc.message}`
+      : pc.gate ? "⚠ The podcast waits for your review" : `🎙 ${pc.message || "Researching"}`;
+    el.innerHTML = `<span class="mini">${esc(what.length > 70 ? what.slice(0, 68) + "…" : what)}${pc.active && !pc.gate ? ` · step ${pc.step}/${pc.steps}` : ""} ↗</span>`;
+  }
   function paintProgress() {
+    paintPodcast();
     let el = $("progress-card");
     const p = S.progress;
     if (!p) { if (el) el.remove(); return; }

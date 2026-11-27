@@ -238,6 +238,17 @@ def create(user: auth.User, body: dict, thread_id: str | None = None) -> str:
             "waiting to start", thread_id, db.now(), db.now()))
     _log(pid, f"Podcast created: “{config['topic'][:120]}” — {config['hosts'][0]['name']} vs "
               f"{config['hosts'][1]['name']}, about {config['minutes']:g} minutes")
+    # The production exists from the start, so the person lands in the editor and watches the
+    # research there (2026-11-27, the person: "why are you creating different webpages for
+    # different type of projects"). _build fills it when the script is done.
+    from app import editor
+    project_id = editor.create(
+        user, config["title"] or config["topic"][:80],
+        f"🎙 Podcast in progress: {config['topic']}\n\nThe podcast agents are researching, "
+        "fact-checking and writing this episode. The hosts, scenes, shots and every line appear "
+        "here when the script is done.", config["aspect"], "podcast",
+        {"kind": config.get("kind") or "", "minutes": config["minutes"]})
+    db.run("UPDATE podcasts SET project_id=? WHERE id=?", (project_id, pid))
     kick()
     return pid
 
@@ -1190,6 +1201,8 @@ async def _build(pid: str, row, config: dict, state: dict) -> str:
     a, b = config["hosts"]
     title = config["title"] or state.get("title") or config["topic"][:80]
     project_id = row["project_id"]
+    if project_id and not db.one("SELECT 1 FROM projects WHERE id=?", (project_id,)):
+        project_id = None                                      # deleted meanwhile
     if project_id and db.one("SELECT 1 FROM shots WHERE project_id=?", (project_id,)):
         return project_id                                      # built before a restart
     if not project_id:
@@ -1554,6 +1567,29 @@ def cancel_for_thread(thread_id: str) -> int:
     return len(rows)
 
 
+def cancel_for_project(project_id: str, why: str = "Cancelled: the production was stopped") -> int:
+    """■ Stop or delete in the production's editor stops its podcast run too."""
+    rows = db.query("SELECT id FROM podcasts WHERE project_id=? AND status IN (%s)"
+                    % ",".join("?" * (len(ACTIVE) + len(GATES))), (project_id, *ACTIVE, *GATES))
+    for r in rows:
+        _stop_now(r["id"], why)
+    return len(rows)
+
+
+def for_project(project_id: str) -> dict | None:
+    """The podcast run behind a production, for the editor's top bar."""
+    row = db.one("SELECT * FROM podcasts WHERE project_id=? ORDER BY created_at DESC LIMIT 1",
+                 (project_id,))
+    if row is None:
+        return None
+    state = _state(row)
+    done = sum(1 for k, _, _ in STEPS if k in state)
+    return {"podcast_id": row["id"], "status": row["status"], "message": row["message"] or "",
+            "active": row["status"] in ACTIVE or row["status"] in GATES,
+            "gate": row["status"] in GATES, "step": done, "steps": len(STEPS),
+            "error": row["error"] or "", "details": f"/podcast/{row['id']}"}
+
+
 def retry(user: auth.User, podcast_id: str) -> dict:
     """Start a failed or cancelled run again from where it stopped (saved steps are kept)."""
     row = owned(user, podcast_id)
@@ -1640,6 +1676,8 @@ async def page(request: Request):
     user = auth.current_user(request)
     if user is None:
         return RedirectResponse("/login?next=/podcast", status_code=303)
+    # One place for every production: the New production form, Podcast picked (2026-11-27).
+    return RedirectResponse("/edit?format=podcast", status_code=303)
     rows = db.query("SELECT * FROM podcasts WHERE user_id=? ORDER BY created_at DESC LIMIT 40",
                     (user.id,))
     return templates.TemplateResponse("podcast.html", {
