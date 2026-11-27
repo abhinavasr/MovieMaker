@@ -2336,6 +2336,7 @@ SECONDS_PER_PICTURE = 25          # measured on the 4090: ~10-30 s per klein / Q
 # Pictures with people go through the identity model: a master ~100 s (two of them), a frame
 # made from it ~60 s, plus the reviewer -- measured 2026-11-26: 11 podcast shots in 22 min.
 SECONDS_PER_PEOPLE_PICTURE = 75
+MAX_PICTURES_IN_FLIGHT = 3
 _wis_q = {"at": 0.0, "n": 0}
 
 
@@ -2596,6 +2597,15 @@ async def _run_auto_shots() -> None:
                         keep.append(j)                 # this set-up's first picture comes first
                         continue
                     j.pop("waiting_master", None)
+                    # At most a few pictures of this production in WIS at once: the reviewer's turn
+                    # on the GPU queues behind them, and with 8 queued no shot appeared for 15 min
+                    # (2026-11-27). Fewer in flight = shots arrive steadily, same total time.
+                    in_flight = sum(1 for x in jobs for i in (x.get("images") or [])
+                                    if (db.one("SELECT status FROM images WHERE id=?", (i,)) or
+                                        {"status": "succeeded"})["status"] not in images.TERMINAL)
+                    if in_flight >= MAX_PICTURES_IN_FLIGHT:
+                        keep.append(j)
+                        continue
                     # Two options (people: the identity model from cast cards / the master frame;
                     # otherwise two models), the planner picks (shotpics).
                     j["images"] = await picture_options(proj, user, shot["id"], "", 2, check=False)
