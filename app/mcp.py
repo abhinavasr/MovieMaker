@@ -340,6 +340,10 @@ def _create_project(user, args, base):
         raise HTTPException(400, "a title is required")
     project_id = service.create_project(user, title, str(args.get("mode") or "storyboard"),
                                         str(args.get("story") or ""))
+    orientation = args.get("orientation")
+    if orientation in service.SIZES:
+        service.save_settings(db.one("SELECT * FROM projects WHERE id=?", (project_id,)),
+                              orientation=orientation)
     out = _describe(project_id, base)
     out["next"] = ("add pictures with add_file (files in this chat), add_media (public URLs) "
                    "or get_upload_link (local files via curl), then write the scenes or the story and call render_video")
@@ -1302,9 +1306,16 @@ TOOLS = [
           "status, and a download link for the finished video. Read this before regenerating.",
           _get_project, _PID, ["project_id"], read_only=True),
     _tool("create_project", "Create a project",
-          "Start a new video project. It has no pictures yet; add them next.",
+          "Start a new video project. It has no pictures yet; add them next. Choose its shape "
+          "HERE, first, and draw every picture for it in that same shape (generate_image "
+          "orientation = this orientation) -- a picture of another shape is cropped to fit.",
           _create_project,
           {"title": {"type": "string"}, "mode": _MODE,
+           "orientation": {"type": "string", "enum": list(service.SIZES),
+                           "description": "The film's shape: landscape 864x480 (16:9, most "
+                                          "films and storybooks), portrait 480x864 (9:16, phone "
+                                          "videos), square 640x640. If the person did not say, "
+                                          "pick what suits the request."},
            "story": {"type": "string",
                      "description": "Storyboard: the story to split into scenes. Single: the "
                                     "prompt itself — motion, camera and sound."}},

@@ -214,3 +214,6 @@ body:has(.ed) footer, body:has(.ed) .retention-note { display: none; }
   .ws-media { margin-left: 0; } .ws-step pre, .ws-step .sub { margin-left: 0; }
   .ws-jump { bottom: 140px; }
 }
+.ws-projlinks { display: inline-flex; gap: 6px; flex-wrap: wrap; min-width: 0; }
+.ws-projlinks a { text-decoration: none; white-space: nowrap; }
+@media (max-width: 700px) { .ws-projlinks a { max-width: 46vw; overflow: hidden; text-overflow: ellipsis; } }

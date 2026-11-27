@@ -218,7 +218,17 @@ async def root(request: Request):
     user = auth.current_user(request)
     if user is None:
         return RedirectResponse("/login", status_code=303)
-    return RedirectResponse("/admin" if user.is_admin else "/assistant", status_code=303)
+    return RedirectResponse("/assistant", status_code=303)    # the person's default page
+
+
+@app.get("/p/{project_id}")
+async def short_project_link(project_id: str, request: Request):
+    """Short project links (an assistant wrote /p/<id> on 2026-11-27 and it was a 404)."""
+    row = db.one("SELECT mode FROM projects WHERE id=?", (project_id,))
+    if row is None:
+        raise HTTPException(404, "no such project")
+    return RedirectResponse(f"/edit/{project_id}" if row["mode"] == "storyboard"
+                            else f"/projects/{project_id}", status_code=303)
 
 
 @app.get("/edit", response_class=HTMLResponse)
@@ -297,7 +307,7 @@ async def login(request: Request, username: str = Form(...), password: str = For
              "error": "That username and password did not work, or the account has expired."},
             status_code=401)
     token = auth.start_session(user.id)
-    target = "/admin" if user.is_admin else "/studio"
+    target = "/assistant"     # 2026-11-27, the person: "default after login should be assistant"
     resp = RedirectResponse(target, status_code=303)
     resp.set_cookie("studio_session", token, httponly=True, samesite="lax",
                     secure=cfg.COOKIE_SECURE, max_age=cfg.SESSION_TTL_HOURS * 3600)
@@ -641,6 +651,15 @@ def _projects_of(user) -> list[dict]:
     return [{"id": r["id"], "title": r["title"], "mode": r["mode"]} for r in db.query(
         "SELECT id, title, mode FROM projects WHERE user_id=? ORDER BY updated_at DESC LIMIT 30",
         (user.id,))]
+
+
+@app.get("/audio", response_class=HTMLResponse)
+async def audio_page(request: Request):
+    """Audio: speech, music and voices as three use cases (2026-11-27 navigation)."""
+    user = auth.current_user(request)
+    if user is None:
+        return RedirectResponse("/login?next=/audio", status_code=303)
+    return templates.TemplateResponse("audio.html", {"request": request, "user": user})
 
 
 @app.get("/speech", response_class=HTMLResponse)

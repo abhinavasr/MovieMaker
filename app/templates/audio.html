@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}Audio · Story Studio{% endblock %}
+{% block body %}
+{% set au = "hub" %}{% include "_audiotabs.html" %}
+<h1>Audio</h1>
+<p class="muted">Sound on its own: voices, speech and songs. Everything made here can go into a production from the editor.</p>
+<div class="au-cards">
+  <a class="card au-card" href="/speech"><span class="i">🗣</span><b>Speak text</b>
+    <span class="muted">Type something and hear it read aloud — a preset voice, one of your voices, or a clone from a clip. Many languages; Sanskrit can be chanted.</span></a>
+  <a class="card au-card" href="/music"><span class="i">🎵</span><b>Make music</b>
+    <span class="muted">Songs with real vocals and lyrics: describe one, write the lyrics, or start from a track you have.</span></a>
+  <a class="card au-card" href="/voices"><span class="i">🎙</span><b>Your voices</b>
+    <span class="muted">Train a voice from your own recordings, then use it to speak or sing.</span></a>
+</div>
+{% endblock %}

@@ -483,7 +483,9 @@ PRODUCTION_ABOUT = ("Story Studio makes films on one local GPU: pictures (FLUX.2
                     "only through the production tools below; files are kept 90 days. A request "
                     "for a podcast, debate or two-host discussion episode is make_podcast (web "
                     "research, fact-checks, script, then a NEW production with InfiniteTalk shots); "
-                    "check it with get_podcast and give the person its editor_url.")
+                    "check it with get_podcast and give the person its editor_url. A production's "
+                    "link is ALWAYS its editor_url from the tools ({base}/edit/<project_id>); never "
+                    "make up a link.")
 
 # The planner's context window. Measured 2026-11-25 on the RTX 4090 with qwen3.8:27b
 # (hybrid attention: ~1.1 GB per extra 32k tokens, but Ollama's placement reserve grows too):
@@ -766,6 +768,12 @@ Rules:
 - People can attach pictures only on a project page; if one is needed, give them its page_url.
 - A command from the person beats your plan: if they say stop, cancel or change something,
   do that.
+- THE FILM'S SHAPE (landscape 16:9, portrait 9:16 or square) is decided FIRST and kept for
+  everything (the person, 2026-11-27: "ask the user for the type if unsure, but if selected one
+  (even by yourself) then maintain that for video also"). If the person said it, or the request
+  makes it obvious (a Reel/Short/phone video = portrait; a film, storybook, YouTube video,
+  podcast = landscape), use it; if not, ask in your first reply. Then create_project with that
+  orientation and draw every picture for it with the SAME orientation. Never mix shapes.
 """
 
 
@@ -1862,6 +1870,35 @@ def _assets(thread_id: str, base: str) -> list[dict]:
     return out
 
 
+def thread_projects(row) -> list[dict]:
+    """The productions this conversation made or worked on, for a link in its header
+    (2026-11-27, the person: "every chat (if it has an editor project) should have a link to
+    the editor project itself")."""
+    ids = []
+    if row["project_id"]:
+        ids.append(row["project_id"])
+    for r in db.query("SELECT content, meta FROM agent_messages WHERE thread_id=? ORDER BY seq",
+                      (row["id"],)):
+        for pid in re.findall(r"prj_[0-9a-f]{20}", (r["content"] or "") + (r["meta"] or "")):
+            if pid not in ids:
+                ids.append(pid)
+    for r in db.query("SELECT project_id FROM podcasts WHERE thread_id=? AND project_id IS NOT NULL",
+                      (row["id"],)):
+        if r["project_id"] not in ids:
+            ids.append(r["project_id"])
+    out = []
+    for pid in ids:
+        p = db.one("SELECT id, title, mode, params_json FROM projects WHERE id=? AND user_id=?",
+                   (pid, row["user_id"]))
+        if p is None:
+            continue
+        editor_ok = p["mode"] == "storyboard"
+        out.append({"id": p["id"], "title": p["title"] or "Untitled",
+                    "url": f"/edit/{p['id']}" if editor_ok else f"/projects/{p['id']}",
+                    "editor": editor_ok})
+    return out[-4:]
+
+
 def _context_view(row, base: str) -> list[dict]:
     out = []
     for c in _context_items(row):
@@ -1884,6 +1921,7 @@ def thread_view(row, base: str, since: float = 0.0) -> dict:
             "next_review_at": row["next_review_at"], **service.retention(row["updated_at"]),
             "files": [_file_view(f, base) for f in agentfiles.files_of(row["id"])],
             "assets": _assets(row["id"], base), "context": _context_view(row, base),
+            "projects": thread_projects(row),
             "messages": [_message_view(m, base) for m in msgs], "now": _now()}
 
 

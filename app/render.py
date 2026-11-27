@@ -256,10 +256,106 @@ def _concat(clips: list[Path], out: Path, audio: Path | None,
 
 # --------------------------------------------------------------------------- modes
 
+def _shape_off(path, params: dict) -> bool:
+    try:
+        from PIL import Image
+        with Image.open(path) as im:
+            iw, ih = im.size
+    except Exception:                                          # noqa: BLE001
+        return False
+    want = int(params.get("width", 480)) / int(params.get("height", 864))
+    return abs(iw / ih - want) / want >= 0.03
+
+
+async def match_shape(project_id: str, shot: dict, image_path: str, params: dict, report) -> str:
+    """A picture of another shape than the film is REDRAWN in the film's shape before its clip
+    is made -- the same picture recomposed, not cropped or stretched (2026-11-27, the person:
+    "regenerate if dimensions don't match"; Khaing's landscape fox pictures had been squeezed
+    into a portrait film). The new picture replaces the shot's. If redrawing fails, the clip
+    falls back to a centre crop (fitted)."""
+    if not image_path or not _shape_off(image_path, params):
+        return image_path
+    from app import agent, images, shotpics
+    owner = db.one("SELECT user_id FROM projects WHERE id=?", (project_id,))
+    user = agent.load_user(owner["user_id"]) if owner else None
+    if user is None:
+        return image_path
+    w, h = int(params.get("width", 480)), int(params.get("height", 864))
+    shape = "landscape" if w > h * 1.15 else "portrait" if h > w * 1.15 else "square"
+    label = shot.get("title") or f"shot {shot['idx'] + 1}"
+    await report(1, f"{label} — redrawing its picture as a {shape} frame to match the film")
+    try:
+        img = await images.create(
+            user, "Recompose this exact picture as a " + shape + " frame: the same characters, "
+            "place, moment, art style, colours and light; extend the scene naturally to fill the "
+            "new frame; nothing new added, no text, no borders.",
+            [("picture.png", Path(image_path).read_bytes())], orientation=shape,
+            model=shotpics.IDENTITY_MODEL)
+        for _ in range(180):
+            _check_cancelled(project_id)
+            row = await images.refresh(img) or db.one("SELECT * FROM images WHERE id=?", (img,))
+            if row["status"] in images.TERMINAL:
+                break
+            await asyncio.sleep(3)
+        row = db.one("SELECT * FROM images WHERE id=?", (img,))
+        if row["status"] != "succeeded" or not row["path"] or not Path(row["path"]).exists():
+            raise RuntimeError(row["status"])
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:                                   # noqa: BLE001
+        log.warning("redrawing %s in the film's shape failed (%s); cropping instead",
+                    shot["id"], exc)
+        return image_path
+    dest = cfg.uploads_dir / project_id
+    dest.mkdir(parents=True, exist_ok=True)
+    asset_id = db.new_id("ast")
+    path = dest / f"{asset_id}.png"
+    path.write_bytes(Path(row["path"]).read_bytes())
+    idx = (db.one("SELECT MAX(idx) AS m FROM assets WHERE project_id=?", (project_id,))["m"] or 0) + 1
+    db.run("INSERT INTO assets (id, project_id, kind, idx, path, orig_name, mime, created_at) "
+           "VALUES (?,?,?,?,?,?,?,?)", (asset_id, project_id, "image", idx, str(path),
+                                        f"{shape}-{img}.png", "image/png", db.now()))
+    db.run("UPDATE shots SET asset_id=? WHERE id=?", (asset_id, shot["id"]))
+    shot["asset_id"] = asset_id
+    log.info("%s: picture redrawn as %s (%s) to match the film", shot["id"], shape, img)
+    return str(path)
+
+
+def fitted(path, params: dict) -> bytes:
+    """The picture as the video model should get it: when its shape differs from the video's,
+    centre-cropped to the video's shape (a video model resizes to width x height, so a
+    landscape picture in a portrait video came out squeezed -- 2026-11-27, Khaing's fox film).
+    Same-shaped pictures pass through untouched."""
+    raw = Path(path).read_bytes()
+    w, h = int(params.get("width", 480)), int(params.get("height", 864))
+    try:
+        from PIL import Image
+        import io
+        with Image.open(io.BytesIO(raw)) as im:
+            iw, ih = im.size
+            want = w / h
+            if abs(iw / ih - want) / want < 0.03:
+                return raw
+            if iw / ih > want:                       # too wide: trim the sides
+                cw = round(ih * want)
+                box = ((iw - cw) // 2, 0, (iw - cw) // 2 + cw, ih)
+            else:                                    # too tall: trim top and bottom
+                ch = round(iw / want)
+                box = (0, (ih - ch) // 2, iw, (ih - ch) // 2 + ch)
+            buf = io.BytesIO()
+            im.convert("RGB").crop(box).save(buf, "PNG")
+            log.info("picture %s is %dx%d for a %dx%d video: cropped, not stretched",
+                     Path(path).name, iw, ih, w, h)
+            return buf.getvalue()
+    except Exception:                                          # noqa: BLE001
+        return raw
+
+
 async def _render_shot(project_id: str, shot, assets: dict, params: dict,
                        report) -> Path:
     """One clip. Returns the file it was written to."""
     image_path = assets.get(shot["asset_id"])
+    image_path = await match_shape(project_id, shot, image_path, params, report)
     if shot.get("make") in ("perform", "lipsync", "motion", "talk2", "longtalk", "recast", "restyle"):
         from app import editor
         payload = editor.perform_payload(project_id, shot, image_path, params)
@@ -276,7 +372,7 @@ async def _render_shot(project_id: str, shot, assets: dict, params: dict,
     if params.get("upscale") in ("latent", "refine"):
         payload["upscale"] = params["upscale"]
     if image_path:
-        payload["image"] = {"b64": wis.b64(Path(image_path).read_bytes()),
+        payload["image"] = {"b64": wis.b64(fitted(image_path, params)),
                             "mime": "image/png"}
     # Continuity: this shot ends on the next shot's opening image, so the two
     # clips meet on the same frame instead of jumping. Only meaningful when
@@ -285,7 +381,7 @@ async def _render_shot(project_id: str, shot, assets: dict, params: dict,
     if params.get("continuity") and shot.get("next_asset_id"):
         nxt = assets.get(shot["next_asset_id"])
         if nxt and image_path:
-            payload["last_image"] = {"b64": wis.b64(Path(nxt).read_bytes()),
+            payload["last_image"] = {"b64": wis.b64(fitted(nxt, params)),
                                      "mime": "image/png"}
     return await _submit_shot(project_id, shot, payload, report)
 

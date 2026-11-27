@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% block title %}Music · Story Studio{% endblock %}
 {% block body %}
+{% set au = "music" %}{% include "_audiotabs.html" %}
 <h1>Music</h1>
 <p class="muted">Songs with real vocals and lyrics, made with ACE-Step 1.5 on this studio’s GPU.
   Describe a song, write your own lyrics, or start from a track you already have. Up to

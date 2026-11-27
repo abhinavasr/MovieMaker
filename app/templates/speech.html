@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% block title %}Speech · Story Studio{% endblock %}
 {% block body %}
+{% set au = "speech" %}{% include "_audiotabs.html" %}
 <h1>Speech</h1>
 <p class="muted">Type something and pick a voice — or clone one from a clip — and Qwen3-TTS
   reads it aloud (Burmese / မြန်မာ is read by VoxCPM2). Use a clip as a storyboard soundtrack with “Add to project”. Up to

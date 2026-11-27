@@ -10,6 +10,7 @@ its `detail` as the tool's error text.
 """
 from __future__ import annotations
 
+import logging
 import hashlib
 import hmac
 import io
@@ -30,6 +31,8 @@ MODES = ("storyboard", "single")
 # The three sizes the model has native buckets for. Anything else is accepted
 # by the service with a warning and then usually dies on VRAM part way through,
 # so it is not offered.
+log = logging.getLogger("studio.service")
+
 SIZES = {"portrait": (480, 864), "landscape": (864, 480), "square": (640, 640)}
 
 
@@ -170,7 +173,34 @@ def add_files(project, files: list[tuple[str, str, bytes]]) -> int:
         have[kind] += 1
         added += 1
     db.touch_project(project_id, message=f"{added} file(s) added")
+    _shape_from_pictures(project_id)
     return added
+
+
+def _shape_from_pictures(project_id: str) -> None:
+    """A project whose shape nobody chose takes the shape of its pictures (2026-11-27:
+    Khaing's three landscape storybook pictures went into a project left at the default
+    portrait size, and every clip came out squeezed). Only before anything is rendered,
+    and never over a shape someone set (params.orientation)."""
+    project = db.one("SELECT * FROM projects WHERE id=?", (project_id,))
+    params = db.params_of(project)
+    if params.get("orientation") or params.get("editor") or project["status"] == "succeeded":
+        return
+    shapes = []
+    for a in db.query("SELECT path FROM assets WHERE project_id=? AND kind='image'", (project_id,)):
+        try:
+            with Image.open(a["path"]) as im:
+                w, h = im.size
+        except Exception:                                      # noqa: BLE001
+            continue
+        shapes.append("landscape" if w > h * 1.15 else "portrait" if h > w * 1.15 else "square")
+    if not shapes:
+        return
+    shape = max(set(shapes), key=shapes.count)
+    if SIZES[shape] != (params.get("width"), params.get("height")):
+        params["width"], params["height"] = SIZES[shape]
+        db.set_params(project_id, params)
+        log.info("%s: shaped %s from its pictures", project_id, shape)
 
 
 def save_settings(project, *, title: str | None = None, story: str | None = None,

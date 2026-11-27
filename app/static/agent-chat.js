@@ -179,7 +179,9 @@ window.AgentChat = (() => {
       const box = $("jobs"); if (!box) return;
       const t = view;
       const jobs = (t?.tracked || []).filter((j) => !["succeeded", "failed", "cancelled", "done"].includes(j.status));
-      box.innerHTML = !jobs.length ? '<div class="ws-empty-s">Nothing running.</div>' : jobs.map((j) => {
+      // Shown only while something runs (2026-11-27: "remove running now when it's not doing anything").
+      if ($("jobs-sec")) $("jobs-sec").hidden = !jobs.length;
+      box.innerHTML = !jobs.length ? "" : jobs.map((j) => {
         const p = typeof j.progress === "number" && j.progress > 0 ? j.progress : null;
         return `<div class="ws-job"><div class="h"><span>${ICON[j.kind] || "⚙"} ${esc(j.label)}</span><span>${p != null ? p + "%" : esc(j.status)}</span></div>`
           + (j.message ? `<div class="m">${esc(j.message)}</div>` : "")
@@ -275,6 +277,12 @@ window.AgentChat = (() => {
         view = t;
         t.messages.forEach(render);
         if (page && $("title")) $("title").textContent = t.title;
+        // The productions this chat made or worked on: one click into the editor.
+        if ($("projlinks")) {
+          const ps = t.projects || [];
+          $("projlinks").hidden = !ps.length;
+          $("projlinks").innerHTML = ps.map((p) => `<a class="ws-btn sm" href="${esc(p.url)}" title="Open “${esc(p.title)}” ${p.editor ? "in the editor" : ""}">🎬 ${esc(p.title.length > 28 ? p.title.slice(0, 26) + "…" : p.title)} ↗</a>`).join("");
+        }
         paintStatus(); paintContext();
         if (t.messages.length) { if (stick) toBottom(true); else if ($("jump")) $("jump").hidden = false; }
         else if (stick && !liveEl.hidden) toBottom(true);
@@ -299,6 +307,7 @@ window.AgentChat = (() => {
       col.querySelectorAll(":scope > [data-chat-node]").forEach((n) => n.remove());
       if ($("empty")) $("empty").hidden = !!id;
       if ($("del")) $("del").hidden = !id;
+      if ($("projlinks")) { $("projlinks").hidden = true; $("projlinks").innerHTML = ""; }
       if (page) { if ($("title")) $("title").textContent = id ? "…" : "New conversation"; history.replaceState(null, "", id ? "?t=" + id : location.pathname); }
       paintContext(); paintStatus(); paintThreads(); poll();
       if (!id) loadThreads();

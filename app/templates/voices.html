@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% block title %}Voices · Story Studio{% endblock %}
 {% block body %}
+{% set au = "voices" %}{% include "_audiotabs.html" %}
 <h1>Your voices</h1>
 <p class="muted">Train a voice from your own recordings, then use it to re-sing songs, sing new
   ones, or speak text — in your voice. Up to {{ max_voices }} voices. A trained voice and its

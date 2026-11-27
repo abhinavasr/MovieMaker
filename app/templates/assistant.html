@@ -20,6 +20,7 @@
     <div class="ws-head">
       <button class="ws-btn ghost ws-icon ws-only-narrow" id="open-rail" type="button" aria-label="Conversations">☰</button>
       <h1 id="title" title="Click to rename">New conversation</h1>
+      <span class="ws-projlinks" id="projlinks" hidden></span>
       <span class="ws-pill" id="pill"><span class="ws-dot" id="pill-dot"></span><span id="pill-t">ready</span></span>
       <button class="ws-btn ghost sm ws-only-ctx" id="open-ctx" type="button">Context <span id="ctx-n"></span></button>
       <button class="ws-btn ghost ws-icon" id="del" type="button" title="Delete conversation" aria-label="Delete conversation" hidden>🗑</button>
@@ -66,7 +67,7 @@
 
   <!-- context -->
   <aside class="ws-ctx ws-pane" id="ctx" aria-label="Context">
-    <div class="ws-sec">
+    <div class="ws-sec" id="jobs-sec" hidden>
       <h3>Running now <span class="c" id="next-check"></span></h3>
       <div id="jobs"><div class="ws-empty-s">Nothing running.</div></div>
     </div>

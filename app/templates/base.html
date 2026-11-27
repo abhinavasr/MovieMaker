@@ -13,14 +13,15 @@
   {% if user %}<button class="menu-btn" type="button" aria-label="Menu" aria-expanded="false" aria-controls="sitenav" onclick="var t=document.getElementById('sitetop');var o=t.classList.toggle('open');this.setAttribute('aria-expanded',o)">☰</button>{% endif %}
   <nav id="sitenav">
     {% if user %}
-      {% if user.is_admin %}<a href="/admin">Users</a>{% endif %}
-      <a href="/edit">Editor</a>
-      <a href="/library">Library</a>
-      <a href="/assistant">Assistant</a>
-      <a href="/studio">Projects</a>
-      <a href="/speech">Speech</a>
-      <a href="/music">Music</a>
-      <a href="/voices">Voices</a>
+      {# Three places (2026-11-27, the person: "only 3 options, Assistant (default), Editor and
+         Library. Voices and music, speech should be part of library", then "create a separate tab
+         called Audio and park all of them as use cases ... instead of library") #}
+      {% set here = request.url.path if request else "" %}
+      <a href="/assistant" {% if here.startswith("/assistant") or here == "/" %}aria-current="page"{% endif %}>Assistant</a>
+      <a href="/edit" {% if here.startswith("/edit") or here.startswith("/podcast") or here.startswith("/studio") or here.startswith("/projects") %}aria-current="page"{% endif %}>Editor</a>
+      <a href="/library" {% if here.startswith("/library") %}aria-current="page"{% endif %}>Library</a>
+      <a href="/audio" {% if here.startswith("/audio") or here.startswith("/voices") or here.startswith("/music") or here.startswith("/speech") %}aria-current="page"{% endif %}>Audio</a>
+      {% if user.is_admin %}<a href="/admin" class="muted-link">Users</a>{% endif %}
       <span class="who">{{ user.username }}</span>
       <form method="post" action="/logout"><button class="link">Sign out</button></form>
     {% endif %}

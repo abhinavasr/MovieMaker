@@ -1,0 +1,7 @@
+{# Audio's three use cases, one tab bar on each page (2026-11-27 navigation). #}
+<nav class="au-tabs" aria-label="Audio">
+  <a href="/audio" {% if au == "hub" %}aria-current="page"{% endif %}>🎧 Audio</a>
+  <a href="/speech" {% if au == "speech" %}aria-current="page"{% endif %}>🗣 Speak text</a>
+  <a href="/music" {% if au == "music" %}aria-current="page"{% endif %}>🎵 Make music</a>
+  <a href="/voices" {% if au == "voices" %}aria-current="page"{% endif %}>🎙 Your voices</a>
+</nav>

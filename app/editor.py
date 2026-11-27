@@ -809,6 +809,7 @@ def resolve_ref(pid: str, v) -> str | None:
 
 
 def library_project(user, create: bool = True) -> str | None:
+    make = globals()["create"]          # the parameter `create` hides the module's create()
     """The person's Library: a production of their own that holds characters, places, props,
     styles and voices for every project. It is never listed with their productions and is
     never deleted with them (2026-11-27, the person: "a character and reference library,
@@ -831,7 +832,7 @@ def library_project(user, create: bool = True) -> str | None:
             return r["id"]
     if not create or isinstance(user, str):
         return None
-    pid = create(user, "Library", "Your characters, places, props, styles and voices for every "
+    pid = make(user, "Library", "Your characters, places, props, styles and voices for every "
                                   "project.", "16:9")
     p = db.params_of(db.one("SELECT * FROM projects WHERE id=?", (pid,)))
     p["library"] = True
@@ -3523,7 +3524,7 @@ def perform_payload(project_id: str, shot, image_path: str | None, params: dict)
                                or " ".join(x for x in (shot.get("prompt") or "The person in the picture "
                                                        "talks, natural expression.", ctx) if x)),
                     "width": int(params.get("width", 480)), "height": int(params.get("height", 864)),
-                    "image": {"b64": wis.b64(Path(image_path).read_bytes()), "mime": "image/png"},
+                    "image": {"b64": wis.b64(render.fitted(image_path, params)), "mime": "image/png"},
                     # their lines only, each at its moment, silence between
                     "reference_audio": [{"b64": wis.b64(_window(tracks[who], start, length)),
                                          "mime": "audio/wav"}]}
@@ -3551,7 +3552,7 @@ def perform_payload(project_id: str, shot, image_path: str | None, params: dict)
                                                        "picture talk to each other, natural "
                                                        "expressions.", ctx) if x)),
                     "width": int(params.get("width", 480)), "height": int(params.get("height", 864)),
-                    "image": {"b64": wis.b64(Path(image_path).read_bytes()), "mime": "image/png"},
+                    "image": {"b64": wis.b64(render.fitted(image_path, params)), "mime": "image/png"},
                     "reference_audio": [{"b64": wis.b64(_window(tracks[r], start, length)),
                                          "mime": "audio/wav"} for r in first_two],
                     "seconds": round(length, 2),
@@ -3577,7 +3578,7 @@ def perform_payload(project_id: str, shot, image_path: str | None, params: dict)
                                                            (shot["id"],))).get("prompt")
                            or " ".join(x for x in (shot.get("prompt") or default, ctx) if x)),
                 "width": int(params.get("width", 480)), "height": int(params.get("height", 864)),
-                "image": {"b64": wis.b64(Path(image_path).read_bytes()), "mime": "image/png"},
+                "image": {"b64": wis.b64(render.fitted(image_path, params)), "mime": "image/png"},
                 "reference_audio": [{"b64": wis.b64(p.read_bytes()), "mime": _audio_mime(p)}
                                     for p in voices[:need]],
                 **({"speaker_layout": opts.get("layout", "left_right")} if need == 2 else {})}
@@ -3634,7 +3635,7 @@ def perform_payload(project_id: str, shot, image_path: str | None, params: dict)
                 "motion_prompt": pol.get("motion_prompt")
                 or f"A reference video ({label}) of a person making these movements.",
                 "seconds": secs, "width": w, "height": h,
-                "image": {"b64": wis.b64(Path(image_path).read_bytes()), "mime": "image/png"},
+                "image": {"b64": wis.b64(render.fitted(image_path, params)), "mime": "image/png"},
                 "reference_videos": [{"b64": _ref_video_b64(moves, w, h, secs),
                                       "mime": "video/mp4"}]}
     if shot.get("make") == "lipsync":
@@ -3659,7 +3660,7 @@ def perform_payload(project_id: str, shot, image_path: str | None, params: dict)
                 "seconds": min(cfg.LIPSYNC_MAX_SECONDS, int(shot.get("seconds") or 5)),
                 "width": int(params.get("width", 480)), "height": int(params.get("height", 864)),
                 "client_request_id": shot["id"],
-                "image": {"b64": wis.b64(Path(image_path).read_bytes()), "mime": "image/png"},
+                "image": {"b64": wis.b64(render.fitted(image_path, params)), "mime": "image/png"},
                 # The whole shot window, silence included, so the mouth is still
                 # where the line has not started yet.
                 "reference_audio": [{"b64": wis.b64(_window(lines, start, length)),

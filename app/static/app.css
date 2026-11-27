@@ -254,3 +254,12 @@ progress { width: 100%; max-width: 420px; height: 10px; vertical-align: middle; 
 .bt-login { display: block; text-align: center; margin: 6px 0 8px; }
 .muted.or { display: flex; align-items: center; gap: 10px; margin: 16px 0 6px; }
 .muted.or::before, .muted.or::after { content: ""; flex: 1; border-top: 1px solid var(--line, #333); }
+.top nav a[aria-current="page"] { color: var(--ink, #fff); font-weight: 700; text-decoration: underline; text-underline-offset: 6px; }
+/* Audio: the use-case tabs and hub (2026-11-27) */
+.au-tabs { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 18px; }
+.au-tabs a { text-decoration: none; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 5px 12px; font-size: .86rem; }
+.au-tabs a[aria-current="page"] { color: var(--ink); border-color: var(--accent); }
+.au-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 14px; margin-top: 16px; }
+.au-card { display: flex; flex-direction: column; gap: 6px; text-decoration: none; color: inherit; }
+.au-card:hover { border-color: var(--accent); }
+.au-card .i { font-size: 1.8rem; }
