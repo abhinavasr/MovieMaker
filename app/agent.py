@@ -110,7 +110,30 @@ def _set(thread_id: str, **fields) -> None:
            (*fields.values(), _now(), thread_id))
 
 
+_LINK = re.compile(r"(?:https?://[^\s)\]>\"']+?)?/(?:edit|projects|p)/(prj_[0-9a-f]{20})\b")
+
+
+def fix_links(thread_id: str, text: str) -> str:
+    """Every production link in what the assistant says points at THIS studio (2026-11-27: a
+    reply linked https://batiyao.app/edit/<id> -- the planner guessed the host -- and an
+    earlier one made up /p/<id>). Editor productions get /edit/, others /projects/."""
+    if not text or "prj_" not in text:
+        return text
+    t = db.one("SELECT base_url FROM agent_threads WHERE id=?", (thread_id,))
+    base = (cfg.PUBLIC_URL or (t["base_url"] if t else "") or "").rstrip("/")
+
+    def sub(m):
+        pid = m.group(1)
+        row = db.one("SELECT mode FROM projects WHERE id=?", (pid,))
+        if row is None:
+            return m.group(0)
+        return f"{base}/{'edit' if row['mode'] == 'storyboard' else 'projects'}/{pid}"
+    return _LINK.sub(sub, text)
+
+
 def _post(thread_id: str, role: str, content: str = "", **meta) -> int:
+    if role == "assistant":
+        content = fix_links(thread_id, content)
     now = _now()
     with db.connect() as conn:
         cur = conn.execute(
@@ -484,8 +507,8 @@ PRODUCTION_ABOUT = ("Story Studio makes films on one local GPU: pictures (FLUX.2
                     "for a podcast, debate or two-host discussion episode is make_podcast (web "
                     "research, fact-checks, script, then a NEW production with InfiniteTalk shots); "
                     "check it with get_podcast and give the person its editor_url. A production's "
-                    "link is ALWAYS its editor_url from the tools ({base}/edit/<project_id>); never "
-                    "make up a link.")
+                    "link is ALWAYS the editor_url a tool returned, copied exactly; never make up "
+                    "a link or a website (this studio is not Batiyao).")
 
 # The planner's context window. Measured 2026-11-25 on the RTX 4090 with qwen3.8:27b
 # (hybrid attention: ~1.1 GB per extra 32k tokens, but Ollama's placement reserve grows too):
@@ -886,6 +909,10 @@ audio, mix) is given to you in every turn; the person sees the same thing on scr
     a quick back-and-forth -> "2S" (talk2). To change how the cameras look, draw_pictures
     {redraw: true} on any of those shots: the studio redraws the two-shot and cuts the close-ups
     again for all of them.
+  * TO LET THE PERSON HEAR A VOICE ("let me hear them", "how does she sound", "play the
+    voices"): hear_voice{ref_id} (or with text for a line in that voice). It plays in this chat
+    and is listed under Made here; it NEVER touches the production. add_dialogue is only for
+    lines that belong in the film, at their place in the story -- never for samples.
   * TO CHANGE PART OF A PICTURE (a shot's or a character's) use edit_picture with only what
     should change ("she is not smiling", "evening light"): it keeps everything else. Draw a
     picture again only when the person wants a different picture altogether.

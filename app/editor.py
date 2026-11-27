@@ -5018,6 +5018,40 @@ async def _t_dialogue(user, args, base):
     return out
 
 
+async def _t_hear_voice(user, args, base):
+    """Let the person HEAR a character's voice in the conversation -- never on the timeline
+    (2026-11-27: asked to hear the hosts, the assistant added two sample lines at 0 s of the
+    production, under its opening shots; the person: "it should have been a Made here kind of
+    thing"). No text: the character's own voice sample. With text: that line in their voice,
+    as a speech clip of the conversation."""
+    project = _agent_project(user, args)
+    pid = project["id"]
+    rid = resolve_ref(pid, str(args.get("ref_id") or "")) or str(args.get("ref_id") or "")
+    r = db.one("SELECT * FROM prod_refs WHERE id=? AND project_id=?", (rid, pid))
+    if r is None:
+        raise HTTPException(404, "no such character in this production")
+    text = " ".join(str(args.get("text") or "").split())
+    has_sample = bool(r["voice_path"] and Path(r["voice_path"]).exists())
+    if not text:
+        if not has_sample:
+            raise HTTPException(400, f"{r['name']} has no voice yet; design it first")
+        return {"name": r["name"], "said": r["voice_text"] or "",
+                "audio_url": f"/api/editor/{pid}/refs/{rid}/voice",
+                "note": "played in the conversation only; nothing was added to the production"}
+    from app import speech
+    ids = await speech.create(
+        user, text[:600], language=args.get("language"), instruct=args.get("instruct") or None,
+        reference=Path(r["voice_path"]).read_bytes() if has_sample else None,
+        reference_text=(r["voice_text"] or None) if has_sample else None,
+        speaker=None if has_sample else (r["speaker"] or None))
+    row = await speech.wait(ids[0], 90)
+    out = {"name": r["name"], "speech_id": ids[0], "status": row["status"] if row else "voicing",
+           "note": "played in the conversation only; nothing was added to the production"}
+    if row and row["status"] == "succeeded":
+        out["audio_url"] = base + service.stable_signed_path("speech", ids[0], 86400)
+    return out
+
+
 async def _t_music(user, args, base):
     project = _agent_project(user, args)
     start = float(args.get("start_s") or 0)
@@ -5315,6 +5349,16 @@ AGENT_TOOLS = {
         "description": "STEP 2: generate the video clips of these shots (only shots that have a "
                        "picture; the rest are reported). ~2 min per 5 s. Only when the person "
                        "asks for videos."},
+    "hear_voice": {
+        "handler": _t_hear_voice,
+        "description": "Let the person HEAR a character's voice right here in the chat (an audio "
+                       "player in the conversation, listed under Made here). Use it whenever they "
+                       "ask to hear, check or compare a voice. Nothing is added to the production. "
+                       "No text = the character's own voice sample; text = that line in their voice.",
+        "schema": {"type": "object", "required": ["project_id", "ref_id"], "properties": {
+            **_PID, "ref_id": {"type": "string", "description": "the character"},
+            "text": {"type": "string", "description": "optional: a line to hear in their voice"},
+            "instruct": {"type": "string"}, "language": {"type": "string"}}}},
     "add_dialogue": {
         "handler": _t_dialogue,
         "schema": {"type": "object", "required": ["project_id", "text"], "properties": {
