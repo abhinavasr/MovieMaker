@@ -428,14 +428,21 @@ def _resolve(value, results: dict):
 CURRENT_ASK: contextvars.ContextVar = contextvars.ContextVar("current_ask", default=None)
 
 VIDEO_TOOLS = {"render_shots", "render_video"}
-_VIDEO_WORDS = re.compile(r"video|render|animat|clip|film|movie|motion|lip.?sync|talk|export|"
-                          r"वीडियो|ဗီဒီယို", re.I)
+_VIDEO_WORDS = re.compile(r"vid[eo]{1,3}|vedio|render|animat|clip|film|movie|motion|lip.?sync|talk|"
+                          r"export|full story|whole story|वीडियो|ဗီဒီယို", re.I)
 
 
 def _asked_for_video(thread_id: str) -> bool:
-    row = db.one("SELECT content FROM agent_messages WHERE thread_id=? AND role='user' "
-                 "ORDER BY seq DESC LIMIT 1", (thread_id,))
-    return bool(row and _VIDEO_WORDS.search(row["content"] or ""))
+    """Whether the person asked for videos in what they said since the assistant last replied.
+    All of it, not just the last message (2026-11-27: "gnerate theentire video" then "for the
+    full story" -- the last message alone has no video word, and three render calls were
+    refused while the person had asked twice)."""
+    last_reply = db.one("SELECT MAX(seq) AS s FROM agent_messages WHERE thread_id=? AND "
+                        "role='assistant' AND seq < (SELECT MAX(seq) FROM agent_messages WHERE "
+                        "thread_id=? AND role='user')", (thread_id, thread_id))["s"] or 0
+    rows = db.query("SELECT content FROM agent_messages WHERE thread_id=? AND role='user' AND "
+                    "seq > ? ORDER BY seq DESC LIMIT 6", (thread_id, last_reply))
+    return any(_VIDEO_WORDS.search(r["content"] or "") for r in rows)
 
 
 async def _run_tool(user, name: str, args: dict, base: str,
