@@ -442,7 +442,18 @@ def _asked_for_video(thread_id: str) -> bool:
                         "thread_id=? AND role='user')", (thread_id, thread_id))["s"] or 0
     rows = db.query("SELECT content FROM agent_messages WHERE thread_id=? AND role='user' AND "
                     "seq > ? ORDER BY seq DESC LIMIT 6", (thread_id, last_reply))
-    return any(_VIDEO_WORDS.search(r["content"] or "") for r in rows)
+    if any(_VIDEO_WORDS.search(r["content"] or "") for r in rows):
+        return True
+    # A go-ahead in answer to the assistant's own words about the videos (2026-11-27: the
+    # assistant said "only 1 of 23 shots has a video clip ...", the person answered "Do all
+    # now", and the render was refused).
+    said = db.one("SELECT content FROM agent_messages WHERE seq=?", (last_reply,)) if last_reply else None
+    return bool(said and _VIDEO_WORDS.search(said["content"] or "") and
+                any(_GO_AHEAD.search(r["content"] or "") for r in rows))
+
+
+_GO_AHEAD = re.compile(r"\b(yes|yeah|yep|ok(ay)?|sure|go|go ahead|do it|do (them|all|it all)|all|"
+                       r"start|proceed|please|now|haan|ha|हाँ|हां|करो)\b", re.I)
 
 
 async def _run_tool(user, name: str, args: dict, base: str,
