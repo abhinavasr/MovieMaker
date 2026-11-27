@@ -32,6 +32,7 @@ retry_job, for diagnosing and repairing the person's own failed work.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import base64
 import collections
 import datetime as _dt
@@ -399,6 +400,10 @@ def _resolve(value, results: dict):
     return value
 
 
+# The person's latest words while the assistant's tools run: guards in the editor read it
+# (editor.guard_look -- a chosen character's look changes only when the person asks for it).
+CURRENT_ASK: contextvars.ContextVar = contextvars.ContextVar("current_ask", default=None)
+
 VIDEO_TOOLS = {"render_shots", "render_video"}
 _VIDEO_WORDS = re.compile(r"video|render|animat|clip|film|movie|motion|lip.?sync|talk|export|"
                           r"वीडियो|ဗီဒီယို", re.I)
@@ -426,6 +431,9 @@ async def _run_tool(user, name: str, args: dict, base: str,
                                     "videos. Do the pictures only, then ask whether they want "
                                     "the videos made."}, None
         if thread_id:
+            last = db.one("SELECT content FROM agent_messages WHERE thread_id=? AND role='user' "
+                          "ORDER BY seq DESC LIMIT 1", (thread_id,))
+            CURRENT_ASK.set((last["content"] if last else "") or "")
             args = agentfiles.materialize(thread_id, agentfiles.filename_for(thread_id, args))
             if name == "make_podcast":
                 args = {**args, "_thread": thread_id}   # the podcast reports back to this chat
@@ -844,11 +852,15 @@ audio, mix) is given to you in every turn; the person sees the same thing on scr
     (edit_scene{wear: {"Abhi": ["Abhi's kurta"]}}) or the shot (edit_shot{wear: {...}}), or give
     `wear` on scenes/shots in build_storyboard. A shot's wear beats its scene's, which beats the
     character's usual links; {"Abhi": null} goes back to the scene's / usual.
-  * CHARACTERS LOOK DIFFERENT FROM SHOT TO SHOT, the wrong face, the room changes between shots
-    of the same camera set-up: draw_pictures{redraw: true, shot_ids} for those shots (all of them
-    if the person says "all"). The drawing keeps each character the same person, makes the
-    shots of one set-up from its master frame and reviews every picture itself -- do not redraw
-    the characters, do not ask the person to check each picture. Pictures only; no video.
+  * CHARACTERS LOOK DIFFERENT FROM SHOT TO SHOT ("the characters don't look the same", the wrong
+    face in a shot, the room changes between shots of the same camera set-up): the SHOTS are
+    wrong, not the characters. Do exactly one thing: draw_pictures{redraw: true, shot_ids} for
+    those shots (all of them if the person says "all" or names none). The drawing keeps each
+    character the same person, makes the shots of one set-up from its master frame and reviews
+    every picture itself. NEVER regenerate, replace or "re-lock" a character's picture or views
+    for this: the looks the person chose are the reference everything is drawn from (the
+    studio refuses it unless the person asks to change that character's look by name). Pictures
+    only; no video until the person asks.
   * TO CHANGE PART OF A PICTURE (a shot's or a character's) use edit_picture with only what
     should change ("she is not smiling", "evening light"): it keeps everything else. Draw a
     picture again only when the person wants a different picture altogether.

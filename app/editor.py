@@ -618,9 +618,37 @@ def _save_voice(pid: str, rid: str, raw: bytes, name: str) -> str:
     return str(path)
 
 
+_LOOK_WORDS = re.compile(r"look|face|picture|photo|image|hair|dress|outfit|cloth|wear|sari|suit|"
+                         r"younger|older|age|beard|skin|eyes|redraw|redo|new|change|replace|"
+                         r"different|recast|turn (him|her)|make (him|her)", re.I)
+
+
+def guard_look(pid: str, ref_id: str) -> None:
+    """While the assistant acts: a character whose look the person chose keeps it unless the
+    person's latest message names that character and asks about their look. 2026-11-26: told
+    "the characters don't look the same across shots, fix it", the assistant regenerated both
+    hosts' pictures and views from old photos, replacing the looks the person had chosen."""
+    from app import agent
+    ask = agent.CURRENT_ASK.get()
+    if ask is None:
+        return                                   # the person acting in the editor
+    r = db.one("SELECT name, kind, approved, image_id FROM prod_refs WHERE id=?", (ref_id,))
+    if r is None or r["kind"] != "character" or not r["approved"] or not r["image_id"]:
+        return
+    first = (r["name"] or "").split()[0].lower() if r["name"] else ""
+    named = (r["name"] or "").lower() in ask.lower() or (first and re.search(rf"\b{re.escape(first)}\b", ask, re.I))
+    if not (named and _LOOK_WORDS.search(ask)):
+        raise HTTPException(409, f"not changed: {r['name']}'s look was chosen by the person, and "
+                                 "their latest message does not ask to change it. If shots look "
+                                 "inconsistent, redraw the SHOTS (draw_pictures redraw); to change "
+                                 f"{r['name']}'s look, ask the person first.")
+
+
 def edit_ref(project, ref_id: str, user: auth.User | None = None, **f) -> None:
     pid = project["id"]
     row = _ref(pid, ref_id)
+    if f.get("image_id") and f.get("image_id") != row["image_id"]:
+        guard_look(pid, ref_id)
     sets = {}
     for k in ("name", "description"):
         if f.get(k) is not None:
@@ -1729,6 +1757,8 @@ async def make_angles(project, user: auth.User, ref_id: str, only: list | None =
     choice when the default draws them wrong; otherwise klein for characters and
     Qwen-Image for places."""
     pid = project["id"]
+    if any(isinstance(v, str) for k, v in _jl(_ref(pid, ref_id)["angles"], {}).items() if not k.startswith("_")):
+        guard_look(pid, ref_id)                  # redrawing views the person already has
     r = _ref(pid, ref_id)
     if not r["image_id"] or not _img_done(r["image_id"]):
         raise HTTPException(400, f"{r['name']} needs its main picture first")
@@ -4496,6 +4526,7 @@ async def make_ref_picture(project, user: auth.User, ref_id: str, prompt: str = 
                            model: str | None = None) -> str:
     """A picture for a character/place reference (a clean, front-on look the shots copy)."""
     pid = project["id"]
+    guard_look(pid, ref_id)
     r = _ref(pid, ref_id)
     params = db.params_of(project)
     text = prompt.strip() or ref_prompt(project, r)
