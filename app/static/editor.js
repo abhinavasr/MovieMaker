@@ -156,8 +156,8 @@
       box.innerHTML = `<span class="bar"><i style="width:${S.progress}%"></i></span><span title="${esc(S.message)}">${esc(S.status === "queued" ? "waiting for the GPU" : S.message || "rendering")}</span>`;
     } else box.innerHTML = S.shots.length ? `<span>${done}/${S.shots.length} shots rendered</span>` : "";
     const busy = ["running", "queued"].includes(S.status);
-    const needPic = S.shots.filter((s) => !s.asset_id && s.start_from !== "prev_last" && s.needs_picture).length;
-    const canVideo = S.shots.filter((s) => s.status !== "done" && (s.asset_id || s.start_from === "prev_last" || !s.needs_picture)).length;
+    const needPic = S.shots.filter((s) => !s.picture && s.start_from !== "prev_last" && s.needs_picture).length;
+    const canVideo = S.shots.filter((s) => s.status !== "done" && (s.picture || s.start_from === "prev_last" || !s.needs_picture)).length;
     const badge = (id, n) => { const b = $(id).querySelector(".n"); b.hidden = !n; b.textContent = n || ""; };
     $("draw-missing").disabled = !S.shots.length;
     badge("draw-missing", needPic);
