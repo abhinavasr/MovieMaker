@@ -18,7 +18,7 @@
          called Audio and park all of them as use cases ... instead of library") #}
       {% set here = request.url.path if request else "" %}
       <a href="/assistant" {% if here.startswith("/assistant") or here == "/" %}aria-current="page"{% endif %}>Assistant</a>
-      <a href="/edit" {% if here.startswith("/edit") or here.startswith("/podcast") or here.startswith("/studio") or here.startswith("/projects") %}aria-current="page"{% endif %}>Editor</a>
+      <a href="/edit" {% if here.startswith("/edit") or here.startswith("/podcast") or here.startswith("/studio") or here.startswith("/projects") %}aria-current="page"{% endif %}>Video</a>
       <a href="/library" {% if here.startswith("/library") %}aria-current="page"{% endif %}>Library</a>
       <a href="/audio" {% if here.startswith("/audio") or here.startswith("/voices") or here.startswith("/music") or here.startswith("/speech") %}aria-current="page"{% endif %}>Audio</a>
       {% if user.is_admin %}<a href="/admin" class="muted-link">Users</a>{% endif %}
