@@ -344,7 +344,22 @@ def _create_project(user, args, base):
     if orientation in service.SIZES:
         service.save_settings(db.one("SELECT * FROM projects WHERE id=?", (project_id,)),
                               orientation=orientation)
+    # The kind of production, as in the New production form (2026-11-27: the assistant asks
+    # for the same choices in conversation); it opens as a production in Video.
+    from app import formats
+    fmt = str(args.get("format") or "")
+    brief = ""
+    if formats.get(fmt) and str(args.get("mode") or "storyboard") == "storyboard":
+        answers = args.get("answers") if isinstance(args.get("answers"), dict) else {}
+        p = db.params_of(db.one("SELECT * FROM projects WHERE id=?", (project_id,)))
+        p["editor"] = True
+        p["format"] = fmt
+        p["format_answers"] = {k: v for k, v in answers.items() if isinstance(v, (str, int, float))}
+        db.set_params(project_id, p)
+        brief = formats.brief(fmt, p["format_answers"])
     out = _describe(project_id, base)
+    if brief:
+        out["format_basics"] = brief
     out["next"] = ("add pictures with add_file (files in this chat), add_media (public URLs) "
                    "or get_upload_link (local files via curl), then write the scenes or the story and call render_video")
     return out
@@ -1311,6 +1326,14 @@ TOOLS = [
           "orientation = this orientation) -- a picture of another shape is cropped to fit.",
           _create_project,
           {"title": {"type": "string"}, "mode": _MODE,
+           "format": {"type": "string",
+                      "enum": ["film", "episode", "short", "explainer", "music", "free"],
+                      "description": "What kind of production (storyboard only; a podcast is "
+                                     "make_podcast instead). The result's format_basics says how "
+                                     "that kind is structured and shot: follow it."},
+           "answers": {"type": "object",
+                       "description": "The person's choices for that kind, e.g. {\"minutes\": 3, "
+                                      "\"genre\": \"drama\"}."},
            "orientation": {"type": "string", "enum": list(service.SIZES),
                            "description": "The film's shape: landscape 864x480 (16:9, most "
                                           "films and storybooks), portrait 480x864 (9:16, phone "
