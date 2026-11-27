@@ -105,7 +105,19 @@ def recover() -> int:
         picked += 1
         only = db.params_of(row).get("_render_only")
         if only:
-            _only[row["id"]] = set(only)
+            # Shots this render already finished before the restart keep their clip:
+            # enqueue cleared every listed shot, so a listed shot that is now done with
+            # its clip on disk was made by this very render (2026-11-27: a reboot made
+            # a finished 41 s InfiniteTalk shot -- 16 GPU minutes -- again).
+            finished = {s["id"] for s in db.query(
+                "SELECT id, clip_path FROM shots WHERE project_id=? AND status='done'",
+                (row["id"],)) if s["clip_path"] and Path(s["clip_path"]).exists()}
+            left = [sid for sid in only if sid not in finished]
+            if finished & set(only):
+                params = db.params_of(row)
+                params["_render_only"] = left
+                db.set_params(row["id"], params)
+            _only[row["id"]] = set(left)
         db.touch_project(row["id"], status="queued",
                          message="picked up again after a restart")
         _queue.put_nowait(row["id"])
