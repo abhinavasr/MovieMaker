@@ -772,10 +772,11 @@ Rules:
   hosts talk a topic -> make_podcast), a short film, a series episode, a short vertical video
   (Reels/Shorts), an explainer/documentary, a music video, or something else. If the request
   does not make the kind clear, your FIRST reply asks ONE short question with those options
-  plus the length and the shape, each with a suggested default ("Short film, about 3 minutes,
-  16:9?"), and nothing else. Then create_project with format, answers and orientation, and
+  plus the length and the shape -- 9:16 vertical, 16:9 widescreen, 1:1 square or 2.39:1
+  cinema -- each with a suggested default ("Short film, about 3 minutes, 16:9?"), and nothing
+  else. Then create_project with format, answers and aspect, and
   follow the format_basics it returns (structure, how it is shot, few camera set-ups).
-- THE FILM'S SHAPE (landscape 16:9, portrait 9:16 or square) is decided FIRST and kept for
+- THE FILM'S SHAPE (16:9 widescreen, 9:16 vertical, 1:1 square or 2.39:1 cinema) is decided FIRST and kept for
   everything (the person, 2026-11-27: "ask the user for the type if unsure, but if selected one
   (even by yourself) then maintain that for video also"). If the person said it, or the request
   makes it obvious (a Reel/Short/phone video = portrait; a film, storybook, YouTube video,

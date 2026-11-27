@@ -341,7 +341,11 @@ def _create_project(user, args, base):
     project_id = service.create_project(user, title, str(args.get("mode") or "storyboard"),
                                         str(args.get("story") or ""))
     orientation = args.get("orientation")
-    if orientation in service.SIZES:
+    from app import editor as _ed
+    if args.get("aspect") in _ed.ASPECTS:
+        # The four shapes of the New production form; 2.39:1 renders 16:9, cropped on export.
+        _ed.set_aspect(db.one("SELECT * FROM projects WHERE id=?", (project_id,)), args["aspect"])
+    elif orientation in service.SIZES:
         service.save_settings(db.one("SELECT * FROM projects WHERE id=?", (project_id,)),
                               orientation=orientation)
     # The kind of production, as in the New production form (2026-11-27: the assistant asks
@@ -1334,6 +1338,12 @@ TOOLS = [
            "answers": {"type": "object",
                        "description": "The person's choices for that kind, e.g. {\"minutes\": 3, "
                                       "\"genre\": \"drama\"}."},
+           "aspect": {"type": "string", "enum": ["9:16", "16:9", "1:1", "2.39:1"],
+                      "description": "The film's shape, as in the New production form: 9:16 "
+                                     "vertical, 16:9 widescreen, 1:1 square, 2.39:1 cinema "
+                                     "(rendered 16:9, cropped to scope on export). Overrides "
+                                     "orientation. Draw pictures in the matching orientation "
+                                     "(2.39:1 -> landscape)."},
            "orientation": {"type": "string", "enum": list(service.SIZES),
                            "description": "The film's shape: landscape 864x480 (16:9, most "
                                           "films and storybooks), portrait 480x864 (9:16, phone "
