@@ -158,7 +158,13 @@ def request_cancel(project_id: str) -> bool:
         "status NOT IN ('done','failed','cancelled')", (project_id,))}
     for j in ids:
         asyncio.create_task(wis.cancel_job(j))
+    task = _polish_tasks.get(project_id)
+    if task is not None and not task.done():
+        task.cancel()                       # its finally returns the GPU lease
     return True
+
+
+_polish_tasks: dict[str, asyncio.Task] = {}
 
 
 def _check_cancelled(project_id: str) -> None:
@@ -342,7 +348,17 @@ async def _render_storyboard(project_id: str, project, report) -> tuple[Path, bo
         to_make = [i for i in to_make if i in only]
     if to_make and cfg.PROMPT_POLISH:
         from app import promptsmith
-        await promptsmith.polish_shots(project_id, to_make, report)
+        # Run as a task Stop can cancel: the prompt pass waits for the GPU and runs the
+        # 27B for minutes, and _check_cancelled is only reached between shots (2026-11-27:
+        # the person's Stop left it writing 9 prompts on the GPU).
+        _check_cancelled(project_id)
+        task = asyncio.create_task(promptsmith.polish_shots(project_id, to_make, report))
+        _polish_tasks[project_id] = task
+        try:
+            await task
+        finally:
+            _polish_tasks.pop(project_id, None)
+        _check_cancelled(project_id)
         fresh = {r["id"]: r["opts"] for r in db.query(
             "SELECT id, opts FROM shots WHERE project_id=?", (project_id,))}
         for s in ordered:
