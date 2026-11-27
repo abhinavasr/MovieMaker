@@ -67,7 +67,7 @@ speaks first or gestures in a talking shot's prompt -- each voice track moves it
 Audio: dialogue drives everything; a short music sting only under intro, title cards and outro.""",
     },
     "film": {
-        "icon": "🎬", "name": "Short film", "tagline": "a story with characters", "live": False,
+        "icon": "🎬", "name": "Short film", "tagline": "a story with characters", "live": True,
         "aspect": "16:9", "ask": "What's the story?",
         "placeholder": "A night-shift nurse finds a letter addressed to her, dated tomorrow.",
         "picks": [
@@ -95,7 +95,7 @@ Audio: dialogue, room tone/ambience, score entering at turning points, sound car
 next scene.""",
     },
     "episode": {
-        "icon": "📺", "name": "Episode", "tagline": "part of a series", "live": False,
+        "icon": "📺", "name": "Episode", "tagline": "part of a series", "live": True,
         "aspect": "16:9", "ask": "What happens in this episode?",
         "placeholder": "Episode 2: the flatmates discover the landlord is moving in.",
         "picks": [
@@ -119,7 +119,7 @@ Dialogue and pace as in a short film; voices must stay the same characters' voic
 Audio: a short theme sting on the title card and act breaks.""",
     },
     "short": {
-        "icon": "📱", "name": "Short", "tagline": "Reels / Shorts, ≤60 s", "live": False,
+        "icon": "📱", "name": "Short", "tagline": "Reels / Shorts, ≤60 s", "live": True,
         "aspect": "9:16", "ask": "What's the idea?",
         "placeholder": "Three things nobody tells you about learning to cook.",
         "picks": [
@@ -140,7 +140,7 @@ the first 10 s, then every 3-6 s. Voice from the first frame; captions burned in
 Set-ups: one or two in total; vary with crops (closer / wider of the same frame) and 4 s inserts.""",
     },
     "explainer": {
-        "icon": "🧭", "name": "Explainer", "tagline": "narrated, documentary", "live": False,
+        "icon": "🧭", "name": "Explainer", "tagline": "narrated, documentary", "live": True,
         "aspect": "16:9", "ask": "What should it explain?",
         "placeholder": "How a seed becomes a forest.",
         "picks": [
@@ -163,7 +163,7 @@ A presenter: one medium close-up set-up for the whole piece, varied with crops.
 Audio: narrator on top, natural sound low, music bed ducked under speech.""",
     },
     "music": {
-        "icon": "🎵", "name": "Music video", "tagline": "from a song", "live": False,
+        "icon": "🎵", "name": "Music video", "tagline": "from a song", "live": True,
         "aspect": "16:9", "ask": "What's the song about, and what should we see?",
         "placeholder": "A monsoon love song: two strangers share an umbrella across the city.",
         "picks": [
@@ -190,7 +190,7 @@ character set-ups per location).""",
     },
 }
 
-ORDER = ["podcast", "free", "film", "episode", "short", "explainer", "music"]   # live ones first
+ORDER = ["podcast", "film", "episode", "short", "explainer", "music", "free"]
 
 
 def _num(v):

@@ -82,7 +82,12 @@ document.querySelectorAll("[data-del]").forEach((b) => b.addEventListener("click
   const f = document.getElementById("new"), idea = document.getElementById("idea");
   const picksBox = document.getElementById("picks"), hint = document.getElementById("hint");
   const HINTS = {podcast: "Researched on the web, fact-checked and written, then it opens in the editor.",
-                 free: "Opens in the editor; the assistant helps you write and build it."};
+                 free: "Opens in the editor; the assistant helps you write and build it.",
+                 film: "Opens in the editor; the assistant plans it as a short film: scenes, cast, a few camera set-ups per place.",
+                 episode: "Opens in the editor; the assistant plans it as an episode: cold open, acts, a tag, standing sets.",
+                 short: "Opens in the editor; the assistant plans a vertical short: a hook in the first 3 seconds, fast cuts.",
+                 explainer: "Opens in the editor; the assistant plans narration over moving pictures.",
+                 music: "Opens in the editor; add the song there, and the assistant plans performance and story shots to it."};
   let fmt = "free", answers = {};
   const esc = (t) => String(t).replace(/[&<>"]/g, (c) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
   function pickRow(p) {
