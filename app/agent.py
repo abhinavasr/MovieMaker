@@ -77,7 +77,7 @@ WATCH = {"project": ("get_status", "project_id"), "image": ("get_image", "image_
 CREATES = {"generate_image": "image", "generate_speech": "speech", "generate_music": "music",
            "resing_song": "voice_job", "sing_song": "voice_job", "speak_as_voice": "voice_job",
            "train_voice": "voice_job", "make_podcast": "podcast", "retry_podcast": "podcast",
-           "continue_podcast": "podcast"}
+           "continue_podcast": "podcast", "hear_voice": "speech"}
 
 _wake = asyncio.Event()
 _active: dict[str, asyncio.Task] = {}
