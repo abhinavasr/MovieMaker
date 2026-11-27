@@ -2969,6 +2969,15 @@ def render_shots(project, user: auth.User, shot_ids: list[str] | None = None):
             need = 2 if s["make"] == "talk2" else 1
             ready = len({k for k in character_tracks(pid, s) if k}) if cfg.TALK_TOGETHER \
                 else len(_speaker_audio(pid, s))
+            if s["make"] == "talk2" and cfg.TALK_TOGETHER and ready == 1:
+                # One host speaks on the two-shot and the other listens (a podcast's wide):
+                # perform_payload gives the listener a silent track, so one voice is enough
+                # when both people are in the shot (2026-11-27: this check alone still wanted
+                # two, and every press of Videos on a podcast was refused).
+                chars = [r for r in _shot_ref_ids(s) if (db.one(
+                    "SELECT kind FROM prod_refs WHERE id=?", (r,)) or {"kind": ""})["kind"] == "character"]
+                if len(chars) >= 2:
+                    need = 1
             if ready < need:
                 problems.append(f"{label} needs {'two voiced lines' if need == 2 else 'its voiced line'} "
                                 f"under it ({ready} ready) — voices first, then the video")
