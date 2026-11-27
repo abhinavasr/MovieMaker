@@ -487,7 +487,9 @@ def _migrate(conn) -> None:
     every insert would fail at runtime rather than here.
     """
     wanted = {
-              "users": {"unlimited": "INTEGER NOT NULL DEFAULT 0"},
+              "users": {"unlimited": "INTEGER NOT NULL DEFAULT 0",
+                        # dark (default) / light / system -- the person's Settings (2026-11-27)
+                        "theme": "TEXT NOT NULL DEFAULT 'dark'"},
               "images": {"model": "TEXT"},
               "agent_threads": {"thought": "TEXT NOT NULL DEFAULT ''", "stage_at": "REAL",
                                 "context": "TEXT NOT NULL DEFAULT '[]'", "project_id": "TEXT"},

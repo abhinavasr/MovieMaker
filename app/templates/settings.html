@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block title %}Settings · Story Studio{% endblock %}
+{% block body %}
+<h1>Settings</h1>
+<p class="muted">Signed in as {{ user.username }}.</p>
+<section class="card">
+  <h2>Theme</h2>
+  <div class="st-themes" role="radiogroup" aria-label="Theme">
+    {% for key, label, note in [("dark", "🌙 Dark", "The default; pictures and video read truest on dark."),
+                                ("light", "☀️ Light", "Warm off-white with a deep gold accent."),
+                                ("system", "🖥 Match my device", "Dark or light, as your device is set.")] %}
+    <label class="st-theme"><input type="radio" name="theme" value="{{ key }}" {% if (user.theme or "dark") == key %}checked{% endif %}>
+      <span><b>{{ label }}</b><small class="muted">{{ note }}</small></span></label>
+    {% endfor %}
+  </div>
+  <p class="muted" id="st-msg" aria-live="polite"></p>
+</section>
+{% endblock %}
+{% block scripts %}
+<script>
+document.querySelectorAll("input[name=theme]").forEach((r) => r.addEventListener("change", async () => {
+  document.documentElement.dataset.theme = r.value;          // applies at once
+  const msg = document.getElementById("st-msg");
+  const res = await fetch("/api/settings", {method: "POST", headers: {"Content-Type": "application/json"},
+                                            body: JSON.stringify({theme: r.value})});
+  msg.textContent = res.ok ? "Saved — every page uses it, on every device you sign in on." : "Could not save; try again.";
+}));
+</script>
+{% endblock %}

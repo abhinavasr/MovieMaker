@@ -45,6 +45,7 @@ class User:
     username: str
     role: str
     expires_at: float | None
+    theme: str = "dark"
 
     @property
     def is_admin(self) -> bool:
@@ -151,7 +152,7 @@ def current_user(request: Request) -> User | None:
         return None
     row = db.one(
         "SELECT s.token, s.expires_at AS s_exp, u.id, u.username, u.role, "
-        "       u.expires_at AS u_exp, u.disabled "
+        "       u.expires_at AS u_exp, u.disabled, u.theme "
         "FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token=?", (token,))
     if row is None:
         return None
@@ -161,7 +162,16 @@ def current_user(request: Request) -> User | None:
     if row["disabled"] or (row["u_exp"] is not None and row["u_exp"] < db.now()):
         db.run("DELETE FROM sessions WHERE user_id=?", (row["id"],))
         return None
-    return User(row["id"], row["username"], row["role"], row["u_exp"])
+    return User(row["id"], row["username"], row["role"], row["u_exp"], row["theme"] or "dark")
+
+
+THEMES = ("dark", "light", "system")
+
+
+def set_theme(user_id: str, theme: str) -> None:
+    if theme not in THEMES:
+        raise ValueError(theme)
+    db.run("UPDATE users SET theme=? WHERE id=?", (theme, user_id))
 
 
 def purge_expired() -> int:

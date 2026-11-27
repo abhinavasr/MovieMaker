@@ -5,7 +5,27 @@
   --ink: #ece7df; --muted: #9b968d; --faint: #6f6b64;
   --accent: #e3a54a; --accent-ink: #1a1206; --gold: #e3a54a; --gold-2: #f0bf6a;
   --ok: #6fcf8f; --warn: #e8b64c; --bad: #ef6f6c; --radius: 12px;
+  --top: #101114; --deep: #0f1013; --note-bg: #2a2312; --note-ink: #f0d9a8; --note-line: #4a3c1a;
   color-scheme: dark;
+}
+/* The person's choice in Settings (dark is the default): html[data-theme] */
+html[data-theme="light"] {
+  --bg: #f4f1eb; --panel: #ffffff; --panel-2: #efebe3; --panel-3: #e6e0d5; --line: #ddd5c8;
+  --ink: #1f1b16; --muted: #6a6359; --faint: #938a7d;
+  --accent: #a86a12; --accent-ink: #ffffff; --gold: #a86a12; --gold-2: #8a560c;
+  --ok: #2e8b57; --warn: #a86a12; --bad: #c0392b;
+  --top: #ffffff; --deep: #ebe6dc; --note-bg: #fbf1d9; --note-ink: #5c4400; --note-line: #ecd9a6;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: light) {
+  html[data-theme="system"] {
+  --bg: #f4f1eb; --panel: #ffffff; --panel-2: #efebe3; --panel-3: #e6e0d5; --line: #ddd5c8;
+  --ink: #1f1b16; --muted: #6a6359; --faint: #938a7d;
+  --accent: #a86a12; --accent-ink: #ffffff; --gold: #a86a12; --gold-2: #8a560c;
+  --ok: #2e8b57; --warn: #a86a12; --bad: #c0392b;
+  --top: #ffffff; --deep: #ebe6dc; --note-bg: #fbf1d9; --note-ink: #5c4400; --note-line: #ecd9a6;
+  color-scheme: light;
+  }
 }
 * { box-sizing: border-box; }
 body {
@@ -23,7 +43,7 @@ code { background: var(--panel-2); padding: 1px 6px; border-radius: 6px; font-si
 
 .top {
   display: flex; align-items: center; justify-content: space-between; gap: 16px;
-  padding: 12px 20px; background: #101114; border-bottom: 1px solid var(--line);
+  padding: 12px 20px; background: var(--top); border-bottom: 1px solid var(--line);
 }
 .brand { font-weight: 650; text-decoration: none; color: var(--ink); }
 .top nav { display: flex; align-items: center; gap: 16px; font-size: .9rem; }
@@ -221,7 +241,7 @@ details.more[open] summary { margin-bottom: 12px; }
 .recorder .hint { margin: 0; }
 
 /* retention: everything is deleted after STUDIO_RETENTION_DAYS; say so everywhere */
-.retention-note { background: #2a2312; color: #f0d9a8; border-bottom: 1px solid #4a3c1a;
+.retention-note { background: var(--note-bg); color: var(--note-ink); border-bottom: 1px solid var(--note-line);
   padding: 6px 16px; font-size: .85rem; text-align: center; }
 .expiring { color: var(--bad); font-weight: 600; }
 .consent { align-items: flex-start; gap: 8px; line-height: 1.4; }
@@ -257,3 +277,9 @@ progress { width: 100%; max-width: 420px; height: 10px; vertical-align: middle; 
 .au-card { display: flex; flex-direction: column; gap: 6px; text-decoration: none; color: inherit; }
 .au-card:hover { border-color: var(--accent); }
 .au-card .i { font-size: 1.8rem; }
+/* Settings */
+.st-themes { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; }
+.st-theme { display: flex; gap: 10px; align-items: flex-start; border: 1px solid var(--line); border-radius: 10px; padding: 12px; cursor: pointer; }
+.st-theme:has(input:checked) { border-color: var(--accent); }
+.st-theme span { display: flex; flex-direction: column; gap: 2px; }
+.top nav a.who { color: var(--muted); }
