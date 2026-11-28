@@ -326,6 +326,16 @@ async def _llm(podcast_id: str, turn, system: str, user: str, schema: dict, labe
     brief = show_brief(_config(row)) if row is not None and label != "showrunner" else ""
     messages = [{"role": "system", "content": brief + system}, {"role": "user", "content": user}]
     messages, ctx, est = agent._fit_window(messages, think)
+    if agent.planner_wanted() and getattr(turn, "held", False):
+        # A person is waiting for the assistant: step aside before EVERY model call, not only
+        # between steps (2026-11-28: one script segment -- write, review, rewrite -- held the
+        # planner ~10 minutes while the person's chat waited). The chat goes next (the lock is
+        # first come, first served); the podcast carries on right after.
+        _set(podcast_id, message="Paused for a moment: the assistant is answering a chat")
+        await turn.release()
+        await turn.acquire()
+        turn._flash_ready = False
+        _set(podcast_id, message=f"Back to work: {label}")
     if cfg.PODCAST_LLM_URL:
         # Flash-Next only (the person, 2026-11-28): a failed call is tried once more, then the
         # step fails and the person can press Retry -- no other model.
