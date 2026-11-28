@@ -651,6 +651,8 @@ async def _render(project_id: str) -> None:
     project = db.one("SELECT * FROM projects WHERE id=?", (project_id,))
     if project is None:
         return
+    from app import agent as _agent
+    _agent.use_planner_of(project["user_id"])         # prompts on the owner's thinking model
 
     async def report(pct: int, msg: str) -> None:
         db.touch_project(project_id, progress=max(0, min(99, int(pct))), message=msg[:400])

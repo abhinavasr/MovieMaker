@@ -658,7 +658,8 @@ async def settings_page(request: Request):
     user = auth.current_user(request)
     if user is None:
         return RedirectResponse("/login?next=/settings", status_code=303)
-    return templates.TemplateResponse("settings.html", {"request": request, "user": user})
+    return templates.TemplateResponse("settings.html", {"request": request, "user": user,
+                                                        "planner": auth.planner_of(user.id)})
 
 
 @app.post("/api/settings")
@@ -666,12 +667,21 @@ async def save_user_settings(request: Request):
     """The person's own settings (2026-11-27: the theme -- dark by default, light, or the
     device's)."""
     user = _user(request)
-    body = await request.json()
-    theme = str((body or {}).get("theme") or "")
-    if theme not in auth.THEMES:
-        raise HTTPException(400, f"theme must be one of {', '.join(auth.THEMES)}")
-    auth.set_theme(user.id, theme)
-    return {"ok": True, "theme": theme}
+    body = (await request.json()) or {}
+    out = {"ok": True}
+    if "theme" in body:
+        theme = str(body.get("theme") or "")
+        if theme not in auth.THEMES:
+            raise HTTPException(400, f"theme must be one of {', '.join(auth.THEMES)}")
+        auth.set_theme(user.id, theme)
+        out["theme"] = theme
+    if "planner" in body:
+        planner = str(body.get("planner") or "")
+        if planner not in auth.PLANNERS:
+            raise HTTPException(400, f"planner must be one of {', '.join(auth.PLANNERS)}")
+        auth.set_planner(user.id, planner)
+        out["planner"] = planner
+    return out
 
 
 @app.get("/audio", response_class=HTMLResponse)

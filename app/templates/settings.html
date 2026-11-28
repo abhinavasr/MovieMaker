@@ -15,9 +15,27 @@
   </div>
   <p class="muted" id="st-msg" aria-live="polite"></p>
 </section>
+<section class="card">
+  <h2>Thinking model</h2>
+  <p class="muted">The model that plans your productions, writes podcasts, reviews pictures and answers in the assistant.</p>
+  <div class="st-themes" role="radiogroup" aria-label="Thinking model">
+    {% for key, label, note in [("27b", "⚡ Qwen 27B", "The default. About twice as fast; good answers."),
+                                ("flash", "🧠 Qwen3.8-Flash-Next", "Stronger answers and a much longer memory, but slower — a podcast takes noticeably longer.")] %}
+    <label class="st-theme"><input type="radio" name="planner" value="{{ key }}" {% if planner == key %}checked{% endif %}>
+      <span><b>{{ label }}</b><small class="muted">{{ note }}</small></span></label>
+    {% endfor %}
+  </div>
+  <p class="muted" id="st-msg2" aria-live="polite"></p>
+</section>
 {% endblock %}
 {% block scripts %}
 <script>
+document.querySelectorAll("input[name=planner]").forEach((r) => r.addEventListener("change", async () => {
+  const msg = document.getElementById("st-msg2");
+  const res = await fetch("/api/settings", {method: "POST", headers: {"Content-Type": "application/json"},
+                                            body: JSON.stringify({planner: r.value})});
+  msg.textContent = res.ok ? "Saved — used from your next request (work already running keeps its model)." : "Could not save; try again.";
+}));
 document.querySelectorAll("input[name=theme]").forEach((r) => r.addEventListener("change", async () => {
   document.documentElement.dataset.theme = r.value;          // applies at once
   const msg = document.getElementById("st-msg");

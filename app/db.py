@@ -489,7 +489,9 @@ def _migrate(conn) -> None:
     wanted = {
               "users": {"unlimited": "INTEGER NOT NULL DEFAULT 0",
                         # dark (default) / light / system -- the person's Settings (2026-11-27)
-                        "theme": "TEXT NOT NULL DEFAULT 'dark'"},
+                        "theme": "TEXT NOT NULL DEFAULT 'dark'",
+                        # the thinking model the person chose (2026-11-28): 27b (default) / flash
+                        "planner": "TEXT NOT NULL DEFAULT '27b'"},
               "images": {"model": "TEXT"},
               "agent_threads": {"thought": "TEXT NOT NULL DEFAULT ''", "stage_at": "REAL",
                                 "context": "TEXT NOT NULL DEFAULT '[]'", "project_id": "TEXT"},

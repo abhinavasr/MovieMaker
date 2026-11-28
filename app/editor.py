@@ -2674,6 +2674,8 @@ async def _run_auto_shots() -> None:
     for project in db.query("SELECT * FROM projects WHERE mode='storyboard' AND "
                             "params_json LIKE '%_auto_shots%'"):
         pid = project["id"]
+        from app import agent as _agent
+        _agent.use_planner_of(project["user_id"])         # pictures on the owner's thinking model
         jobs = db.params_of(project).get("_auto_shots") or []
         if not jobs:
             continue

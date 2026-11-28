@@ -336,7 +336,7 @@ async def _llm(podcast_id: str, turn, system: str, user: str, schema: dict, labe
         await turn.acquire()
         turn._flash_ready = False
         _set(podcast_id, message=f"Back to work: {label}")
-    if cfg.PODCAST_LLM_URL:
+    if cfg.PODCAST_LLM_URL and agent.PLANNER_CHOICE.get() == "flash":
         # Flash-Next only (the person, 2026-11-28): a failed call is tried once more, then the
         # step fails and the person can press Retry -- no other model.
         for attempt in range(2):
@@ -1618,6 +1618,9 @@ async def _step(pid: str, state: dict, key: str, fn, needs_model: bool, gpu: _Tu
 
 
 async def _run(pid: str) -> None:
+    from app import agent as _agent
+    _r = _row(pid)
+    _agent.use_planner_of(_r["user_id"] if _r else None)
     gpu = _Turn(pid)
     try:
         while True:

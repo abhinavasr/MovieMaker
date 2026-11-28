@@ -498,13 +498,24 @@ async def _run_tool(user, name: str, args: dict, base: str,
 # whole thing with Flash-Next". Callers keep speaking Ollama's /api/chat; requests for
 # cfg.PLANNER_MODEL are translated here (images, JSON schema, thinking, streaming) and the
 # answer comes back in Ollama's shape. If Flash-Next fails, the 27B on Ollama answers, and
-# The person, 2026-11-28: "let's not use any other except Flash-Next" -- no fallback to the 27B;
-# a failed call is tried once more on Flash-Next (it may have been loading), then it fails.
+# For a person on Flash-Next there is no fallback to the 27B (2026-11-28: "let's not use any
+# other except Flash-Next"); a failed call is tried once more, then it fails.
 # The CPU executors stay on Ollama.
 
 
+# Whose work this call is for decides the model: the person's Settings choice (2026-11-28,
+# "give option to the user between 27b and flash next", "default to 27b"). Set where work for a
+# person starts: an assistant turn, a podcast run, a production's pictures, a render.
+PLANNER_CHOICE: contextvars.ContextVar[str] = contextvars.ContextVar("planner_choice", default="27b")
+
+
+def use_planner_of(user_id: str | None) -> None:
+    PLANNER_CHOICE.set(auth.planner_of(user_id))
+
+
 def _use_flash(payload: dict) -> bool:
-    return bool(cfg.PLANNER_LLM_URL) and payload.get("model") == cfg.PLANNER_MODEL
+    return bool(cfg.PLANNER_LLM_URL) and payload.get("model") == cfg.PLANNER_MODEL and \
+        PLANNER_CHOICE.get() == "flash"
 
 
 def _mime_of(b64: str) -> str:
@@ -1713,6 +1724,7 @@ async def _turn(thread_id: str) -> None:
         _set(thread_id, status="idle", activity="")
         return
     _turns[user.id].append(time.time())
+    use_planner_of(user.id)
     trigger = thread["reason"] or "new message from the person"
     if db.one("SELECT 1 FROM agent_files WHERE thread_id=? AND status='processing'", (thread_id,)):
         _activity(thread_id, "reading your files (transcribing audio, extracting text)", "queued")

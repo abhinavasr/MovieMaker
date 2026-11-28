@@ -166,6 +166,22 @@ def current_user(request: Request) -> User | None:
 
 
 THEMES = ("dark", "light", "system")
+PLANNERS = ("27b", "flash")
+
+
+def planner_of(user_id: str | None) -> str:
+    """The thinking model this person chose in Settings: "27b" (default, faster) or "flash"
+    (Qwen3.8-Flash-Next: stronger answers, slower)."""
+    if not user_id:
+        return "27b"
+    row = db.one("SELECT planner FROM users WHERE id=?", (user_id,))
+    return (row["planner"] if row and row["planner"] in PLANNERS else "27b")
+
+
+def set_planner(user_id: str, planner: str) -> None:
+    if planner not in PLANNERS:
+        raise ValueError(planner)
+    db.run("UPDATE users SET planner=? WHERE id=?", (planner, user_id))
 
 
 def set_theme(user_id: str, theme: str) -> None:
