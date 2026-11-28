@@ -1435,7 +1435,7 @@ async def _build(pid: str, row, config: dict, state: dict) -> str:
     lib = {editor.name_key(x["name"]): x for x in editor.library(user)} if hasattr(editor, "library") else {}
     for key, h, other in (("A", a, b), ("B", b, a)):
         have = editor.ref_by_name(project_id, h["name"])
-        src = lib.get(editor.name_key(h["name"]))
+        src = lib.get(editor.name_key(h["name"])) or editor.find_character(user, h["name"])
         if have:
             refs[key] = have["id"]
         elif src and src.get("kind") == "character":
@@ -1878,11 +1878,13 @@ async def recast_hosts(user: auth.User, podcast_id: str, names: list) -> dict:
             await asyncio.sleep(1)
     row = _row(podcast_id)
     config, state = _config(row), _state(row)
-    lib = {editor.name_key(x["name"]): x for x in editor.library(user) if x["kind"] == "character"}
+    lib = {}
     pairs = []
     for i, new in enumerate(names):
         h = config["hosts"][i]
-        src = lib.get(editor.name_key(new))
+        src = editor.find_character(user, new)
+        if src:
+            lib[new] = src
         if src:
             new = src["name"]
             if src.get("description"):

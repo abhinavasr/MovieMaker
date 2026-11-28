@@ -856,6 +856,23 @@ def save_to_library(project, user: auth.User, ref_id: str) -> str:
     return import_ref(db.one("SELECT * FROM projects WHERE id=?", (lib,)), user, ref_id)
 
 
+def find_character(user, name: str) -> dict | None:
+    """The person's character called `name`: an exact name first, else the one character whose
+    first name it is ("Mahira" -> "Mahira Singh"; 2026-11-28: the assistant passed first names
+    and the podcast nearly made two new characters instead of the person's own)."""
+    want = name_key(name)
+    chars = [x for x in library(user) if x["kind"] == "character"]
+    exact = next((x for x in chars if name_key(x["name"]) == want), None)
+    if exact or not want:
+        return exact
+    first = {}
+    for x in chars:
+        k = name_key(x["name"].split()[0]) if x["name"].split() else ""
+        if k == want:
+            first.setdefault(name_key(x["name"]), x)
+    return next(iter(first.values())) if len(first) == 1 else None
+
+
 def library(user, exclude_pid: str | None = None, query: str = "",
             limit: int = 60) -> list[dict]:
     """The person's characters, places and voices: their Library first, then those in their
