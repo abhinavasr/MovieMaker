@@ -257,7 +257,6 @@ def create(user: auth.User, body: dict, thread_id: str | None = None) -> str:
 
 # --------------------------------------------------------------------------- the model
 
-_flash_off_until = [0.0]
 
 
 def _flash_thinks(label: str) -> bool:
@@ -327,18 +326,24 @@ async def _llm(podcast_id: str, turn, system: str, user: str, schema: dict, labe
     brief = show_brief(_config(row)) if row is not None and label != "showrunner" else ""
     messages = [{"role": "system", "content": brief + system}, {"role": "user", "content": user}]
     messages, ctx, est = agent._fit_window(messages, think)
-    if cfg.PODCAST_LLM_URL and time.monotonic() > _flash_off_until[0]:
-        try:
-            out = await _flash_llm(podcast_id, turn, messages, schema, label, think, est)
-            if out is not None:
-                return out
-        except Cancelled:
-            raise
-        except Exception as exc:                               # noqa: BLE001
-            # Never stop a podcast for this: the 27B takes over for the next 10 minutes.
-            _flash_off_until[0] = time.monotonic() + 600
-            log.warning("podcast %s %s: Flash-Next failed (%s); using %s", podcast_id, label,
-                        str(exc)[:200], cfg.PLANNER_MODEL)
+    if cfg.PODCAST_LLM_URL:
+        # Flash-Next only (the person, 2026-11-28): a failed call is tried once more, then the
+        # step fails and the person can press Retry -- no other model.
+        for attempt in range(2):
+            try:
+                out = await _flash_llm(podcast_id, turn, messages, schema, label, think, est)
+                if out is not None:
+                    return out
+                break
+            except Cancelled:
+                raise
+            except Exception as exc:                           # noqa: BLE001
+                if attempt:
+                    raise RuntimeError(f"{label}: Flash-Next failed: {str(exc)[:200]}")
+                log.warning("podcast %s %s: Flash-Next failed (%s); trying once more",
+                            podcast_id, label, str(exc)[:200])
+                await asyncio.sleep(5)
+        raise RuntimeError(f"{label}: the model did not return a usable answer")
     for attempt in range(3):
         _check(podcast_id)
         await turn.renew()

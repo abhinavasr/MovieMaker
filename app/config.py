@@ -69,6 +69,10 @@ class Config:
     # better answers than the 27B in the 2026-11-27 test, ~1.5-2x slower -- fine for a
     # non-interactive pipeline; chats stay on the 27B. Empty = podcasts use the planner too.
     PODCAST_LLM_URL = _s("STUDIO_PODCAST_LLM_URL", "http://flashnext:8080").rstrip("/")
+    # Every planner call (chats, pictures' review and plans, prompts) on Flash-Next too
+    # (2026-11-28); PLANNER_MODEL stays the Ollama fallback. Empty = the 27B as before.
+    PLANNER_LLM_URL = _s("STUDIO_PLANNER_LLM_URL", "http://flashnext:8080").rstrip("/")
+    PLANNER_LLM_MODEL = _s("STUDIO_PLANNER_LLM_MODEL", "flash-next")
     PODCAST_LLM_MODEL = _s("STUDIO_PODCAST_LLM_MODEL", "flash-next")
     PLANNER_CTX = _i("STUDIO_PLANNER_CTX", 32768)
     EXECUTOR_MODEL = _s("STUDIO_EXECUTOR_MODEL", "qwen3.5:9b")

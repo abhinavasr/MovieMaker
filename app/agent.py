@@ -492,7 +492,91 @@ async def _run_tool(user, name: str, args: dict, base: str,
 
 # =========================================================================== models
 
+# ---------------------------------------------------------------- the planner model
+# Everything the studio asks "the planner model" runs on Qwen3.8-Flash-Next (llama.cpp behind
+# llama-swap, container `flashnext`) since 2026-11-28 -- the person: "why don't we set up the
+# whole thing with Flash-Next". Callers keep speaking Ollama's /api/chat; requests for
+# cfg.PLANNER_MODEL are translated here (images, JSON schema, thinking, streaming) and the
+# answer comes back in Ollama's shape. If Flash-Next fails, the 27B on Ollama answers, and
+# The person, 2026-11-28: "let's not use any other except Flash-Next" -- no fallback to the 27B;
+# a failed call is tried once more on Flash-Next (it may have been loading), then it fails.
+# The CPU executors stay on Ollama.
+
+
+def _use_flash(payload: dict) -> bool:
+    return bool(cfg.PLANNER_LLM_URL) and payload.get("model") == cfg.PLANNER_MODEL
+
+
+def _mime_of(b64: str) -> str:
+    return "image/png" if b64.startswith("iVBOR") else "image/webp" if b64.startswith("UklGR") \
+        else "image/jpeg"
+
+
+def _to_openai(payload: dict, stream: bool) -> dict:
+    msgs = []
+    for m in payload.get("messages") or []:
+        imgs = m.get("images") or []
+        if imgs:
+            content = [{"type": "text", "text": m.get("content") or ""}] + [
+                {"type": "image_url", "image_url": {"url": f"data:{_mime_of(b)};base64,{b}"}}
+                for b in imgs]
+        else:
+            content = m.get("content") or ""
+        msgs.append({"role": m.get("role") or "user", "content": content})
+    o = payload.get("options") or {}
+    body = {"model": cfg.PLANNER_LLM_MODEL, "messages": msgs, "stream": stream,
+            "max_tokens": int(o.get("num_predict") or 4096),
+            "temperature": o.get("temperature", 0.3),
+            "chat_template_kwargs": {"enable_thinking": bool(payload.get("think", False))}}
+    fmt = payload.get("format")
+    if isinstance(fmt, dict):
+        body["response_format"] = {"type": "json_schema", "json_schema": {"name": "answer", "schema": fmt}}
+    elif fmt == "json":
+        body["response_format"] = {"type": "json_object"}
+    return body
+
+
+def _from_openai(res: dict) -> dict:
+    ch = (res.get("choices") or [{}])[0]
+    msg = ch.get("message") or {}
+    tm = res.get("timings") or {}
+    return {"model": cfg.PLANNER_LLM_MODEL, "done": True,
+            "done_reason": "length" if ch.get("finish_reason") == "length" else "stop",
+            "message": {"role": "assistant", "content": msg.get("content") or "",
+                        "thinking": msg.get("reasoning_content") or ""},
+            "prompt_eval_count": tm.get("prompt_n"), "eval_count": tm.get("predicted_n"),
+            "prompt_eval_duration": int((tm.get("prompt_ms") or 0) * 1e6),
+            "eval_duration": int((tm.get("predicted_ms") or 0) * 1e6)}
+
+
+async def _flash_chat(payload: dict, timeout: float) -> dict:
+    async with httpx.AsyncClient(timeout=httpx.Timeout(max(timeout, 1200.0), connect=10)) as c:
+        r = await c.post(f"{cfg.PLANNER_LLM_URL}/v1/chat/completions", json=_to_openai(payload, False))
+    if r.status_code >= 400:
+        raise RuntimeError(f"flash-next: {r.status_code} {r.text[:300]}")
+    return _from_openai(r.json())
+
+
+async def flash_unload() -> None:
+    if not cfg.PLANNER_LLM_URL:
+        return
+    try:
+        async with httpx.AsyncClient(timeout=30) as c:
+            await c.get(f"{cfg.PLANNER_LLM_URL}/unload")
+    except Exception as exc:                                   # noqa: BLE001
+        log.warning("could not unload Flash-Next: %s", exc)
+
+
 async def _ollama(path: str, payload: dict, timeout: float = 900.0) -> dict:
+    if path == "/api/chat" and _use_flash(payload):
+        try:
+            return await _flash_chat(payload, timeout)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:                               # noqa: BLE001
+            log.warning("Flash-Next call failed (%s); trying once more", str(exc)[:200])
+            await asyncio.sleep(5)
+            return await _flash_chat(payload, timeout)
     async with httpx.AsyncClient(timeout=timeout) as client:
         resp = await client.post(f"{cfg.OLLAMA_URL}{path}", json=payload)
     if resp.status_code >= 400:
@@ -501,6 +585,8 @@ async def _ollama(path: str, payload: dict, timeout: float = 900.0) -> dict:
 
 
 async def _unload(model: str) -> None:
+    if model == cfg.PLANNER_MODEL:
+        await flash_unload()                 # the card must be empty for WIS after a turn
     try:
         await _ollama("/api/generate", {"model": model, "keep_alive": 0}, timeout=60)
         for _ in range(30):
@@ -515,8 +601,8 @@ async def _unload(model: str) -> None:
         log.warning("could not unload %s: %s", model, exc)
 
 
-# qwen3.8:27b Q4 at a 32k context: measured ~20 GB on the card.
-PLANNER_VRAM_MB = 20500
+# Flash-Next (--n-cpu-moe 36, 64k context, vision): ~21.5 GB on the card.
+PLANNER_VRAM_MB = 21500
 
 PRODUCTION_ABOUT = ("Story Studio makes films on one local GPU: pictures (FLUX.2 klein, Qwen-Image), "
                     "video clips per shot (the model of each shot's use case), voices (Qwen3-TTS; "
@@ -1221,8 +1307,50 @@ def _last_user_seq(thread_id: str) -> int:
 _seen: dict[str, int] = {}
 
 
+async def _stream_flash(thread_id: str, payload: dict) -> dict:
+    """_stream_plan on Flash-Next (OpenAI server-sent events), answered in Ollama's shape."""
+    thinking, content, last, fin, timings = [], [], 0.0, "stop", {}
+    async with httpx.AsyncClient(timeout=httpx.Timeout(1800.0, connect=20.0)) as client:
+        async with client.stream("POST", f"{cfg.PLANNER_LLM_URL}/v1/chat/completions",
+                                 json=_to_openai(payload, True)) as resp:
+            if resp.status_code >= 400:
+                raise RuntimeError(f"flash-next: {resp.status_code} {(await resp.aread())[:300]!r}")
+            async for line in resp.aiter_lines():
+                if not line.startswith("data:"):
+                    continue
+                data = line[5:].strip()
+                if data == "[DONE]":
+                    break
+                chunk = json.loads(data)
+                timings = chunk.get("timings") or timings
+                for ch in chunk.get("choices") or []:
+                    d = ch.get("delta") or {}
+                    if d.get("reasoning_content"):
+                        thinking.append(d["reasoning_content"])
+                    if d.get("content"):
+                        content.append(d["content"])
+                    if ch.get("finish_reason"):
+                        fin = ch["finish_reason"]
+                now = time.monotonic()
+                if now - last > 0.8:
+                    last = now
+                    _set(thread_id, thought="".join(thinking)[-400:] if not content else "writing the plan…")
+    return {"model": cfg.PLANNER_LLM_MODEL, "done": True, "content": "".join(content),
+            "done_reason": "length" if fin == "length" else "stop",
+            "prompt_eval_count": timings.get("prompt_n"), "eval_count": timings.get("predicted_n")}
+
+
 async def _stream_plan(thread_id: str, payload: dict) -> dict:
     """Call the planner streaming, so the page can show its thinking live."""
+    if _use_flash(payload):
+        try:
+            return await _stream_flash(thread_id, payload)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:                               # noqa: BLE001
+            log.warning("Flash-Next stream failed (%s); trying once more", str(exc)[:200])
+            await asyncio.sleep(5)
+            return await _stream_flash(thread_id, payload)
     thinking, content, last, final = [], [], 0.0, {}
     async with httpx.AsyncClient(timeout=httpx.Timeout(900.0, connect=20.0)) as client:
         async with client.stream("POST", f"{cfg.OLLAMA_URL}/api/chat",
