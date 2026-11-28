@@ -1294,6 +1294,13 @@ def _cancel_podcast(user, args, base):
     return _get_podcast(user, args, base)
 
 
+async def _recast_podcast_hosts(user, args, base):
+    from app import podcast
+    names = args.get("hosts") if isinstance(args.get("hosts"), list) else []
+    await podcast.recast_hosts(user, str(args.get("podcast_id") or ""), names)
+    return _get_podcast(user, args, base)
+
+
 def _retry_podcast(user, args, base):
     from app import podcast
     podcast.retry(user, str(args.get("podcast_id") or ""))
@@ -1925,6 +1932,15 @@ TOOLS = [
           "Stop a podcast run now (frees the GPU). Use it the moment the person says stop or "
           "changes their mind about the topic.",
           _cancel_podcast, {"podcast_id": {"type": "string"}}, ["podcast_id"], destructive=True),
+    _tool("recast_podcast_hosts", "Change a podcast's hosts",
+          "Make the person's own characters (by name, e.g. from their Library) the two hosts of "
+          "a podcast that is not built yet -- even while it runs. The research and fact-checks "
+          "are kept; the script is written again with them, and their looks and voices are "
+          "used. Use it when the person names the hosts they want after make_podcast started.",
+          _recast_podcast_hosts, {"podcast_id": {"type": "string"},
+                                  "hosts": {"type": "array", "items": {"type": "string"},
+                                            "description": "the two names, host A first"}},
+          ["podcast_id", "hosts"]),
     _tool("retry_podcast", "Retry a podcast",
           "Continue a failed or cancelled podcast from where it stopped (finished steps are kept).",
           _retry_podcast, {"podcast_id": {"type": "string"}}, ["podcast_id"]),

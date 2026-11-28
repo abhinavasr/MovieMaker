@@ -77,7 +77,7 @@ WATCH = {"project": ("get_status", "project_id"), "image": ("get_image", "image_
 CREATES = {"generate_image": "image", "generate_speech": "speech", "generate_music": "music",
            "resing_song": "voice_job", "sing_song": "voice_job", "speak_as_voice": "voice_job",
            "train_voice": "voice_job", "make_podcast": "podcast", "retry_podcast": "podcast",
-           "continue_podcast": "podcast", "hear_voice": "speech"}
+           "continue_podcast": "podcast", "hear_voice": "speech", "recast_podcast_hosts": "podcast"}
 
 _wake = asyncio.Event()
 _active: dict[str, asyncio.Task] = {}
@@ -1717,7 +1717,16 @@ async def _turn(thread_id: str) -> None:
     if db.one("SELECT 1 FROM agent_files WHERE thread_id=? AND status='processing'", (thread_id,)):
         _activity(thread_id, "reading your files (transcribing audio, extracting text)", "queued")
         await agentfiles.wait_ready(thread_id)
-    turn = GpuTurn(thread_id, urgent=not trigger.startswith(("review:", "regular check-in")))
+    urgent = not trigger.startswith(("review:", "regular check-in"))
+    if not urgent and _planner_lock.locked():
+        # A check-in never waits behind a long job (a podcast holds the planner for its whole
+        # research and script): it tries again in a few minutes, so the one assistant worker
+        # stays free for the person's messages (2026-11-28: a waiting check-in kept a message
+        # unanswered for 11 minutes).
+        _set(thread_id, status="watching", reason="", activity="checking again in a few minutes",
+             next_review_at=_now() + 180, stage_at=_now())
+        return
+    turn = GpuTurn(thread_id, urgent=urgent)
     final_state = "done"
     try:
         for rnd in range(MAX_ROUNDS):

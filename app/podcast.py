@@ -1856,6 +1856,72 @@ def retry(user: auth.User, podcast_id: str) -> dict:
     return view(_row(podcast_id))
 
 
+async def recast_hosts(user: auth.User, podcast_id: str, names: list) -> dict:
+    """Change a podcast's two hosts to the person's own characters (by name, from their
+    Library or productions) before the production is built -- the research and fact-checks
+    are kept; the hosts' points and debate points are renamed and the script is written again
+    with them (2026-11-28, the person, while a run was writing: "please make sure we use
+    existing characters Mahira and Abhay")."""
+    from app import editor
+    row = owned(user, podcast_id)
+    if "built" in _state(row) or row["status"] in ("building", "done"):
+        raise HTTPException(409, "this podcast is already in the editor: change the characters "
+                                 "there (the production's references)")
+    names = [" ".join(str(n or "").split())[:60] for n in (names or [])][:2]
+    if len(names) != 2 or not all(names) or names[0].lower() == names[1].lower():
+        raise HTTPException(400, "give the two hosts' names, e.g. [\"Mahira Singh\", \"Abhay Rai\"]")
+    if row["status"] in ACTIVE:
+        _stop_now(podcast_id, "Pausing to change the hosts")
+        for _ in range(90):                           # let the run task finish stopping
+            if _current.get("id") != podcast_id:
+                break
+            await asyncio.sleep(1)
+    row = _row(podcast_id)
+    config, state = _config(row), _state(row)
+    lib = {editor.name_key(x["name"]): x for x in editor.library(user) if x["kind"] == "character"}
+    pairs = []
+    for i, new in enumerate(names):
+        h = config["hosts"][i]
+        src = lib.get(editor.name_key(new))
+        if src:
+            new = src["name"]
+            if src.get("description"):
+                h["look"] = src["description"][:600]
+        old = h["name"]
+        h["name"] = new
+        pairs.append((old, new))
+        firsts = [w for w in old.split() if not re.match(r"(?i)^(dr|mr|mrs|ms|prof)\.?$", w)]
+        if firsts and new.split():
+            pairs.append((firsts[0], new.split()[0]))
+    config["names_given"] = True
+    config.pop("failed_at", None)
+
+    def ren(x):
+        if isinstance(x, str):
+            for a, b in pairs:
+                x = re.sub(rf"\b{re.escape(a)}\b", b, x)
+            return x
+        if isinstance(x, list):
+            return [ren(v) for v in x]
+        if isinstance(x, dict):
+            return {k: ren(v) for k, v in x.items()}
+        return x
+    keep_hosts = config["hosts"]
+    config = ren(config)
+    config["hosts"] = keep_hosts
+    state = ren(state)
+    state.pop("script", None)
+    state.pop("script_parts", None)
+    back = "writing" if "orchestrator" in state else "debating" if "b_persona" in state else "researching"
+    db.run("UPDATE podcasts SET status=?, error=NULL, config=?, state=?, updated_at=? WHERE id=?",
+           (back, json.dumps(config), json.dumps(state), db.now(), podcast_id))
+    _log(podcast_id, f"Hosts are now {names[0]} and {names[1]}"
+                     f"{' (your characters: their looks and voices are used)' if lib else ''}; "
+                     "the research is kept and the script is written again with them")
+    kick()
+    return view(_row(podcast_id))
+
+
 def delete(user: auth.User, podcast_id: str) -> None:
     row = owned(user, podcast_id)
     if row["status"] in ACTIVE:
