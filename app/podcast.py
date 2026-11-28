@@ -260,6 +260,15 @@ def create(user: auth.User, body: dict, thread_id: str | None = None) -> str:
 _flash_off_until = [0.0]
 
 
+def _flash_thinks(label: str) -> bool:
+    """Flash-Next thinks only where judgement matters: the showrunner, the hosts' points, the
+    orchestrator, the charts and the script. Research and fact-checking mostly pull facts out
+    of pages; with thinking on they spent 8-14k tokens each at ~40 tok/s and three ran out of
+    room and started over -- 41 minutes for one host's research (2026-11-28; the person chose
+    "turn thinking off for research and fact-checking")."""
+    return not re.search(r"(_collect|_synth|_fact|_recheck|_revise|^queries)$", label)
+
+
 async def _flash_llm(podcast_id: str, turn, messages: list, schema: dict, label: str,
                      think: int, est: int) -> dict | None:
     """One podcast model call on Qwen3.8-Flash-Next (llama-swap loads it on the first call of a
@@ -280,7 +289,7 @@ async def _flash_llm(podcast_id: str, turn, messages: list, schema: dict, label:
         body = {"model": cfg.PODCAST_LLM_MODEL, "messages": messages, "max_tokens": think,
                 "temperature": 0.5 if attempt == 0 else 0.75,
                 "response_format": {"type": "json_schema", "json_schema": {"name": "answer", "schema": schema}},
-                "chat_template_kwargs": {"enable_thinking": True}}
+                "chat_template_kwargs": {"enable_thinking": _flash_thinks(label)}}
         async with httpx.AsyncClient(timeout=httpx.Timeout(1800, connect=10)) as c:
             r = await c.post(f"{cfg.PODCAST_LLM_URL}/v1/chat/completions", json=body)
         r.raise_for_status()
